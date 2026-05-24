@@ -1,0 +1,291 @@
+import { db } from "../../config/firebaseConnection/firebase.js";
+import admin from "firebase-admin";
+
+// ─────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────
+
+/**
+ * Resolve car brand + model name from carID
+ */
+const resolveCarName = async (carID) => {
+  if (!carID) return "—";
+  try {
+    const carDoc = await db.collection("cars").doc(carID).get();
+    if (!carDoc.exists) return "—";
+    const { modelID } = carDoc.data();
+    if (!modelID) return "—";
+    const modelDoc = await db.collection("model").doc(modelID).get();
+    if (!modelDoc.exists) return "—";
+    const { brandID, modelName } = modelDoc.data();
+    const brandDoc = await db.collection("brand").doc(brandID).get();
+    const brandName = brandDoc.exists ? brandDoc.data().brandName : "";
+    return [brandName, modelName].filter(Boolean).join(" ") || "—";
+  } catch { return "—"; }
+};
+
+/**
+ * Resolve user full name from userID
+ * Priority: userDetails.firstName + lastName → user.username → user.email
+ */
+const resolveUserName = async (userID) => {
+  if (!userID) return "—";
+  try {
+    const [detailDoc, userDoc] = await Promise.all([
+      db.collection("userDetails").doc(userID).get(),
+      db.collection("user").doc(userID).get(),
+    ]);
+    const { firstName = "", lastName = "" } = detailDoc.exists ? detailDoc.data() : {};
+    const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+    if (fullName) return fullName;
+    const { username = "", email = "" } = userDoc.exists ? userDoc.data() : {};
+    return username || email || "—";
+  } catch { return "—"; }
+};
+
+/**
+ * Write a notification to the `notifications` collection.
+ * RULE 1 (before trip): type = "before_trip_damage"
+ * RULE 2 (after trip):  type = "after_trip_damage"
+ *
+ * Idempotent for before_trip_damage (one per bookingID).
+ * Idempotent for after_trip_damage  (one per bookingID + partName combo).
+ */
+const writeNotification = async (payload) => {
+  try {
+    // Idempotency check
+    let existingQuery = db.collection("notifications")
+      .where("type",      "==", payload.type)
+      .where("bookingID", "==", payload.bookingID);
+    if (payload.type === "after_trip_damage" && payload.partName) {
+      existingQuery = existingQuery.where("partName", "==", payload.partName);
+    }
+    const existing = await existingQuery.limit(1).get();
+    if (!existing.empty) {
+      console.log(`[NOTIF] Skipped duplicate: ${payload.type} — ${payload.bookingID}`);
+      return;
+    }
+    await db.collection("notifications").add({
+      ...payload,
+      isRead: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    console.log(`[NOTIF] Written: ${payload.type} — ${payload.message?.slice(0, 60)}`);
+  } catch (err) {
+    console.error("[NOTIF] Failed to write notification:", err.message);
+  }
+};
+
+/**
+ * Delete all notifications of a given type for a bookingID (auto-dismiss when status is good).
+ */
+const dismissNotifications = async (type, bookingID) => {
+  try {
+    const snap = await db.collection("notifications")
+      .where("type",      "==", type)
+      .where("bookingID", "==", bookingID)
+      .get();
+    if (snap.empty) return;
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+    console.log(`[NOTIF] Auto-dismissed ${snap.size} "${type}" notif(s) for booking: ${bookingID}`);
+  } catch (err) {
+    console.error("[NOTIF] Failed to dismiss notifications:", err.message);
+  }
+};
+
+// ─────────────────────────────────────────────
+// Get inventory records for a booking (both before + after)
+// ─────────────────────────────────────────────
+export const getInventoryByBooking = async (bookingID) => {
+  const [beforeSnap, afterSnap] = await Promise.all([
+    db.collection("inventoryBeforeTrip").where("bookingID", "==", bookingID).get(),
+    db.collection("inventoryAfterTrip").where("bookingID", "==", bookingID).get(),
+  ]);
+
+  const pickLatest = (snap) => {
+    if (snap.empty) return null;
+    const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    docs.sort((a, b) => {
+      const ta = a.recordedAt?._seconds ?? 0;
+      const tb = b.recordedAt?._seconds ?? 0;
+      return tb - ta;
+    });
+    return docs[0];
+  };
+
+  return {
+    before: pickLatest(beforeSnap),
+    after:  pickLatest(afterSnap),
+  };
+};
+
+// ─────────────────────────────────────────────
+// Save / update Before Trip record
+// Triggers RULE 1 notification if damage detected
+// ─────────────────────────────────────────────
+export const saveBeforeTrip = async ({ bookingID, carID, parts }) => {
+  if (!bookingID || !carID || !Array.isArray(parts)) {
+    throw new Error("bookingID, carID, and parts[] are required.");
+  }
+
+  const damageParts = parts.filter(p => p.status !== "Good" && p.status !== "New");
+  const inventoryOverallStatus = damageParts.length > 0 ? "has damage" : "good";
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+
+  // Upsert — check if a record already exists for this booking
+  const existingSnap = await db
+    .collection("inventoryBeforeTrip")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+
+  if (!existingSnap.empty) {
+    await existingSnap.docs[0].ref.update({ inventoryOverallStatus, damageParts, recordedAt: timestamp });
+  } else {
+    await db.collection("inventoryBeforeTrip").add({
+      bookingID,
+      carID,
+      inventoryOverallStatus,
+      damageParts,
+      recordedAt: timestamp,
+    });
+  }
+
+  // ── RULE 1: Notify if damage before trip; dismiss if now clean ──
+  if (damageParts.length > 0) {
+    const carName = await resolveCarName(carID);
+    await writeNotification({
+      type:      "before_trip_damage",
+      title:     "Pre-Trip Damage Detected",
+      message:   `The car ${carName} has damage before trip. Please schedule a repair.`,
+      carID,
+      bookingID,
+    });
+  } else {
+    await dismissNotifications("before_trip_damage", bookingID);
+  }
+
+  return { success: true, inventoryOverallStatus, damageParts };
+};
+
+// ─────────────────────────────────────────────
+// Save / update After Trip record
+// Triggers RULE 2 notification per damaged/stolen part
+// ─────────────────────────────────────────────
+export const saveAfterTrip = async ({ bookingID, carID, parts, userID }) => {
+  if (!bookingID || !carID || !Array.isArray(parts)) {
+    throw new Error("bookingID, carID, and parts[] are required.");
+  }
+
+  // ── Guard: After Trip can only be saved if booking is completed ──
+  const bookingSnap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+  let bookingStatus = null;
+  if (!bookingSnap.empty) {
+    bookingStatus = bookingSnap.docs[0].data()?.status?.toLowerCase();
+  } else {
+    const directDoc = await db.collection("bookings").doc(bookingID).get();
+    if (directDoc.exists) bookingStatus = directDoc.data()?.status?.toLowerCase();
+  }
+  if (bookingStatus !== "completed") {
+    throw new Error(
+      `Cannot save After Trip record: booking status is "${bookingStatus || "unknown"}". ` +
+      `After Trip can only be saved once the booking is Completed.`
+    );
+  }
+
+  const damageParts = parts.filter(p => ["Damaged", "Stolen", "Missing"].includes(p.status));
+  const inventoryOverallStatus = damageParts.length > 0 ? "has damage" : "good";
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+
+  // Upsert
+  const existingSnap = await db
+    .collection("inventoryAfterTrip")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+
+  if (!existingSnap.empty) {
+    await existingSnap.docs[0].ref.update({ inventoryOverallStatus, damageParts, recordedAt: timestamp });
+  } else {
+    await db.collection("inventoryAfterTrip").add({
+      bookingID,
+      carID,
+      inventoryOverallStatus,
+      damageParts,
+      recordedAt: timestamp,
+    });
+  }
+
+  // ── RULE 2: Notify per damaged/stolen part; dismiss if now clean ──
+  if (damageParts.length > 0 && userID) {
+    const [carName, userName] = await Promise.all([
+      resolveCarName(carID),
+      resolveUserName(userID),
+    ]);
+
+    await Promise.all(
+      damageParts.map(part => {
+        const condition = part.status === "Stolen" ? "stolen" : "damaged";
+        return writeNotification({
+          type:       "after_trip_damage",
+          title:      "Post-Trip Damage Reported",
+          message:    `The part ${part.carPartName} on ${carName} was ${condition} by ${userName}. Please contact him/her and arrange payment.`,
+          carID,
+          bookingID,
+          userID,
+          partName:   part.carPartName,
+          partStatus: part.status,
+        });
+      })
+    );
+  } else if (damageParts.length === 0) {
+    await dismissNotifications("after_trip_damage", bookingID);
+  }
+
+  return { success: true, inventoryOverallStatus, damageParts };
+};
+
+// ─────────────────────────────────────────────
+// Get nearest upcoming booking for a car
+// Returns the approved/completed booking with the nearest startDateTime
+// that hasn't ended yet (today or future)
+// ─────────────────────────────────────────────
+export const getNearestBookingForCar = async (carID) => {
+  if (!carID) throw new Error("carID is required.");
+
+  const snap = await db.collection("bookings").where("carID", "==", carID).get();
+  const all  = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+  const nowSec = Date.now() / 1000;
+
+  const toSec = (val) => {
+    if (!val) return NaN;
+    if (val?._seconds !== undefined) return val._seconds;
+    if (typeof val?.toDate === "function") return val.toDate().getTime() / 1000;
+    if (typeof val === "number") return val;
+    const ms = new Date(val).getTime();
+    return isNaN(ms) ? NaN : ms / 1000;
+  };
+
+  const upcoming = all
+    .filter(b => {
+      const status = b.status?.toLowerCase();
+      if (!["approved", "completed"].includes(status)) return false;
+      const endSec   = toSec(b.endDateTime);
+      const startSec = toSec(b.startDateTime);
+      return (!isNaN(endSec) && endSec > nowSec) || (!isNaN(startSec) && startSec >= nowSec - 86400);
+    })
+    .sort((a, b) => toSec(a.startDateTime) - toSec(b.startDateTime));
+
+  if (!upcoming.length) return null;
+
+  const booking = upcoming[0];
+  const bID     = booking.bookingID || booking.id;
+
+  // Resolve user name for the booking card display
+  const userName = booking.userID ? await resolveUserName(booking.userID) : "—";
+
+  return { ...booking, bookingID: bID, resolvedUserName: userName };
+};

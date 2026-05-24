@@ -1,0 +1,5 @@
+export const ALLOWED_ROLES = {
+  OWNER: "1BX4V7M43t6barbPd4BP",
+  ADMIN: "5bhRYMrDkjrs9VlFFY4u",
+  SUPERVISOR: "fFA8G2R2ANLbVsH00jlv"
+};
