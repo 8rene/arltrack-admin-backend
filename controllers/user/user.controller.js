@@ -1,4 +1,4 @@
-import { db } from "../../../arltrack-admin-backend/config/firebaseConnection/firebase.js";
+import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 
 export const deleteUser = async (req, res) => {

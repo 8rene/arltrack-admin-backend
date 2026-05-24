@@ -1,4 +1,4 @@
-import { db } from "../../../arltrack-admin-backend/config/firebaseConnection/firebase.js";
+import { db } from "../../config/firebaseConnection/firebase.js";
 import { generateToken } from "../../utils/jwt/jwt.util.js";
 import { User } from "../../models/user/user.model.js";
 import { StaffUser } from "../../models/staffUser/staffUser.model.js";
