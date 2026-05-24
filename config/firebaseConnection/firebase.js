@@ -1,8 +1,8 @@
 import admin from "firebase-admin";
-import { createRequire } from "module";
 
-const require = createRequire(import.meta.url);
-const serviceAccount = require("./firebase.key.json");
+const serviceAccount = JSON.parse(
+  process.env.FIREBASE_SERVICE_ACCOUNT.replace(/\\n/g, '\n')
+);
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -11,5 +11,3 @@ if (!admin.apps.length) {
 }
 
 export const db = admin.firestore();
-
-
