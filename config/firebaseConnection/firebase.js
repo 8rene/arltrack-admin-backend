@@ -1,8 +1,10 @@
 import admin from "firebase-admin";
 
-const serviceAccount = JSON.parse(
-  process.env.FIREBASE_SERVICE_ACCOUNT.replace(/\\n/g, '\n')
-);
+const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+const serviceAccount = JSON.parse(raw);
+
+// Fix private key newlines if corrupted
+serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
 
 if (!admin.apps.length) {
   admin.initializeApp({
