@@ -1,11 +1,11 @@
 import admin from "firebase-admin";
 
-// Replace actual newlines AND escaped newlines in the raw string
-const raw = process.env.FIREBASE_SERVICE_ACCOUNT
-  .replace(/\n/g, '\\n')   // convert literal newlines to \n
-  .replace(/\\n/g, '\\n'); // keep escaped ones as-is
+// Remove any literal newlines that may wrap the JSON string (Vercel sometimes adds them)
+const raw = process.env.FIREBASE_SERVICE_ACCOUNT.replace(/\r?\n/g, '');
 
 const serviceAccount = JSON.parse(raw);
+
+// Restore actual newlines in the private key (\\n → real newline)
 serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
 
 if (!admin.apps.length) {
