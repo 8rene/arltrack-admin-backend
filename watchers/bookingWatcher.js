@@ -12,7 +12,7 @@
  *   so there's a permanent record of what was notified.
  */
 
-import { db } from "../../config/firebaseConnection/firebase.js";
+import { db } from "../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 
 // Statuses that are "active" in notifications (shown in bell/alerts)
