@@ -64,8 +64,11 @@ export const getVehiclesInUse = async () => {
 };
 
 export const getRecentBookings = async () => {
-  // Fetch ALL bookings (no status filter, no limit) — sort + limit client-side
-  const snap = await db.collection("bookings").get();
+  // Fetch only the 20 most recent bookings ordered server-side
+  const snap = await db.collection("bookings")
+    .orderBy("updatedAt", "desc")
+    .limit(20)
+    .get();
 
   const bookings = [];
   snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() }));
