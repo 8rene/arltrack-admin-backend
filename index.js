@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { registerAuthRoutes }            from "./routes/atuh/auth.routes.js";
+import { registerAuthRoutes } from "./routes/auth/auth.routes.js";
 import { registerDashboardRoutes }       from "./routes/dashboard/dashboard.routes.js";
 import { registerAnalyticsRoutes }       from "./routes/analytics/analytics.routes.js";
 import { registerBookingRoutes }         from "./routes/booking/booking.routes.js";
