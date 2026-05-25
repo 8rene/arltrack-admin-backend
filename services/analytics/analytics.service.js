@@ -28,7 +28,7 @@ export const getDailyAnalytics = async () => {
     const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
     const h = d.getHours();
     const status = (data.status || "").toLowerCase();
-    if (status !== "paid" && status !== "completed") return;
+    if (status !== "approved") return;
     if (h >= 0 && h < 24) hours[h].revenue += parsePaymentTotal(data);
   });
 
@@ -65,7 +65,7 @@ export const getWeeklyAnalytics = async () => {
     const wd = d.getDay(); // 0=Sun
     const idx = wd === 0 ? 6 : wd - 1; // Mon=0 ... Sun=6
     const status = (data.status || "").toLowerCase();
-    if (status !== "paid" && status !== "completed") return;
+    if (status !== "approved") return;
     days[idx].revenue += parsePaymentTotal(data);
   });
 
@@ -95,7 +95,7 @@ export const getMonthlyAnalytics = async () => {
     const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
     const wi = Math.min(Math.floor((d.getDate() - 1) / 7), 4);
     const status = (data.status || "").toLowerCase();
-    if (status !== "paid" && status !== "completed") return;
+    if (status !== "approved") return;
     weeks[wi].revenue += parsePaymentTotal(data);
   });
 
@@ -125,7 +125,7 @@ export const getYearlyAnalytics = async () => {
     const data = doc.data();
     const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
     const status = (data.status || "").toLowerCase();
-    if (status !== "paid" && status !== "completed") return;
+    if (status !== "approved") return;
     months[d.getMonth()].revenue += parsePaymentTotal(data);
   });
 
