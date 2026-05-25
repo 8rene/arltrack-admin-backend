@@ -8,13 +8,7 @@
 //   Fields       : deviceId, lat, lng, updatedAt (ISO string)
 
 import { db } from "../../config/firebaseConnection/firebase.js";
-import {
-  doc,
-  setDoc,
-  getDocs,
-  collection,
-  serverTimestamp,
-} from "firebase/firestore";
+import admin from "firebase-admin";
 
 // In-memory cache so reads are instant (no Firestore round-trip on every poll)
 const cache = {};
@@ -33,11 +27,10 @@ export const saveLocation = async (deviceId, lat, lng) => {
   // Update in-memory cache immediately
   cache[deviceId] = record;
 
-  // Persist to Firestore
+  // Persist to Firestore using admin SDK
   try {
-    await setDoc(
-      doc(db, "gpsLocations", deviceId),
-      { ...record, savedAt: serverTimestamp() },
+    await db.collection("gpsLocations").doc(deviceId).set(
+      { ...record, savedAt: admin.firestore.FieldValue.serverTimestamp() },
       { merge: true }
     );
   } catch (err) {
@@ -59,7 +52,7 @@ export const getAllLocations = () => Object.values(cache);
  */
 export const seedCacheFromFirestore = async () => {
   try {
-    const snap = await getDocs(collection(db, "gpsLocations"));
+    const snap = await db.collection("gpsLocations").get();
     snap.forEach((d) => {
       const data = d.data();
       cache[data.deviceId] = {
