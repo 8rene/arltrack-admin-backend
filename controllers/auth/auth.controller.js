@@ -69,7 +69,7 @@ export const login = async (req, res) => {
     // 6. GET ROLE — using Role model shape
     const roleSnap = await db
       .collection("roles")
-      .doc(staffData.RoleID || staffData.roleID)
+      .doc(staffData.RoleID)
       .get();
 
     if (!roleSnap.exists) {
