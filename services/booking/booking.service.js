@@ -99,7 +99,7 @@ export const getAllBookings = async (statusFilter) => {
 
   let rows = [];
   if (!filter || filter === "all") {
-    const statuses = ["pending", "approved", "completed", "cancelled"];
+    const statuses = ["pending", "approved", "completed", "cancelled", "cancellation_request"];
     const snaps = await Promise.all(
       statuses.map((s) => db.collection("bookings").where("status", "==", s).get())
     );
