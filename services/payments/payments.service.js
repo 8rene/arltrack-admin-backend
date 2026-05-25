@@ -12,14 +12,7 @@ const resolveCustomerName = async (userID) => {
       const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
       if (fullName) return fullName;
     }
-    // Fallback: doc by id
-    const detailDoc = await db.collection("userDetails").doc(userID).get();
-    if (detailDoc.exists) {
-      const { firstName = "", lastName = "" } = detailDoc.data();
-      const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
-      if (fullName) return fullName;
-    }
-    // Last fallback: username from user collection
+    // Fallback: username from user collection (skip redundant userDetails doc fetch)
     const userDoc = await db.collection("user").doc(userID).get();
     if (userDoc.exists) {
       const { username = "", email = "" } = userDoc.data();
