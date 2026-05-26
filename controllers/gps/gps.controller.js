@@ -104,3 +104,4 @@ export const updateGpsDevice = async (req, res) => {
     return res.status(500).json({ status: "error", message: "Failed to update GPS device." });
   }
 };
+
