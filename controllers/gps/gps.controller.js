@@ -10,9 +10,9 @@ export const receiveLocation = async (req, res) => {
   }
   const data = await saveLocation(device_id, lat, lng);
 
-  // Also update lastLocation in gpsLocation collection if this device exists
+  // Also update lastLocation in gpsDevice collection if this device exists
   try {
-    const snap = await db.collection("gpsLocation").where("gpsLocationID", "==", device_id).limit(1).get();
+    const snap = await db.collection("gpsDevice").where("gpsDeviceID", "==", device_id).limit(1).get();
     if (!snap.empty) {
       await snap.docs[0].ref.update({
         lastLocation: {
@@ -23,7 +23,7 @@ export const receiveLocation = async (req, res) => {
       });
     }
   } catch (err) {
-    console.error("[GPS] gpsLocation update failed:", err.message);
+    console.error("[GPS] gpsDevice update failed:", err.message);
   }
 
   return res.json({ status: "ok", data });
@@ -40,10 +40,10 @@ export const getAllDeviceLocations = (req, res) => {
   return res.json({ status: "ok", data: getAllLocations() });
 };
 
-/** GET /api/gps/devices  — Get all GPS devices from gpsLocation collection */
+/** GET /api/gps/devices  — Get all GPS devices from gpsDevice collection */
 export const getAllGpsDevices = async (req, res) => {
   try {
-    const snap = await db.collection("gpsLocation").orderBy("gpsName").get();
+    const snap = await db.collection("gpsDevice").orderBy("gpsName").get();
     const devices = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     return res.json({ status: "ok", data: devices });
   } catch (err) {
@@ -52,24 +52,22 @@ export const getAllGpsDevices = async (req, res) => {
   }
 };
 
-/** POST /api/gps/devices  — Add a new GPS device */
+/** POST /api/gps/devices  — Add a new GPS device (assigned = false by default) */
 export const addGpsDevice = async (req, res) => {
   try {
-    // Get count to auto-name the device
-    const snap  = await db.collection("gpsLocation").get();
+    // Count all docs to auto-generate name
+    const snap  = await db.collection("gpsDevice").get();
     const count = snap.size + 1;
 
-    const docRef = db.collection("gpsLocation").doc();
+    const docRef = db.collection("gpsDevice").doc();
+
     await docRef.set({
-      gpsLocationID: docRef.id,
-      gpsName:       `GPS ${count}`,
-      carID:         "",
-      lastLocation: {
-        latitude:  0,
-        longitude: 0,
-      },
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      gpsDeviceID: docRef.id,
+      gpsName:     `Gps Device Location ${count}`,
+      assigned:    false,
+      carID:       "",
+      createdAt:   admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt:   admin.firestore.FieldValue.serverTimestamp(),
     });
 
     const newDoc = await docRef.get();
@@ -80,13 +78,17 @@ export const addGpsDevice = async (req, res) => {
   }
 };
 
-/** PUT /api/gps/devices/:id  — Assign or unassign a car to a GPS device */
-export const updateGpsDevice = async (req, res) => {
+/** PUT /api/gps/devices/:id/assign  — Assign a car to a GPS device → sets assigned = true */
+export const assignCarToDevice = async (req, res) => {
   const { id } = req.params;
   const { carID } = req.body;
 
+  if (!carID) {
+    return res.status(400).json({ status: "error", message: "carID is required." });
+  }
+
   try {
-    const docRef = db.collection("gpsLocation").doc(id);
+    const docRef = db.collection("gpsDevice").doc(id);
     const doc    = await docRef.get();
 
     if (!doc.exists) {
@@ -94,14 +96,14 @@ export const updateGpsDevice = async (req, res) => {
     }
 
     await docRef.update({
-      carID:     carID || "",
+      carID:     carID,
+      assigned:  true,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    return res.json({ status: "ok", message: "GPS device updated." });
+    return res.json({ status: "ok", message: "Car assigned to GPS device." });
   } catch (err) {
-    console.error("[GPS] updateGpsDevice error:", err.message);
-    return res.status(500).json({ status: "error", message: "Failed to update GPS device." });
+    console.error("[GPS] assignCarToDevice error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to assign car." });
   }
 };
-

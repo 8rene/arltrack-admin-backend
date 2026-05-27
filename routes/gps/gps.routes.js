@@ -4,7 +4,7 @@ import {
   getAllDeviceLocations,
   getAllGpsDevices,
   addGpsDevice,
-  updateGpsDevice,
+  assignCarToDevice,
 } from "../../controllers/gps/gps.controller.js";
 
 export const registerGpsRoutes = (app) => {
@@ -12,9 +12,9 @@ export const registerGpsRoutes = (app) => {
   app.post("/api/gps", receiveLocation);
 
   // GPS device management
-  app.get("/api/gps/devices",      getAllGpsDevices);
-  app.post("/api/gps/devices",     addGpsDevice);
-  app.put("/api/gps/devices/:id",  updateGpsDevice);
+  app.get("/api/gps/devices",             getAllGpsDevices);
+  app.post("/api/gps/devices",            addGpsDevice);
+  app.put("/api/gps/devices/:id/assign",  assignCarToDevice);
 
   // Frontend reads locations — MUST be after /devices routes
   app.get("/api/gps",      getAllDeviceLocations);
