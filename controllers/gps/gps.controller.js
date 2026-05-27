@@ -62,9 +62,10 @@ export const getDeviceLocation = async (req, res) => {
       const doc = locSnap.docs[0].data();
       return res.json({
         deviceId,
-        lat:       parseFloat(doc.latitude)   || null,
-        lng:       parseFloat(doc.longtitude) || parseFloat(doc.longitude) || null,
-        updatedAt: doc.updatedAt?.toDate?.()?.toISOString?.() || null,
+        lat:          parseFloat(doc.latitude)   || null,
+        lng:          parseFloat(doc.longtitude) || parseFloat(doc.longitude) || null,
+        lastLocation: doc.lastLocation || null,
+        updatedAt:    doc.updatedAt?.toDate?.()?.toISOString?.() || null,
       });
     }
 
@@ -78,9 +79,10 @@ export const getDeviceLocation = async (req, res) => {
       if (loc && typeof loc === "object" && loc.latitude && loc.longitude) {
         return res.json({
           deviceId,
-          lat:       loc.latitude,
-          lng:       loc.longitude,
-          updatedAt: doc.updatedAt?.toDate?.()?.toISOString?.() || null,
+          lat:          loc.latitude,
+          lng:          loc.longitude,
+          lastLocation: null,
+          updatedAt:    doc.updatedAt?.toDate?.()?.toISOString?.() || null,
         });
       }
     }
@@ -106,10 +108,11 @@ export const getAllDeviceLocations = async (req, res) => {
         if (!lat || !lng) return null;
 
         return {
-          deviceId:  doc.gpsDeviceID,
+          deviceId:     doc.gpsDeviceID,
           lat,
           lng,
-          updatedAt: doc.updatedAt?.toDate?.()?.toISOString?.() || null,
+          lastLocation: doc.lastLocation || null,
+          updatedAt:    doc.updatedAt?.toDate?.()?.toISOString?.() || null,
         };
       })
       .filter(Boolean);

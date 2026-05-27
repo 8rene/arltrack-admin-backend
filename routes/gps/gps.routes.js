@@ -12,11 +12,11 @@ export const registerGpsRoutes = (app) => {
   app.post("/api/gps", receiveLocation);
 
   // GPS device management
-  app.get("/api/gps/devices",             getAllGpsDevices);
-  app.post("/api/gps/devices",            addGpsDevice);
-  app.put("/api/gps/devices/:id/assign",  assignCarToDevice);
+  app.get("/api/gps/devices",            getAllGpsDevices);
+  app.post("/api/gps/devices",           addGpsDevice);
+  app.put("/api/gps/devices/:id/assign", assignCarToDevice);
 
   // Frontend reads locations — MUST be after /devices routes
-  app.get("/api/gps",      getAllDeviceLocations);
-  app.get("/api/gps/:id",  getDeviceLocation);
+  app.get("/api/gps",     getAllDeviceLocations);
+  app.get("/api/gps/:id", getDeviceLocation);
 };
