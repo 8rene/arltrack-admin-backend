@@ -142,7 +142,9 @@ export const generateReport = async (period) => {
       avgRevenuePerBooking: totalBookings > 0 ? Math.round(totalRevenue / totalBookings) : 0,
     },
     paymentsByGateway: byMethod,
-    bookingsByStatus: bookByStatus,
+    bookingsByStatus: Object.fromEntries(
+      Object.entries(bookByStatus).filter(([k]) => ["completed", "cancelled"].includes(k.toLowerCase()))
+    ),
     payments: paymentRows,
     bookings: bookingRows,
   };
