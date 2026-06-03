@@ -85,7 +85,9 @@ export const generateReport = async (period) => {
     totalBalance += (amount - amountPaid);
 
     byStatus[status] = (byStatus[status] || 0) + 1;
-    const gw = p.paymentMethod || "Other";
+    // Normalize gateway name (prevents "gcash" vs "GCash" duplicates)
+    const rawGw = p.paymentMethod || "Other";
+    const gw = rawGw.toLowerCase() === "gcash" ? "GCash" : rawGw;
     byMethod[gw]     = (byMethod[gw]     || 0) + amountPaid;
 
     paymentRows.push({
@@ -139,7 +141,6 @@ export const generateReport = async (period) => {
       totalBookings,
       avgRevenuePerBooking: totalBookings > 0 ? Math.round(totalRevenue / totalBookings) : 0,
     },
-    paymentsByStatus: byStatus,
     paymentsByGateway: byMethod,
     bookingsByStatus: bookByStatus,
     payments: paymentRows,
