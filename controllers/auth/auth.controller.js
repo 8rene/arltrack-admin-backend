@@ -13,7 +13,7 @@ export const login = async (req, res) => {
       });
     }
 
-    // 1. VERIFY FIREBASE ID TOKEN → get Firebase UID
+    // 1. VERIFY FIREBASE ID TOKEN → get email + uid
     let decodedToken;
     try {
       decodedToken = await admin.auth().verifyIdToken(idToken);
@@ -23,20 +23,22 @@ export const login = async (req, res) => {
       });
     }
 
-    const firebaseUID = decodedToken.uid; // e.g. "6wR71LoZsvZMOXYAF6q4"
+    const firebaseUID = decodedToken.uid;
     const email = decodedToken.email;
 
-    // 2. GET staffUser doc — document ID IS the Firebase UID
-    const staffDocRef = db.collection("staffUser").doc(firebaseUID);
-    const staffSnap = await staffDocRef.get();
+    // 2. FIND staffUser by email field
+    const staffSnap = await db
+      .collection("staffUser")
+      .where("email", "==", email)
+      .get();
 
-    if (!staffSnap.exists) {
+    if (staffSnap.empty) {
       return res.status(403).json({
-        message: "Access denied. Your account does not have staff-level permissions.",
+        message: "Access denied. No staff account found with this email.",
       });
     }
 
-    const staffData = staffSnap.data();
+    const staffData = staffSnap.docs[0].data();
 
     // 3. CHECK STATUS
     if (staffData.status && staffData.status.toLowerCase() !== "active") {
@@ -45,8 +47,8 @@ export const login = async (req, res) => {
       });
     }
 
-    // 4. GET userID from staffUser doc → use it to find user doc
-    const userID = staffData.userID; // e.g. "JrDVMFT247gPfcA6DP8PG9OLLlt2"
+    // 4. GET userID from staffUser doc
+    const userID = staffData.userID;
 
     if (!userID) {
       return res.status(403).json({
@@ -54,9 +56,8 @@ export const login = async (req, res) => {
       });
     }
 
-    // 5. GET user doc — document ID IS the userID
-    const userDocRef = db.collection("user").doc(userID);
-    const userSnap = await userDocRef.get();
+    // 5. GET user doc — doc ID is the userID
+    const userSnap = await db.collection("user").doc(userID).get();
 
     if (!userSnap.exists) {
       return res.status(403).json({
@@ -73,7 +74,7 @@ export const login = async (req, res) => {
       });
     }
 
-    // 6. RESOLVE roleName — try local map first, fallback to Firestore
+    // 6. RESOLVE roleName — local map first, fallback to Firestore
     let roleName = roleIDToName(roleID);
 
     if (!roleName) {
