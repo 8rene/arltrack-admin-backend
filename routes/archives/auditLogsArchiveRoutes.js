@@ -4,14 +4,13 @@ import {
   deleteAuditLogsArchiveHandler,
 } from "../../controllers/archives/auditLogsArchiveController.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
+import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
+
+// Archives visible to: Owner only
+const allowed = [roles.OWNER];
 
 export const registerAuditLogsArchiveRoutes = (app) => {
-  // GET    /api/archives/audit-logs
-  app.get("/api/archives/audit-logs", verifyToken, listAuditLogsArchives);
-
-  // POST   /api/archives/audit-logs/:auditLogsArchivesId/restore
-  app.post("/api/archives/audit-logs/:auditLogsArchivesId/restore", verifyToken, restoreAuditLogsArchiveHandler);
-
-  // DELETE /api/archives/audit-logs/:auditLogsArchivesId
-  app.delete("/api/archives/audit-logs/:auditLogsArchivesId", verifyToken, deleteAuditLogsArchiveHandler);
+  app.get("/api/archives/audit-logs",                                          verifyToken, requireRole(allowed), listAuditLogsArchives);
+  app.post("/api/archives/audit-logs/:auditLogsArchivesId/restore",            verifyToken, requireRole(allowed), restoreAuditLogsArchiveHandler);
+  app.delete("/api/archives/audit-logs/:auditLogsArchivesId",                  verifyToken, requireRole(allowed), deleteAuditLogsArchiveHandler);
 };
