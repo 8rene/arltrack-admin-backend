@@ -7,14 +7,13 @@ export const login = async (req, res) => {
   try {
     const { idToken } = req.body;
 
-    // 1. VALIDATE INPUT
     if (!idToken) {
       return res.status(400).json({
         message: "Authentication token is missing. Please log in again.",
       });
     }
 
-    // 2. VERIFY FIREBASE ID TOKEN
+    // 1. VERIFY FIREBASE ID TOKEN → get Firebase UID
     let decodedToken;
     try {
       decodedToken = await admin.auth().verifyIdToken(idToken);
@@ -24,46 +23,48 @@ export const login = async (req, res) => {
       });
     }
 
-    const firebaseUID = decodedToken.uid;
+    const firebaseUID = decodedToken.uid; // e.g. "6wR71LoZsvZMOXYAF6q4"
     const email = decodedToken.email;
 
-    // 3. FIND STAFF USER — staffUser collection, query by userID field
-    const staffSnap = await db
-      .collection("staffUser")
-      .where("userID", "==", firebaseUID)
-      .get();
+    // 2. GET staffUser doc — document ID IS the Firebase UID
+    const staffDocRef = db.collection("staffUser").doc(firebaseUID);
+    const staffSnap = await staffDocRef.get();
 
-    if (staffSnap.empty) {
+    if (!staffSnap.exists) {
       return res.status(403).json({
         message: "Access denied. Your account does not have staff-level permissions.",
       });
     }
 
-    let staffData;
-    staffSnap.forEach((doc) => { staffData = doc.data(); });
+    const staffData = staffSnap.data();
 
-    // 4. CHECK STAFF STATUS
+    // 3. CHECK STATUS
     if (staffData.status && staffData.status.toLowerCase() !== "active") {
       return res.status(403).json({
         message: "Your staff account is currently inactive. Please contact your administrator.",
       });
     }
 
-    // 5. GET USER RECORD — user collection, query by userID field to get roleID
-    const userSnap = await db
-      .collection("user")
-      .where("userID", "==", firebaseUID)
-      .get();
+    // 4. GET userID from staffUser doc → use it to find user doc
+    const userID = staffData.userID; // e.g. "JrDVMFT247gPfcA6DP8PG9OLLlt2"
 
-    if (userSnap.empty) {
+    if (!userID) {
+      return res.status(403).json({
+        message: "Staff record has no linked user. Please contact your administrator.",
+      });
+    }
+
+    // 5. GET user doc — document ID IS the userID
+    const userDocRef = db.collection("user").doc(userID);
+    const userSnap = await userDocRef.get();
+
+    if (!userSnap.exists) {
       return res.status(403).json({
         message: "No user record found for this account. Please contact your administrator.",
       });
     }
 
-    let userData;
-    userSnap.forEach((doc) => { userData = doc.data(); });
-
+    const userData = userSnap.data();
     const roleID = userData.roleID;
 
     if (!roleID) {
@@ -72,11 +73,9 @@ export const login = async (req, res) => {
       });
     }
 
-    // 6. RESOLVE ROLE NAME from roleID
-    //    First try the local map (fast, no extra DB call)
+    // 6. RESOLVE roleName — try local map first, fallback to Firestore
     let roleName = roleIDToName(roleID);
 
-    //    Fallback: if somehow a new role was added to Firestore not in the map
     if (!roleName) {
       const roleSnap = await db.collection("roles").doc(roleID).get();
       if (!roleSnap.exists) {
@@ -87,7 +86,7 @@ export const login = async (req, res) => {
       roleName = roleSnap.data().roleName;
     }
 
-    // 7. GENERATE JWT — embed roleName in token payload
+    // 7. GENERATE JWT
     const token = generateToken({
       uid: firebaseUID,
       email,
