@@ -1,22 +1,19 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { generateToken } from "../../utils/jwt/jwt.util.js";
-import { User } from "../../models/user/user.model.js";
-import { StaffUser } from "../../models/staffUser/staffUser.model.js";
-import { Role } from "../../models/role/role.model.js";
+import { roleIDToName } from "../../utils/roles/role.util.js";
 import admin from "firebase-admin";
 
 export const login = async (req, res) => {
   try {
     const { idToken } = req.body;
 
-    // 1. VALIDATE INPUT
     if (!idToken) {
       return res.status(400).json({
         message: "Authentication token is missing. Please log in again.",
       });
     }
 
-    // 2. VERIFY FIREBASE ID TOKEN
+    // 1. VERIFY FIREBASE ID TOKEN → get email + uid
     let decodedToken;
     try {
       decodedToken = await admin.auth().verifyIdToken(idToken);
@@ -29,62 +26,73 @@ export const login = async (req, res) => {
     const firebaseUID = decodedToken.uid;
     const email = decodedToken.email;
 
-    // 3. FIND USER IN FIRESTORE — using User model shape
-    const userSnap = await db
-      .collection("user")
-      .where("userID", "==", firebaseUID)
-      .get();
-
-    if (userSnap.empty) {
-      return res.status(403).json({
-        message: "No user record found for this account. Please contact your administrator.",
-      });
-    }
-
-    let userData;
-    userSnap.forEach((doc) => { userData = doc.data(); });
-
-    // 4. CHECK STAFF ACCESS — using StaffUser model shape
+    // 2. FIND staffUser by email field
     const staffSnap = await db
       .collection("staffUser")
-      .where("userID", "==", firebaseUID)
+      .where("email", "==", email)
       .get();
 
     if (staffSnap.empty) {
       return res.status(403).json({
-        message: "Access denied. Your account does not have staff-level permissions.",
+        message: "Access denied. No staff account found with this email.",
       });
     }
 
-    let staffData;
-    staffSnap.forEach((doc) => { staffData = doc.data(); });
+    const staffData = staffSnap.docs[0].data();
 
-    // 5. CHECK STAFF STATUS
+    // 3. CHECK STATUS
     if (staffData.status && staffData.status.toLowerCase() !== "active") {
       return res.status(403).json({
         message: "Your staff account is currently inactive. Please contact your administrator.",
       });
     }
 
-    // 6. GET ROLE — using Role model shape
-    const roleSnap = await db
-      .collection("roles")
-      .doc(staffData.RoleID)
-      .get();
+    // 4. GET userID from staffUser doc
+    const userID = staffData.userID;
 
-    if (!roleSnap.exists) {
+    if (!userID) {
       return res.status(403).json({
-        message: "Your account role could not be determined. Please contact your administrator.",
+        message: "Staff record has no linked user. Please contact your administrator.",
       });
     }
 
-    const role = roleSnap.data();
+    // 5. GET user doc — doc ID is the userID
+    const userSnap = await db.collection("user").doc(userID).get();
+
+    if (!userSnap.exists) {
+      return res.status(403).json({
+        message: "No user record found for this account. Please contact your administrator.",
+      });
+    }
+
+    const userData = userSnap.data();
+    const roleID = userData.roleID;
+
+    if (!roleID) {
+      return res.status(403).json({
+        message: "User has no role assigned. Please contact your administrator.",
+      });
+    }
+
+    // 6. RESOLVE roleName — local map first, fallback to Firestore
+    let roleName = roleIDToName(roleID);
+
+    if (!roleName) {
+      const roleSnap = await db.collection("roles").doc(roleID).get();
+      if (!roleSnap.exists) {
+        return res.status(403).json({
+          message: "Your account role could not be determined. Please contact your administrator.",
+        });
+      }
+      roleName = roleSnap.data().roleName;
+    }
 
     // 7. GENERATE JWT
     const token = generateToken({
       uid: firebaseUID,
       email,
-      role: role.name,
+      role: roleName,
+      roleID,
     });
 
     // 8. RESPOND
@@ -95,7 +103,8 @@ export const login = async (req, res) => {
         uid: firebaseUID,
         email,
         username: userData.username || "",
-        role: role.name,
+        role: roleName,
+        roleID,
         profileImage: userData.profileImage || null,
       },
     });

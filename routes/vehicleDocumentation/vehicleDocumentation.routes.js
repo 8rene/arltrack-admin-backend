@@ -4,16 +4,13 @@ import {
   saveAfterTrip,
 } from "../../controllers/vehicleDocumentation/vehicleDocumentation.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
+import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
+
+// Visible to: Supervisor, Admin
+const allowed = [roles.SUPERVISOR, roles.ADMIN];
 
 export const registerVehicleDocsRoutes = (app) => {
-  // Get before + after vehicle documentation records for a booking
-  app.get("/api/vehicle-docs/booking/:bookingID", verifyToken, getVehicleDocs);
-
-  // Save (upsert) Before Trip documentation
-  // Body: { bookingID, carID, photoFields: { frontViewUrl, sideViewUrl, backViewUrl, ...partFields } }
-  app.post("/api/vehicle-docs/before-trip", verifyToken, saveBeforeTrip);
-
-  // Save (upsert) After Trip documentation
-  // Body: { bookingID, carID, photoFields: { frontViewUrl, sideViewUrl, backViewUrl, ...partFields } }
-  app.post("/api/vehicle-docs/after-trip", verifyToken, saveAfterTrip);
+  app.get("/api/vehicle-docs/booking/:bookingID", verifyToken, requireRole(allowed), getVehicleDocs);
+  app.post("/api/vehicle-docs/before-trip",       verifyToken, requireRole(allowed), saveBeforeTrip);
+  app.post("/api/vehicle-docs/after-trip",        verifyToken, requireRole(allowed), saveAfterTrip);
 };
