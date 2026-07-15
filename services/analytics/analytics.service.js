@@ -8,6 +8,11 @@ const parsePaymentTotal = (data) => {
 
 const toTimestamp = (date) => admin.firestore.Timestamp.fromDate(date);
 
+// Statuses that count as actual revenue:
+// - "approved" -> manually verified payments (bank transfer / cash proof approved by admin)
+// - "paid"     -> automated PayMongo payments (GCash, PayMaya, QRPH) confirmed via webhook
+const REVENUE_STATUSES = ["approved", "paid"];
+
 export const getDailyAnalytics = async () => {
   const now = new Date();
   const start = toTimestamp(new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
@@ -28,7 +33,7 @@ export const getDailyAnalytics = async () => {
     const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
     const h = d.getHours();
     const status = (data.status || "").toLowerCase();
-    if (status !== "approved") return;
+    if (!REVENUE_STATUSES.includes(status)) return;
     if (h >= 0 && h < 24) hours[h].revenue += parsePaymentTotal(data);
   });
 
@@ -65,7 +70,7 @@ export const getWeeklyAnalytics = async () => {
     const wd = d.getDay(); // 0=Sun
     const idx = wd === 0 ? 6 : wd - 1; // Mon=0 ... Sun=6
     const status = (data.status || "").toLowerCase();
-    if (status !== "approved") return;
+    if (!REVENUE_STATUSES.includes(status)) return;
     days[idx].revenue += parsePaymentTotal(data);
   });
 
@@ -95,7 +100,7 @@ export const getMonthlyAnalytics = async () => {
     const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
     const wi = Math.min(Math.floor((d.getDate() - 1) / 7), 4);
     const status = (data.status || "").toLowerCase();
-    if (status !== "approved") return;
+    if (!REVENUE_STATUSES.includes(status)) return;
     weeks[wi].revenue += parsePaymentTotal(data);
   });
 
@@ -125,7 +130,7 @@ export const getYearlyAnalytics = async () => {
     const data = doc.data();
     const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
     const status = (data.status || "").toLowerCase();
-    if (status !== "approved") return;
+    if (!REVENUE_STATUSES.includes(status)) return;
     months[d.getMonth()].revenue += parsePaymentTotal(data);
   });
 

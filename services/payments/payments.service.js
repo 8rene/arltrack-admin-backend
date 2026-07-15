@@ -118,9 +118,12 @@ export const getAllPayments = async () => {
     const customerName = nameMap[booking.userID] || "—";
     const { amountPaid, balance, payType } = computeAmounts(payment);
 
-    // Normalize status: Paid → Approved, auto-cancel if booking cancelled
+    // Normalize status: Paid → Approved (case-insensitive, since automated
+    // PayMongo payments — GCash/PayMaya/QRPH — are saved as lowercase "paid"
+    // while manual approvals from patchPaymentStatus save "Approved").
+    // auto-cancel if booking cancelled
     let status = payment.status || "Pending";
-    if (status === "Paid") status = "Approved";
+    if (status.toLowerCase() === "paid") status = "Approved";
     if ((booking.status || "").toLowerCase() === "cancelled") {
       status = "Cancelled";
     }
@@ -177,7 +180,7 @@ export const getPaymentById = async (id) => {
   const { amountPaid, balance, payType } = computeAmounts(payment);
 
   let status = payment.status || "Pending";
-  if (status === "Paid") status = "Approved";
+  if (status.toLowerCase() === "paid") status = "Approved";
   if ((bookingData.status || "").toLowerCase() === "cancelled") status = "Cancelled";
 
   return {
