@@ -4,12 +4,21 @@
  * Cascading archive-then-delete for a booking and its linked documents.
  *
  * Order of operations (all inside a Firestore batch / sequential writes):
- *  1. Archive booking      → bookingArchives
- *  2. Archive payment      → paymentsArchives   (if a payment exists)
- *  3. Archive reviews      → reviewsArchives     (if any reviews exist)
- *  4. Delete booking       from bookings
- *  5. Delete payment       from payments         (if one was found)
- *  6. Delete reviews       from reviews          (if any were found)
+ *  1. Archive booking        → bookingArchives
+ *  2. Archive payment        → paymentsArchives      (if a payment exists)
+ *  3. Archive reviews        → reviewsArchives        (if any reviews exist)
+ *  4. Archive bookingSession → bookingSessionArchives (if one exists) —
+ *     including its archive/{date} GPS-trail subcollection, copied doc-for-
+ *     doc under the new archive record. Copying the day-docs (not just
+ *     relying on archiveUrl) matters because a session that was never
+ *     flushed to Storage — e.g. the booking gets deleted the same day,
+ *     before that night's cron runs — would otherwise lose its GPS trail
+ *     entirely once the live doc is deleted.
+ *  5. Delete booking         from bookings
+ *  6. Delete payment         from payments          (if one was found)
+ *  7. Delete reviews         from reviews           (if any were found)
+ *  8. Delete bookingSession  from bookingSessions, and its archive
+ *     subcollection             (if one was found)
  *
  * If any archive write fails the function throws before touching deletes,
  * so the source documents are never lost.
@@ -59,6 +68,36 @@ const fetchReviews = async (bookingID) => {
     .where("bookingID", "==", bookingID)
     .get();
 
+  if (snap.empty) return [];
+  return snap.docs.map((doc) => ({ docRef: doc.ref, data: doc.data() }));
+};
+
+/**
+ * Fetches the bookingSession document linked to a bookingID (bookingID is
+ * an FK field on the doc, not the doc's own ID — see
+ * models/bookingSession/bookingsession.model.js). Returns { docRef, data }
+ * or null if this booking never got a session (e.g. cancelled before any
+ * tracking data existed).
+ */
+const fetchBookingSession = async (bookingID) => {
+  const snap = await db
+    .collection("bookingSessions")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+
+  if (snap.empty) return null;
+  const doc = snap.docs[0];
+  return { docRef: doc.ref, data: doc.data() };
+};
+
+/**
+ * Fetches every day-doc in a session's archive/{date} GPS-trail
+ * subcollection. Returns an array of { docRef, data } (may be empty —
+ * a session that never got a single ping has no day-docs at all).
+ */
+const fetchSessionArchiveDays = async (sessionRef) => {
+  const snap = await sessionRef.collection("archive").get();
   if (snap.empty) return [];
   return snap.docs.map((doc) => ({ docRef: doc.ref, data: doc.data() }));
 };
@@ -137,6 +176,37 @@ const archiveReview = async (reviewDocID, reviewData, archivedBy = "admin") => {
   return archiveRef.id;
 };
 
+/**
+ * Writes a bookingSession archive document, plus a copy of every archive
+ * day-doc underneath it (archiveDays — not a live subcollection, just an
+ * array field, since this record is a dead snapshot and never needs
+ * per-day querying the way the live session did).
+ * Returns the new bookingSessionArchivesID.
+ */
+const archiveBookingSession = async (sessionDocID, sessionData, archiveDays, archivedBy = "admin") => {
+  const archiveRef = db.collection("bookingSessionArchives").doc(); // auto-ID
+
+  const archiveDoc = {
+    bookingSessionArchivesID : archiveRef.id,
+    bookingSessionID         : sessionData.bookingSessionID ?? sessionDocID,
+    originalId                : sessionDocID,
+    archiveDate                : admin.firestore.FieldValue.serverTimestamp(),
+    archivedAt                  : admin.firestore.FieldValue.serverTimestamp(),
+    archivedBy,
+    // Flattened GPS trail, day-doc order preserved — same shape
+    // flushSessionArchive() writes to Storage, so this stays reconstructable
+    // even if archiveUrl below is null (session deleted before ever flushed).
+    archiveDays : archiveDays.map(({ docRef, data }) => ({ date: docRef.id, ...data })),
+    // ── spread all original session fields (includes archiveUrl if it was
+    // ever flushed to Storage, sessionStatus, geofenceAlerts, etc.) ──
+    ...sessionData,
+  };
+
+  await archiveRef.set(archiveDoc);
+  console.log(`[ARCHIVE] BookingSession archived → bookingSessionArchives/${archiveRef.id}`);
+  return archiveRef.id;
+};
+
 // ─────────────────────────────────────────────────────────────
 // Main exported function
 // ─────────────────────────────────────────────────────────────
@@ -157,16 +227,22 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
 
   const paymentResult = await fetchPayment(bookingID);
   const reviewResults = await fetchReviews(bookingID);
+  const sessionResult = await fetchBookingSession(bookingID);
+  const sessionArchiveDays = sessionResult
+    ? await fetchSessionArchiveDays(sessionResult.docRef)
+    : [];
 
   console.log(
     `[DELETE] Booking ${bookingDocID} | ` +
     `payment: ${paymentResult ? "found" : "none"} | ` +
-    `reviews: ${reviewResults.length}`
+    `reviews: ${reviewResults.length} | ` +
+    `session: ${sessionResult ? "found" : "none"} (${sessionArchiveDays.length} archive day-doc(s))`
   );
 
   // ── 2. Archive phase (must all succeed before any delete) ─────────────────
   let bookingArchivesID;
   let paymentsArchivesID = null;
+  let bookingSessionArchivesID = null;
   const reviewsArchivesIDs = [];
 
   try {
@@ -186,6 +262,16 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     for (const { docRef: reviewRef, data: reviewData } of reviewResults) {
       const id = await archiveReview(reviewRef.id, reviewData, archivedBy);
       reviewsArchivesIDs.push(id);
+    }
+
+    // 2d. Archive bookingSession, with its GPS-trail day-docs folded in (if exists)
+    if (sessionResult) {
+      bookingSessionArchivesID = await archiveBookingSession(
+        sessionResult.docRef.id,
+        sessionResult.data,
+        sessionArchiveDays,
+        archivedBy
+      );
     }
   } catch (archiveError) {
     // If any archive write fails, stop immediately — nothing has been deleted yet.
@@ -212,6 +298,19 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       batch.delete(reviewRef);
     }
 
+    // 3d. Delete bookingSession + every archive day-doc underneath it.
+    // Firestore doesn't cascade-delete subcollections — each day-doc has
+    // to be deleted individually, which is why they're in this same batch
+    // rather than a separate step. (A session realistically has at most a
+    // few dozen day-docs — one rental's worth of days — nowhere close to
+    // the 500-write batch limit alongside the other deletes here.)
+    if (sessionResult) {
+      batch.delete(sessionResult.docRef);
+      for (const { docRef: dayRef } of sessionArchiveDays) {
+        batch.delete(dayRef);
+      }
+    }
+
     await batch.commit();
     console.log(`[DELETE] Batch delete committed for booking ${bookingDocID}`);
   } catch (deleteError) {
@@ -235,10 +334,15 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     bookingID,
     bookingArchivesID,
     paymentsArchivesID,
+    bookingSessionArchivesID,
     reviewsArchivesIDs,
     reviewsArchivedCount : reviewResults.length,
+    sessionArchived       : Boolean(sessionResult),
+    sessionArchiveDaysCount : sessionArchiveDays.length,
     message          :
       `Booking ${bookingDocID} and ${paymentResult ? 1 : 0} payment(s), ` +
-      `${reviewResults.length} review(s) archived and deleted successfully.`,
+      `${reviewResults.length} review(s), ` +
+      `${sessionResult ? 1 : 0} session (${sessionArchiveDays.length} archive day-doc(s)) ` +
+      `archived and deleted successfully.`,
   };
 };

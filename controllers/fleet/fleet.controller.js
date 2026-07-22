@@ -75,7 +75,7 @@ export const editCar = async (req, res) => {
 };
 
 // PATCH /api/fleet/cars/:carID/status
-// Body: { status: "Active" | "Rented" | "Reserved" | "Maintenance" }
+// Body: { status: "Active" | "Rented" | "Reserved" | "Maintenance" | "Inactive" }
 export const changeCarStatus = async (req, res) => {
   try {
     const { carID } = req.params;

@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-
+import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen } from "../../services/booking/bookingSession.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -99,7 +99,7 @@ export const getAllBookings = async (statusFilter) => {
 
   let rows = [];
   if (!filter || filter === "all") {
-    const statuses = ["pending", "approved", "completed", "cancelled", "cancellation_request"];
+    const statuses = ["upcoming", "ongoing", "completed", "cancelled", "cancellation_request", "stolen"];
     const snaps = await Promise.all(
       statuses.map((s) => db.collection("bookings").where("status", "==", s).get())
     );
@@ -154,7 +154,7 @@ export const updateBooking = async (docID, updates) => {
   const bookingData = doc.data();
   const { status: oldStatus, userID, carID, bookingID } = bookingData;
 
-  const nonEditable = ["completed", "cancelled"];
+  const nonEditable = ["completed", "cancelled", "stolen"]; // once flagged stolen, no further edits through this endpoint
   if (nonEditable.includes(oldStatus?.toLowerCase())) {
     throw new Error(`Cannot edit a booking with status: ${oldStatus}`);
   }
@@ -167,8 +167,8 @@ export const updateBooking = async (docID, updates) => {
     }
   });
 
-  // ── Payment validation: cannot approve if payment is not yet approved/paid ──
-  if (filtered.status === "approved" && oldStatus?.toLowerCase() !== "approved") {
+  // ── Payment validation: cannot mark picked-up/ongoing if payment is not yet approved/paid ──
+  if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
     const bID = bookingID || docID;
     const paySnap = await db.collection("payments")
       .where("bookingID", "==", bID)
@@ -195,10 +195,68 @@ export const updateBooking = async (docID, updates) => {
 
   await db.collection("bookings").doc(docID).update(filtered);
 
+  // ── Link booking status transitions to the GPS session lifecycle ──
+  // "ongoing" = pickup happened, car is now actually on the trip. This is
+  // the one place that status-vocabulary decision actually takes effect —
+  // flagging it here rather than silently assuming it, since it was still
+  // an open question. Session activation/ending is best-effort: a failure
+  // here must never block the booking status update itself, since staff
+  // still need to be able to mark a car picked up/returned even if the
+  // Firestore session link is temporarily unavailable.
+  if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
+    try {
+      const bID = bookingID || docID;
+      const session = await getSessionByBookingID(bID);
+      if (session) {
+        await markSessionActive(session.data.bookingSessionID, carID);
+      } else {
+        console.warn(`[Booking] No bookingSession found for booking ${bID} — GPS tracking won't start for this trip.`);
+      }
+    } catch (err) {
+      console.error("[Booking] Failed to activate GPS session:", err.message);
+    }
+  } else if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+    try {
+      const bID = bookingID || docID;
+      const session = await getSessionByBookingID(bID);
+      if (session) {
+        await markSessionEnded(session.data.bookingSessionID);
+      }
+    } catch (err) {
+      console.error("[Booking] Failed to end GPS session:", err.message);
+    }
+  } else if (filtered.status === "cancelled" && oldStatus?.toLowerCase() !== "cancelled") {
+    try {
+      const bID = bookingID || docID;
+      const session = await getSessionByBookingID(bID);
+      if (session) {
+        await markSessionCancelled(session.data.bookingSessionID);
+      } else {
+        console.warn(`[Booking] No bookingSession found for booking ${bID} — nothing to cancel.`);
+      }
+    } catch (err) {
+      console.error("[Booking] Failed to cancel GPS session:", err.message);
+    }
+  } else if (filtered.status === "stolen" && oldStatus?.toLowerCase() !== "stolen") {
+    // Manual only — set by staff hitting "Stolen" on the car card. No
+    // auto-trigger off geofence breach.
+    try {
+      const bID = bookingID || docID;
+      const session = await getSessionByBookingID(bID);
+      if (session) {
+        await markSessionStolen(session.data.bookingSessionID);
+      } else {
+        console.warn(`[Booking] No bookingSession found for booking ${bID} — cannot flag session stolen.`);
+      }
+    } catch (err) {
+      console.error("[Booking] Failed to flag session stolen:", err.message);
+    }
+  }
+
   // ── Archive + auto-delete notification when booking moves out of pending/cancellation_request ──
   const newStatus = filtered.status;
-  const activeStatuses = ["pending", "cancellation_request"];
-  const resolvedStatuses = ["approved", "completed", "cancelled"];
+  const activeStatuses = ["upcoming", "cancellation_request"];
+  const resolvedStatuses = ["upcoming", "ongoing", "completed", "cancelled", "stolen"];
   if (
     newStatus &&
     newStatus !== oldStatus?.toLowerCase() &&

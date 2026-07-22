@@ -1,4 +1,5 @@
-import { saveLocation, getLocation, getAllLocations } from "../../services/gps/gps.service.js";
+import { saveLocation } from "../../services/gps/gps.service.js";
+import { processLivePing } from "../../services/gps/livePing.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 
@@ -9,10 +10,15 @@ export const receiveLocation = async (req, res) => {
     return res.status(400).json({ status: "error", message: "device_id, lat, lng required." });
   }
 
-  const data = await saveLocation(device_id, lat, lng); // keep in-memory
+  let data;
+  try {
+    data = await saveLocation(device_id, lat, lng);
+  } catch (err) {
+    console.error("[GPS] saveLocation failed:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to save location." });
+  }
 
   try {
-    // Update gpsDevice collection
     const deviceSnap = await db.collection("gpsDevice")
       .where("gpsDeviceID", "==", device_id).limit(1).get();
 
@@ -21,9 +27,15 @@ export const receiveLocation = async (req, res) => {
         lastLocation: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+
+      const assignedCarID = deviceSnap.docs[0].data().carID;
+      if (assignedCarID) {
+        processLivePing(assignedCarID, parseFloat(lat), parseFloat(lng)).catch((err) =>
+          console.error("[GPS] processLivePing failed (raw ping was still saved):", err.message)
+        );
+      }
     }
 
-    // Upsert gpsLocation collection
     const locSnap = await db.collection("gpsLocation")
       .where("gpsDeviceID", "==", device_id).limit(1).get();
 
@@ -54,7 +66,6 @@ export const getDeviceLocation = async (req, res) => {
   try {
     const deviceId = req.params.id;
 
-    // Try gpsLocation collection first
     const locSnap = await db.collection("gpsLocation")
       .where("gpsDeviceID", "==", deviceId).limit(1).get();
 
@@ -69,7 +80,6 @@ export const getDeviceLocation = async (req, res) => {
       });
     }
 
-    // Fallback: check gpsDevice.lastLocation
     const deviceSnap = await db.collection("gpsDevice")
       .where("gpsDeviceID", "==", deviceId).limit(1).get();
 
@@ -183,6 +193,19 @@ export const assignCarToDevice = async (req, res) => {
       assigned:  true,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // Sync to booking: any upcoming booking for this car no longer has a
+    // "no device" gap — this is what Car Tracking's badge query reads.
+    const upcomingSnap = await db.collection("bookings")
+      .where("carID", "==", carID)
+      .where("status", "==", "upcoming")
+      .get();
+
+    if (!upcomingSnap.empty) {
+      const batch = db.batch();
+      upcomingSnap.docs.forEach((doc) => batch.update(doc.ref, { hasDevice: true }));
+      await batch.commit();
+    }
 
     return res.json({ status: "ok", message: "Car assigned to GPS device." });
   } catch (err) {

@@ -10,6 +10,7 @@
     "jsonwebtoken": "^9.0.3",
     "lodash": "^4.17.23",
     "mongodb": "^7.1.0",
-    "mongoose": "^9.2.4"
+    "mongoose": "^9.2.4",
+    "node-cron": "^3.0.3"
   }
 }

@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { findLinkedBookingSessionArchive } from "./bookingSessionArchives.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -102,6 +103,10 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
 
   // ── 2. Find and restore linked payment archive ──
   const paymentArchiveDoc = await findLinkedPaymentArchive(bookingID);
+  // ── 2b. Find linked bookingSessionArchive — restored via its own
+  // recreation logic below (recreates archive/{date} day-docs too, which
+  // this file has no reason to duplicate) ──
+  const sessionArchiveDoc = await findLinkedBookingSessionArchive(bookingID);
   if (paymentArchiveDoc) {
     const {
       paymentsArchivesId: _ps,
@@ -123,6 +128,36 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
       ...payOriginalData,
       restoredAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+  }
+
+  // ── 2c. Restore linked bookingSession, day-docs and all ──
+  if (sessionArchiveDoc) {
+    const {
+      bookingSessionArchivesId: _bsaId,
+      originalId: sessionOriginalId,
+      archiveDate: _sad,
+      archivedAt: _saa,
+      archivedBy: _sab,
+      restoredAt: _sar,
+      restoredBy: _sarb,
+      archiveDays: sessionArchiveDays,
+      ...sessionOriginalData
+    } = sessionArchiveDoc.data();
+
+    const sessionActiveRef = sessionOriginalId
+      ? db.collection("bookingSessions").doc(sessionOriginalId)
+      : db.collection("bookingSessions").doc();
+
+    await sessionActiveRef.set({
+      ...sessionOriginalData,
+      restoredAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    for (const day of sessionArchiveDays || []) {
+      const { date, ...dayData } = day;
+      if (!date) continue;
+      await sessionActiveRef.collection("archive").doc(date).set(dayData);
+    }
   }
 
   // ── 3. Find and restore linked reviews archives ──
@@ -159,12 +194,16 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   for (const reviewDoc of reviewArchiveDocs) {
     batch.delete(reviewDoc.ref); // each review archive
   }
+  if (sessionArchiveDoc) {
+    batch.delete(sessionArchiveDoc.ref); // bookingSession archive
+  }
 
   await batch.commit();
 
   return {
     restoredPayment: !!paymentArchiveDoc,
     restoredReviews: reviewArchiveDocs.length,
+    restoredSession: !!sessionArchiveDoc,
   };
 };
 
@@ -181,6 +220,7 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   // Find linked archives
   const paymentArchiveDoc  = await findLinkedPaymentArchive(bookingID);
   const reviewArchiveDocs  = await findLinkedReviewArchives(bookingID);
+  const sessionArchiveDoc  = await findLinkedBookingSessionArchive(bookingID);
 
   // Delete all in batch
   const batch = db.batch();
@@ -192,11 +232,15 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   for (const reviewDoc of reviewArchiveDocs) {
     batch.delete(reviewDoc.ref);
   }
+  if (sessionArchiveDoc) {
+    batch.delete(sessionArchiveDoc.ref);
+  }
 
   await batch.commit();
 
   return {
     deletedPaymentArchive: !!paymentArchiveDoc,
     deletedReviewArchives: reviewArchiveDocs.length,
+    deletedSessionArchive: !!sessionArchiveDoc,
   };
 };

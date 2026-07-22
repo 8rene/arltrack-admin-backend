@@ -1,9 +1,11 @@
-/**
+bo/**
  * bookingWatcher.js
  *
  * Logic:
- * - Frontend reads DIRECTLY from "bookings" collection (pending + cancellation_request)
- *   so NO notification docs are written here.
+ * - Frontend reads DIRECTLY from "bookings" collection (cancellation_request)
+ *   so NO notification docs are written here. New bookings land straight in
+ *   "upcoming" now (no more "pending" awaiting approval), so only
+ *   cancellation requests need bell attention.
  *
  * - This watcher tracks status changes for logging purposes only.
  *   Archiving to "notificationsArchive" is handled by booking.service.js
@@ -13,10 +15,10 @@
 import { db } from "../config/firebaseConnection/firebase.js";
 
 // Statuses that are "active" in notifications (shown in bell/alerts)
-const ACTIVE_STATUSES = new Set(["pending", "cancellation_request"]);
+const ACTIVE_STATUSES = new Set(["cancellation_request"]);
 
 // Statuses that mean the booking moved out of notifications
-const ARCHIVE_STATUSES = new Set(["approved", "completed", "cancelled"]);
+const ARCHIVE_STATUSES = new Set(["upcoming", "ongoing", "completed", "cancelled"]);
 
 export const startBookingWatcher = () => {
   console.log("🔔 [BookingWatcher] Watching bookings for status changes...");

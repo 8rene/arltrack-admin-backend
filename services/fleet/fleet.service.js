@@ -134,7 +134,7 @@ export const updateCar = async (carID, carData) => {
 // UPDATE car status only
 // ─────────────────────────────────────────────
 export const updateCarStatus = async (carID, status) => {
-  const validStatuses = ["Active", "Rented", "Reserved", "Maintenance"];
+  const validStatuses = ["Active", "Rented", "Reserved", "Maintenance", "Inactive"];
   if (!validStatuses.includes(status)) throw new Error(`Invalid status. Must be one of: ${validStatuses.join(", ")}`);
 
   const carRef = db.collection("cars").doc(carID);

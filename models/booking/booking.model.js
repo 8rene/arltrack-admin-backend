@@ -12,6 +12,7 @@ export const Booking = {
   serviceFee: 0,
   totalFee: 0,        // rentalFee + depositFee + serviceFee
   status: "",         // "pending" | "approved" | "completed" | "cancelled"
+  hasDevice: false,
   isReviewed: false,
   userRating: null,
   notesUser: "",

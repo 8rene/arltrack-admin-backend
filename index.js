@@ -3,14 +3,14 @@ import express from "express";
 import cors from "cors";
 import { registerAuthRoutes }                from "./routes/auth/auth.routes.js";
 import { registerDashboardRoutes }           from "./routes/dashboard/dashboard.routes.js";
-import { registerAnalyticsRoutes }           from "./routes/analytics/analytics.routes.js";
+import { registerAnalyticsRoutes }          from "./routes/analytics/analytics.routes.js";//
 import { registerBookingRoutes }             from "./routes/booking/booking.routes.js";
 import { registerUserRoutes }                from "./routes/user/user.routes.js";
 import { registerAuditLogsRoutes }           from "./routes/auditLogs/auditLogs.routes.js";
 import { registerUserLogsRoutes }            from "./routes/userLogs/userLogs.routes.js";
 import { registerGpsRoutes }                 from "./routes/gps/gps.routes.js";
-import { registerReportsRoutes }             from "./routes/reports/reports.routes.js";
-import { registerPaymentsRoutes }            from "./routes/payments/payments.routes.js";
+import { registerReportsRoutes }             from "./routes/reports/reports.routes.js"; //
+import { registerPaymentsRoutes }          from "./routes/payments/payments.routes.js";//
 import { registerTransactionLogsRoutes }     from "./routes/transactionLogs/transactionLogs.routes.js";
 import { registerInventoryRoutes }           from "./routes/inventory/inventory.routes.js";
 import { registerVehicleDocsRoutes }         from "./routes/vehicleDocumentation/vehicleDocumentation.routes.js";
@@ -22,6 +22,8 @@ import { registerBookingArchiveRoutes }        from "./routes/archives/bookingAr
 import { registerTransactionLogArchiveRoutes } from "./routes/archives/transactionLogArchiveRoutes.js";
 import { registerAuditLogsArchiveRoutes }      from "./routes/archives/auditLogsArchiveRoutes.js";
 import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsArchiveRoutes.js";
+import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSessionArchiveRoutes.js";
+import { registerCronRoutes }                  from "./routes/cron/cron.routes.js";
 import { seedCacheFromFirestore }            from "./services/gps/gps.service.js";
 
 const app = express();
@@ -56,6 +58,8 @@ registerBookingArchiveRoutes(app);
 registerTransactionLogArchiveRoutes(app);
 registerAuditLogsArchiveRoutes(app);
 registerReviewsArchiveRoutes(app);
+registerBookingSessionArchiveRoutes(app);  // ← NEW
+registerCronRoutes(app);              // ← NEW
 
 const PORT = process.env.PORT || 5000;
 
