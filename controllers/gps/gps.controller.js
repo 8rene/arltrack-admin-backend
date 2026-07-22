@@ -1,6 +1,7 @@
 import { saveLocation } from "../../services/gps/gps.service.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
+import { getSessionsByCar, getActiveSessionByCar } from "../../services/booking/bookingSession.service.js";
 import admin from "firebase-admin";
 
 /** POST /api/gps  — GPS device pushes a live location */
@@ -137,8 +138,16 @@ export const getAllDeviceLocations = async (req, res) => {
 /** GET /api/gps/devices  — Get all GPS devices from gpsDevice collection */
 export const getAllGpsDevices = async (req, res) => {
   try {
-    const snap = await db.collection("gpsDevice").orderBy("gpsName").get();
-    const devices = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // NOTE: previously used .orderBy("gpsName") here — Firestore silently
+    // EXCLUDES any document missing the ordered field from the results
+    // (no error, it just vanishes). Any device doc without a gpsName
+    // (hand-created, seeded before the field existed, etc.) would never
+    // show up on the page. Fetch everything and sort in memory instead so
+    // no device can go missing just because a field is blank.
+    const snap = await db.collection("gpsDevice").get();
+    const devices = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (a.gpsName || "").localeCompare(b.gpsName || ""));
     return res.json({ status: "ok", data: devices });
   } catch (err) {
     console.error("[GPS] getAllGpsDevices error:", err.message);
@@ -171,7 +180,97 @@ export const addGpsDevice = async (req, res) => {
   }
 };
 
-/** PUT /api/gps/devices/:id/assign  — Assign a car to a GPS device */
+/** PUT /api/gps/devices/:id/unassign  — Detach a car from a GPS device */
+export const unassignDeviceFromCar = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const docRef = db.collection("gpsDevice").doc(id);
+    const doc    = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ status: "error", message: "GPS device not found." });
+    }
+
+    const { carID: previousCarID } = doc.data();
+
+    await docRef.update({
+      carID:     "",
+      assigned:  false,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Reverse of assignCarToDevice's sync — that car's upcoming bookings no
+    // longer have a device, so Car Tracking's badge should reappear for them.
+    if (previousCarID) {
+      const upcomingSnap = await db.collection("bookings")
+        .where("carID", "==", previousCarID)
+        .where("status", "==", "upcoming")
+        .get();
+
+      if (!upcomingSnap.empty) {
+        const batch = db.batch();
+        upcomingSnap.docs.forEach((doc) => batch.update(doc.ref, { hasDevice: false }));
+        await batch.commit();
+      }
+    }
+
+    return res.json({ status: "ok", message: "Car unassigned from GPS device." });
+  } catch (err) {
+    console.error("[GPS] unassignDeviceFromCar error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to unassign car." });
+  }
+};
+
+/** PATCH /api/gps/devices/:id  — Rename a GPS device */
+export const updateGpsDevice = async (req, res) => {
+  const { id }      = req.params;
+  const { gpsName } = req.body;
+
+  if (!gpsName || !gpsName.trim()) {
+    return res.status(400).json({ status: "error", message: "gpsName is required." });
+  }
+
+  try {
+    const docRef = db.collection("gpsDevice").doc(id);
+    const doc    = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ status: "error", message: "GPS device not found." });
+    }
+
+    await docRef.update({
+      gpsName:   gpsName.trim(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const updated = await docRef.get();
+    return res.json({ status: "ok", data: { id: docRef.id, ...updated.data() } });
+  } catch (err) {
+    console.error("[GPS] updateGpsDevice error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to rename GPS device." });
+  }
+};
+
+/** DELETE /api/gps/devices/:id  — Permanently remove a GPS device */
+export const deleteGpsDevice = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const docRef = db.collection("gpsDevice").doc(id);
+    const doc    = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ status: "error", message: "GPS device not found." });
+    }
+
+    await docRef.delete();
+    return res.json({ status: "ok", message: "GPS device deleted." });
+  } catch (err) {
+    console.error("[GPS] deleteGpsDevice error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to delete GPS device." });
+  }
+};
 export const assignCarToDevice = async (req, res) => {
   const { id }    = req.params;
   const { carID } = req.body;
@@ -211,5 +310,152 @@ export const assignCarToDevice = async (req, res) => {
   } catch (err) {
     console.error("[GPS] assignCarToDevice error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to assign car." });
+  }
+};
+
+/**
+ * GET /api/gps/:carId/session
+ * The car's ACTIVE trip session only — geofence zones, live position, and
+ * the geofence/coding alert logs livePing.service.js has been appending.
+ * Powers Car Tracking's "Car Information" and "Logs" floating panels.
+ * Returns { hasActiveSession: false } (not an error) when the car isn't on
+ * a trip right now — nothing to show zones/logs for in that case.
+ */
+export const getCarActiveSession = async (req, res) => {
+  try {
+    const { carId } = req.params;
+    const session = await getActiveSessionByCar(carId);
+    if (!session) {
+      return res.json({ status: "ok", data: { hasActiveSession: false } });
+    }
+    const { data } = session;
+    return res.json({
+      status: "ok",
+      data: {
+        hasActiveSession: true,
+        bookingSessionID: data.bookingSessionID,
+        sessionStatus:    data.sessionStatus,
+        geofenceZones:    data.geofenceZones || [],
+        geofenceAlerts:   data.geofenceAlerts || [],
+        codingAlerts:     data.codingAlerts || [],
+        currentPosition:  data.currentPosition || null,
+        pickupLocation:   data.pickupLocation || null,
+        dropoffLocation:  data.dropoffLocation || null,
+      },
+    });
+  } catch (err) {
+    console.error("[GPS] getCarActiveSession error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to fetch car session." });
+  }
+};
+
+/**
+ * PATCH /api/gps/:carId/geofence
+ * Body: { zones: [{ label, lat, lng, radius }] } — radius in METERS, matching
+ * geofence.service.js's haversine comparison (NOT km — that's the geo-test's
+ * convention, not this one). Overwrites the active session's geofenceZones
+ * wholesale, so the frontend always sends the full edited list (add/remove/
+ * resize all happen client-side first, then one save).
+ */
+export const updateCarGeofence = async (req, res) => {
+  try {
+    const { carId } = req.params;
+    const { zones } = req.body;
+
+    if (!Array.isArray(zones)) {
+      return res.status(400).json({ status: "error", message: "zones must be an array." });
+    }
+    for (const zone of zones) {
+      if (typeof zone.lat !== "number" || typeof zone.lng !== "number" || typeof zone.radius !== "number") {
+        return res.status(400).json({ status: "error", message: "Each zone needs numeric lat, lng, and radius (meters)." });
+      }
+    }
+
+    const session = await getActiveSessionByCar(carId);
+    if (!session) {
+      return res.status(404).json({ status: "error", message: "This car has no active trip to set a geofence on." });
+    }
+
+    await session.ref.update({
+      geofenceZones: zones,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ status: "ok", message: "Geofence zones updated.", data: { zones } });
+  } catch (err) {
+    console.error("[GPS] updateCarGeofence error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to update geofence." });
+  }
+};
+
+/**
+ * GET /api/gps/:carId/traceback?date=YYYY-MM-DD
+ * One car's full GPS trail for one day — used by Car Tracking's Traceback tab.
+ * A car can have more than one session in its lifetime, so this checks every
+ * session ever tied to the car for an archive/{date} day-doc, not just the
+ * currently active one, and merges + sorts whatever it finds by timestamp.
+ */
+export const getCarTraceback = async (req, res) => {
+  try {
+    const { carId } = req.params;
+    const { date }  = req.query;
+
+    if (!date) {
+      return res.status(400).json({ status: "error", message: "date (YYYY-MM-DD) is required." });
+    }
+
+    const sessions = await getSessionsByCar(carId);
+    if (!sessions.length) {
+      return res.json({ status: "ok", data: { carId, date, records: [] } });
+    }
+
+    const dayDocs = await Promise.all(
+      sessions.map(({ ref }) => ref.collection("archive").doc(date).get())
+    );
+
+    const records = dayDocs
+      .filter((doc) => doc.exists)
+      .flatMap((doc) => doc.data()?.points || [])
+      .filter((p) => p && typeof p.lat === "number" && typeof p.lng === "number" && p.at)
+      .sort((a, b) => new Date(a.at) - new Date(b.at));
+
+    return res.json({ status: "ok", data: { carId, date, records } });
+  } catch (err) {
+    console.error("[GPS] getCarTraceback error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to fetch traceback." });
+  }
+};
+
+/**
+ * GET /api/gps/:carId/history
+ * Every archived (flushed-to-Storage) trip for one car, newest first.
+ * Powers Car Tracking's History tab — a session only shows up here once
+ * bookingHistory.service.js has flushed it (archiveUrl gets set then), so a
+ * car with no completed/flushed trips yet returns an empty list, which the
+ * frontend renders as "No GPS record."
+ */
+export const getCarHistory = async (req, res) => {
+  try {
+    const { carId } = req.params;
+    const sessions = await getSessionsByCar(carId);
+
+    const history = sessions
+      .filter(({ data }) => !!data.archiveUrl)
+      .map(({ data }) => ({
+        bookingSessionID: data.bookingSessionID,
+        bookingID:        data.bookingID || null,
+        sessionStatus:    data.sessionStatus || null,
+        pickupTime:       data.pickupTime || null,
+        returnTime:       data.returnTime || null,
+        archiveUrl:       data.archiveUrl,
+        lastArchivedAt:   data.lastArchivedAt || null,
+      }));
+
+    // getSessionsByCar already sorts newest-pickup-first, so this list comes
+    // out newest-first automatically — no extra sort needed here.
+    return res.json({ status: "ok", data: history });
+  } catch (err) {
+    console.error("[GPS] getCarHistory error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to fetch car history." });
   }
 };

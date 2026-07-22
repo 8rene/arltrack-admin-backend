@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen } from "../../services/booking/bookingSession.service.js";
+import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -221,6 +222,14 @@ export const updateBooking = async (docID, updates) => {
       const session = await getSessionByBookingID(bID);
       if (session) {
         await markSessionEnded(session.data.bookingSessionID);
+        // Flush the full trail to Storage right now — this is the "Return"
+        // action, no reason to make the history file wait for tonight's
+        // cron when the trip is already over.
+        try {
+          await flushBookingHistory(session.data.bookingSessionID);
+        } catch (flushErr) {
+          console.error("[Booking] Return flush failed (session still marked ended, cron will retry tonight):", flushErr.message);
+        }
       }
     } catch (err) {
       console.error("[Booking] Failed to end GPS session:", err.message);
@@ -245,6 +254,14 @@ export const updateBooking = async (docID, updates) => {
       const session = await getSessionByBookingID(bID);
       if (session) {
         await markSessionStolen(session.data.bookingSessionID);
+        // Same as Return — flush the trail immediately for documentation
+        // rather than waiting for the nightly cron. This is manual/admin-
+        // triggered, so there's no reason to delay the record.
+        try {
+          await flushBookingHistory(session.data.bookingSessionID);
+        } catch (flushErr) {
+          console.error("[Booking] Stolen flush failed (session still marked stolen, cron will retry tonight):", flushErr.message);
+        }
       } else {
         console.warn(`[Booking] No bookingSession found for booking ${bID} — cannot flag session stolen.`);
       }

@@ -29,7 +29,7 @@ export const runMidnightFlush = async () => {
 
   for (const { data } of activeSessions) {
     try {
-      await flushSessionArchive(data.bookingSessionID);
+      await flushBookingHistory(data.bookingSessionID);
       succeeded++;
     } catch (err) {
       failed++;

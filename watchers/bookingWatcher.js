@@ -1,4 +1,4 @@
-bo/**
+/**
  * bookingWatcher.js
  *
  * Logic:

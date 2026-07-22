@@ -38,6 +38,27 @@ export const getAllActiveSessions = async () => {
   return snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
 };
 
+/**
+ * Every session (any status — active, ended, stolen, cancelled) ever tied to
+ * a car, most recent first. Used by Car Tracking's Traceback (find which
+ * session(s) cover a given date) and History (list every archived trip) —
+ * neither cares about a car's CURRENT session, they need the full history.
+ * Sorted in memory (not orderBy) for the same reason getAllGpsDevices does:
+ * a composite index would otherwise be required for carID-equality +
+ * pickupTime-order, and older/hand-created docs missing pickupTime would
+ * silently vanish from the results.
+ */
+export const getSessionsByCar = async (carID) => {
+  const snap = await SESSIONS().where("carID", "==", carID).get();
+  const sessions = snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
+  sessions.sort((a, b) => {
+    const at = a.data.pickupTime?._seconds ?? a.data.pickupTime?.seconds ?? 0;
+    const bt = b.data.pickupTime?._seconds ?? b.data.pickupTime?.seconds ?? 0;
+    return bt - at;
+  });
+  return sessions;
+};
+
 /** Look a session up directly by its own primary key. */
 export const getSessionById = async (bookingSessionID) => {
   const doc = await SESSIONS().doc(bookingSessionID).get();
