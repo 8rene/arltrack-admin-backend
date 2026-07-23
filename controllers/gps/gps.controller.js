@@ -498,6 +498,11 @@ export const getCarTraceback = async (req, res) => {
     let geofenceZones = [];
     let geofenceAlerts = [];
     let codingAlerts = [];
+    // { bookingSessionID, bookingID, status, pickupTime, returnTime } for
+    // whichever session owns this date — powers TracebackBookingInfoPanel's
+    // read-only summary + canEdit check ("today" + status === "active") on
+    // the frontend. null when no session covers this date.
+    let session = null;
     try {
       const sessions = await getSessionsByCar(carId);
       const match = sessions.find((s) => {
@@ -510,13 +515,20 @@ export const getCarTraceback = async (req, res) => {
         geofenceZones  = match.data.geofenceZones  || [];
         geofenceAlerts = match.data.geofenceAlerts || [];
         codingAlerts   = match.data.codingAlerts   || [];
+        session = {
+          bookingSessionID: match.data.bookingSessionID,
+          bookingID:        match.data.bookingID || null,
+          status:           match.data.status || null,
+          pickupTime:       match.data.pickupTime || null,
+          returnTime:       match.data.returnTime || null,
+        };
       }
     } catch (lookupErr) {
       console.error("[GPS] getCarTraceback session lookup error:", lookupErr.message);
-      // Non-fatal — traceback still returns points, just without zone/alert data.
+      // Non-fatal — traceback still returns points, just without zone/alert/session data.
     }
 
-    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts } });
+    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts, session } });
   } catch (err) {
     console.error("[GPS] getCarTraceback error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to fetch traceback." });
