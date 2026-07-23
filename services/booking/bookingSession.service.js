@@ -76,13 +76,38 @@ export const getSessionByBookingID = async (bookingID) => {
 /**
  * Mark a session active and attach it to a car — call this at pickup.
  * bookingID is the FK already on the doc; carID is what's new here.
+ *
+ * Also auto-copies the car's standing default geofence zones (see
+ * gps.controller.js's getCarGeofenceDefaults/cars/{carID}.defaultGeofenceZones)
+ * onto this session's own geofenceZones — but only if the session doesn't
+ * already have zones of its own (e.g. set up ahead of pickup via Booking
+ * Info's active-trip editor before this ran). Best-effort: a failure here
+ * must never block pickup itself, same reasoning as booking.service.js's
+ * caller already applies around this whole call.
  */
 export const markSessionActive = async (bookingSessionID, carID) => {
-  await SESSIONS().doc(bookingSessionID).update({
+  const sessionRef = SESSIONS().doc(bookingSessionID);
+  const updates = {
     carID,
     status: "active",
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  };
+
+  try {
+    const sessionDoc = await sessionRef.get();
+    const existingZones = sessionDoc.exists ? (sessionDoc.data().geofenceZones || []) : [];
+    if (existingZones.length === 0) {
+      const carDoc = await db.collection("cars").doc(carID).get();
+      const defaultZones = carDoc.exists ? (carDoc.data().defaultGeofenceZones || []) : [];
+      if (defaultZones.length > 0) {
+        updates.geofenceZones = defaultZones;
+      }
+    }
+  } catch (err) {
+    console.error("[BookingSession] Failed to copy default zones onto session (non-fatal, session still activated):", err.message);
+  }
+
+  await sessionRef.update(updates);
 };
 
 export const markSessionCancelled = async (bookingSessionID) => {

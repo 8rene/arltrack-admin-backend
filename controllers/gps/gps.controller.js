@@ -8,10 +8,16 @@ import admin from "firebase-admin";
 
 /** POST /api/gps  — GPS device pushes a live location */
 export const receiveLocation = async (req, res) => {
-  const { device_id, lat, lng } = req.body;
+  const { device_id, lat, lng, speed, offline } = req.body;
   if (!device_id || lat == null || lng == null) {
     return res.status(400).json({ status: "error", message: "device_id, lat, lng required." });
   }
+  // speed: defaults to 0 if the tracker doesn't send it (older firmware, etc).
+  // offline: the tracker itself flags this true on buffered/replayed pings
+  // (queued while it had no signal, sent once it reconnects) — not inferred
+  // here, just passed through as-is.
+  const speedVal   = speed != null ? parseFloat(speed) || 0 : 0;
+  const offlineVal = offline === true || offline === "true";
 
   let data;
   try {
@@ -33,7 +39,7 @@ export const receiveLocation = async (req, res) => {
 
       const assignedCarID = deviceSnap.docs[0].data().carID;
       if (assignedCarID) {
-        processLivePing(assignedCarID, parseFloat(lat), parseFloat(lng)).catch((err) =>
+        processLivePing(assignedCarID, parseFloat(lat), parseFloat(lng), speedVal, offlineVal).catch((err) =>
           console.error("[GPS] processLivePing failed (raw ping was still saved):", err.message)
         );
       }
@@ -46,6 +52,8 @@ export const receiveLocation = async (req, res) => {
       await locSnap.docs[0].ref.update({
         latitude:   parseFloat(lat),
         longtitude: parseFloat(lng), // preserving existing typo in DB
+        speed:      speedVal,
+        offline:    offlineVal,
         updatedAt:  admin.firestore.FieldValue.serverTimestamp(),
       });
     } else {
@@ -53,6 +61,8 @@ export const receiveLocation = async (req, res) => {
         gpsDeviceID: device_id,
         latitude:    parseFloat(lat),
         longtitude:  parseFloat(lng), // preserving existing typo in DB
+        speed:       speedVal,
+        offline:     offlineVal,
         updatedAt:   admin.firestore.FieldValue.serverTimestamp(),
         createdAt:   admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -78,6 +88,8 @@ export const getDeviceLocation = async (req, res) => {
         deviceId,
         lat:          parseFloat(doc.latitude)   || null,
         lng:          parseFloat(doc.longtitude) || parseFloat(doc.longitude) || null,
+        speed:        typeof doc.speed === "number" ? doc.speed : 0,
+        offline:      doc.offline === true,
         lastLocation: doc.lastLocation || null,
         updatedAt:    doc.updatedAt?.toDate?.()?.toISOString?.() || null,
       });
@@ -124,6 +136,8 @@ export const getAllDeviceLocations = async (req, res) => {
           deviceId:     doc.gpsDeviceID,
           lat,
           lng,
+          speed:        typeof doc.speed === "number" ? doc.speed : 0,
+          offline:      doc.offline === true,
           lastLocation: doc.lastLocation || null,
           updatedAt:    doc.updatedAt?.toDate?.()?.toISOString?.() || null,
         };
@@ -391,6 +405,68 @@ export const updateCarGeofence = async (req, res) => {
 };
 
 /**
+ * GET /api/gps/:carId/geofence-defaults
+ * A car's STANDING default geofence zones — not tied to any session, can be
+ * set up anytime (no active trip required). Stored on the car's own doc
+ * (cars/{carId}.defaultGeofenceZones), unlike updateCarGeofence above which
+ * writes onto the active session instead. Auto-copied onto a new session's
+ * own geofenceZones at pickup — see bookingSession.service.js's
+ * markSessionActive — unless that session already has zones of its own.
+ */
+export const getCarGeofenceDefaults = async (req, res) => {
+  try {
+    const { carId } = req.params;
+    const carDoc = await db.collection("cars").doc(carId).get();
+    if (!carDoc.exists) {
+      return res.status(404).json({ status: "error", message: "Car not found." });
+    }
+    const zones = carDoc.data().defaultGeofenceZones || [];
+    return res.json({ status: "ok", data: { zones } });
+  } catch (err) {
+    console.error("[GPS] getCarGeofenceDefaults error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to fetch default geofence zones." });
+  }
+};
+
+/**
+ * PATCH /api/gps/:carId/geofence-defaults
+ * Body: { zones: [{ label, lat, lng, radius }] } — radius in METERS, same
+ * convention as updateCarGeofence. Overwrites the car's default zones
+ * wholesale (add/remove/resize all happen client-side first, then one save).
+ */
+export const updateCarGeofenceDefaults = async (req, res) => {
+  try {
+    const { carId } = req.params;
+    const { zones } = req.body;
+
+    if (!Array.isArray(zones)) {
+      return res.status(400).json({ status: "error", message: "zones must be an array." });
+    }
+    for (const zone of zones) {
+      if (typeof zone.lat !== "number" || typeof zone.lng !== "number" || typeof zone.radius !== "number") {
+        return res.status(400).json({ status: "error", message: "Each zone needs numeric lat, lng, and radius (meters)." });
+      }
+    }
+
+    const carRef = db.collection("cars").doc(carId);
+    const carDoc = await carRef.get();
+    if (!carDoc.exists) {
+      return res.status(404).json({ status: "error", message: "Car not found." });
+    }
+
+    await carRef.update({
+      defaultGeofenceZones: zones,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ status: "ok", message: "Default geofence zones updated.", data: { zones } });
+  } catch (err) {
+    console.error("[GPS] updateCarGeofenceDefaults error:", err.message);
+    return res.status(500).json({ status: "error", message: "Failed to update default geofence zones." });
+  }
+};
+
+/**
  * GET /api/gps/:carId/traceback?date=YYYY-MM-DD
  * One car's full GPS trail for one day — used by Car Tracking's Traceback tab.
  * Ping data now lives in Google Sheets (one tab per PHT date, shared across
@@ -412,7 +488,7 @@ export const getCarTraceback = async (req, res) => {
 
     const records = rows
       .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
-      .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at }))
+      .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at, speed: r.speed ?? 0, offline: r.offline === true }))
       .sort((a, b) => new Date(a.at) - new Date(b.at));
 
     // Geofence-breach / coding-restriction banner needs the zones + alert

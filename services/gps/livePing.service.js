@@ -25,8 +25,11 @@ const getPlateNumber = async (carID) => {
  * @param {string} carID
  * @param {number} lat
  * @param {number} lng
+ * @param {number} [speed] — km/h, straight from the tracker's own reading (not derived here)
+ * @param {boolean} [offline] — true when this ping was buffered by the tracker while it had
+ *   no signal and sent later on reconnect, rather than reported live
  */
-export const processLivePing = async (carID, lat, lng) => {
+export const processLivePing = async (carID, lat, lng, speed = 0, offline = false) => {
   const session = await getActiveSessionByCar(carID);
   if (!session) return; // no active trip on this car — nothing more to do
 
@@ -94,6 +97,8 @@ export const processLivePing = async (carID, lat, lng) => {
       lat,
       lng,
       at: now.toISOString(),
+      speed,
+      offline,
     });
   } catch (err) {
     console.error("[GPS] Sheets append failed (session doc was still updated):", err.message);

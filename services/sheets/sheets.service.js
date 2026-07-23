@@ -28,7 +28,10 @@ import { google } from "googleapis";
 const SPREADSHEET_ID = process.env.TRACEBACK_SHEET_ID;
 
 // Columns, in order, for every row written to a date tab.
-const HEADERS = ["carId", "sessionId", "lat", "lng", "at"];
+// speed/offline appended at the END, not inserted in the middle — so any
+// tabs already sitting in the spreadsheet from before this change don't get
+// their existing columns silently relabeled.
+const HEADERS = ["carId", "sessionId", "lat", "lng", "at", "speed", "offline"];
 
 let sheetsClientPromise = null;
 
@@ -95,10 +98,14 @@ async function ensureTabExists(dateStr) {
  * could silently drop pings sitting in memory. One extra Sheets API call per
  * ping instead of a batched write, in exchange for actually persisting.
  *
- * @param {{ carId: string, sessionId?: string, lat: number, lng: number, at: string }} ping
+ * @param {{ carId: string, sessionId?: string, lat: number, lng: number, at: string,
+ *   speed?: number, offline?: boolean }} ping
  *   `at` must be an ISO string; its date portion decides which tab it lands in.
+ *   `speed` (km/h, from the tracker's own reading) and `offline` (true when the
+ *   tracker buffered this ping while it had no signal, sent later on reconnect)
+ *   default to 0/false when not provided by older callers.
  */
-export const appendCarPing = async ({ carId, sessionId, lat, lng, at }) => {
+export const appendCarPing = async ({ carId, sessionId, lat, lng, at, speed = 0, offline = false }) => {
   const dateStr = at.split("T")[0];
   await ensureTabExists(dateStr);
   const sheets = await getSheetsClient();
@@ -108,7 +115,7 @@ export const appendCarPing = async ({ carId, sessionId, lat, lng, at }) => {
     range: `${tabNameForDate(dateStr)}!A:A`,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [[carId, sessionId || "", lat, lng, at]] },
+    requestBody: { values: [[carId, sessionId || "", lat, lng, at, speed, offline]] },
   });
 };
 
@@ -121,7 +128,7 @@ export const fetchTabRows = async (dateStr) => {
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${tabName}!A2:E`, // skip header row
+      range: `${tabName}!A2:G`, // skip header row; G covers speed/offline
     });
     const rows = res.data.values || [];
     return rows.map((row) => {
@@ -129,6 +136,12 @@ export const fetchTabRows = async (dateStr) => {
       HEADERS.forEach((h, i) => { record[h] = row[i] ?? null; });
       record.lat = record.lat !== null ? parseFloat(record.lat) : null;
       record.lng = record.lng !== null ? parseFloat(record.lng) : null;
+      // speed defaults to 0 for rows written before this column existed.
+      record.speed = record.speed !== null ? parseFloat(record.speed) || 0 : 0;
+      // Sheets returns booleans back as the strings "TRUE"/"FALSE", not real
+      // true/false — normalize once here (same pattern as the geo-test
+      // reference backend) so `offline` is a real boolean everywhere downstream.
+      record.offline = String(record.offline).toUpperCase() === "TRUE";
       return record;
     });
   } catch (err) {

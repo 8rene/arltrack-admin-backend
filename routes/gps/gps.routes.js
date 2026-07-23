@@ -10,6 +10,8 @@ import {
   deleteGpsDevice,
   getCarActiveSession,
   updateCarGeofence,
+  getCarGeofenceDefaults,
+  updateCarGeofenceDefaults,
   getCarTraceback,
   getCarHistory,
 } from "../../controllers/gps/gps.controller.js";
@@ -38,6 +40,8 @@ export const registerGpsRoutes = (app) => {
   // these routes was 404ing. Fixed.
   app.get("/api/gps/:carId/session",   verifyToken, requireRole(allowed), getCarActiveSession);
   app.patch("/api/gps/:carId/geofence",verifyToken, requireRole(allowed), updateCarGeofence);
+  app.get("/api/gps/:carId/geofence-defaults",   verifyToken, requireRole(allowed), getCarGeofenceDefaults);
+  app.patch("/api/gps/:carId/geofence-defaults", verifyToken, requireRole(allowed), updateCarGeofenceDefaults);
   app.get("/api/gps/:carId/traceback", verifyToken, requireRole(allowed), getCarTraceback);
   app.get("/api/gps/:carId/history",   verifyToken, requireRole(allowed), getCarHistory);
 

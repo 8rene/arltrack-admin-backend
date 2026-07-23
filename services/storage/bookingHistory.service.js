@@ -26,7 +26,7 @@ export const flushBookingHistory = async (bookingSessionID) => {
   const rows = await fetchSessionRows(data.carID, bookingSessionID, dateStrings);
   const fullTrail = rows
     .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
-    .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at }))
+    .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at, speed: r.speed ?? 0, offline: r.offline === true }))
     .sort((a, b) => new Date(a.at) - new Date(b.at));
 
   const filePath = `bookingHistory/${bookingSessionID}.json`;
