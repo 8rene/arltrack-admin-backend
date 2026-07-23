@@ -130,7 +130,10 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     });
   }
 
-  // ── 2c. Restore linked bookingSession, day-docs and all ──
+  // ── 2c. Restore linked bookingSession ──
+  // GPS pings live in Sheets now, not a subcollection under this doc — Sheets
+  // rows were never touched by the archive/delete, so there's no day-doc
+  // trail to recreate here anymore, just the session doc itself.
   if (sessionArchiveDoc) {
     const {
       bookingSessionArchivesId: _bsaId,
@@ -140,7 +143,6 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
       archivedBy: _sab,
       restoredAt: _sar,
       restoredBy: _sarb,
-      archiveDays: sessionArchiveDays,
       ...sessionOriginalData
     } = sessionArchiveDoc.data();
 
@@ -152,12 +154,6 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
       ...sessionOriginalData,
       restoredAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-
-    for (const day of sessionArchiveDays || []) {
-      const { date, ...dayData } = day;
-      if (!date) continue;
-      await sessionActiveRef.collection("archive").doc(date).set(dayData);
-    }
   }
 
   // ── 3. Find and restore linked reviews archives ──

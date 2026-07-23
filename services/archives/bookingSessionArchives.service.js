@@ -39,9 +39,12 @@ export const findLinkedBookingSessionArchive = async (bookingID) => {
 
 // ── RESTORE ────────────────────────────────
 // 1. Restore the session doc → bookingSessions
-// 2. Recreate every day-doc → bookingSessions/{id}/archive/{date}, from the
-//    flattened archiveDays array this archive doc was carrying
-// 3. Delete the bookingSessionArchives record
+// 2. Delete the bookingSessionArchives record
+// GPS pings live in Google Sheets now, not a Firestore subcollection under
+// this session — Sheets rows were never touched by the archive/delete in
+// the first place, so restoring the session doc is the whole job; Traceback
+// and History immediately work again against whatever's still in Sheets for
+// this car/date range, no day-doc recreation needed.
 // Standalone — can be called directly (its own restore endpoint), or from
 // bookingArchives.service.js's restoreBookingArchive as part of a full
 // booking restore. Does NOT touch bookings/payments/reviews itself.
@@ -58,7 +61,6 @@ export const restoreBookingSessionArchive = async (bookingSessionArchivesId, res
     archivedBy: _ab,
     restoredAt: _ra,
     restoredBy: _rb,
-    archiveDays,
     ...originalData
   } = archiveDoc.data();
 
@@ -72,22 +74,10 @@ export const restoreBookingSessionArchive = async (bookingSessionArchivesId, res
     restoredAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // ── 2. Recreate the archive/{date} day-docs from the flattened copy ──
-  const batch = db.batch();
-  for (const day of archiveDays || []) {
-    const { date, ...dayData } = day;
-    if (!date) continue;
-    batch.set(sessionActiveRef.collection("archive").doc(date), dayData);
-  }
+  // ── 2. Delete the archive record ──
+  await archiveRef.delete();
 
-  // ── 3. Delete the archive record ──
-  batch.delete(archiveRef);
-
-  await batch.commit();
-
-  return {
-    restoredDaysCount: (archiveDays || []).length,
-  };
+  return { restored: true };
 };
 
 // ── PERMANENT DELETE ───────────────────────────────

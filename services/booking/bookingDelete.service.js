@@ -91,17 +91,6 @@ const fetchBookingSession = async (bookingID) => {
   return { docRef: doc.ref, data: doc.data() };
 };
 
-/**
- * Fetches every day-doc in a session's archive/{date} GPS-trail
- * subcollection. Returns an array of { docRef, data } (may be empty —
- * a session that never got a single ping has no day-docs at all).
- */
-const fetchSessionArchiveDays = async (sessionRef) => {
-  const snap = await sessionRef.collection("archive").get();
-  if (snap.empty) return [];
-  return snap.docs.map((doc) => ({ docRef: doc.ref, data: doc.data() }));
-};
-
 // ─────────────────────────────────────────────────────────────
 // Archive writers
 // ─────────────────────────────────────────────────────────────
@@ -177,13 +166,14 @@ const archiveReview = async (reviewDocID, reviewData, archivedBy = "admin") => {
 };
 
 /**
- * Writes a bookingSession archive document, plus a copy of every archive
- * day-doc underneath it (archiveDays — not a live subcollection, just an
- * array field, since this record is a dead snapshot and never needs
- * per-day querying the way the live session did).
+ * Writes a bookingSession archive document. GPS ping data lives in Google
+ * Sheets now (not a Firestore subcollection under this session), and Sheets
+ * rows are never touched by this delete — they simply keep existing under
+ * their date tabs regardless of whether the booking/session gets archived,
+ * so there's no GPS trail to snapshot or lose here anymore.
  * Returns the new bookingSessionArchivesID.
  */
-const archiveBookingSession = async (sessionDocID, sessionData, archiveDays, archivedBy = "admin") => {
+const archiveBookingSession = async (sessionDocID, sessionData, archivedBy = "admin") => {
   const archiveRef = db.collection("bookingSessionArchives").doc(); // auto-ID
 
   const archiveDoc = {
@@ -193,12 +183,8 @@ const archiveBookingSession = async (sessionDocID, sessionData, archiveDays, arc
     archiveDate                : admin.firestore.FieldValue.serverTimestamp(),
     archivedAt                  : admin.firestore.FieldValue.serverTimestamp(),
     archivedBy,
-    // Flattened GPS trail, day-doc order preserved — same shape
-    // flushSessionArchive() writes to Storage, so this stays reconstructable
-    // even if archiveUrl below is null (session deleted before ever flushed).
-    archiveDays : archiveDays.map(({ docRef, data }) => ({ date: docRef.id, ...data })),
     // ── spread all original session fields (includes archiveUrl if it was
-    // ever flushed to Storage, sessionStatus, geofenceAlerts, etc.) ──
+    // ever flushed to Storage, status, geofenceAlerts, etc.) ──
     ...sessionData,
   };
 
@@ -228,15 +214,12 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   const paymentResult = await fetchPayment(bookingID);
   const reviewResults = await fetchReviews(bookingID);
   const sessionResult = await fetchBookingSession(bookingID);
-  const sessionArchiveDays = sessionResult
-    ? await fetchSessionArchiveDays(sessionResult.docRef)
-    : [];
 
   console.log(
     `[DELETE] Booking ${bookingDocID} | ` +
     `payment: ${paymentResult ? "found" : "none"} | ` +
     `reviews: ${reviewResults.length} | ` +
-    `session: ${sessionResult ? "found" : "none"} (${sessionArchiveDays.length} archive day-doc(s))`
+    `session: ${sessionResult ? "found" : "none"}`
   );
 
   // ── 2. Archive phase (must all succeed before any delete) ─────────────────
@@ -264,12 +247,12 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       reviewsArchivesIDs.push(id);
     }
 
-    // 2d. Archive bookingSession, with its GPS-trail day-docs folded in (if exists)
+    // 2d. Archive bookingSession (if exists) — GPS pings live in Sheets and
+    // are untouched by this delete, so there's no day-doc trail to fold in.
     if (sessionResult) {
       bookingSessionArchivesID = await archiveBookingSession(
         sessionResult.docRef.id,
         sessionResult.data,
-        sessionArchiveDays,
         archivedBy
       );
     }
@@ -298,17 +281,11 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       batch.delete(reviewRef);
     }
 
-    // 3d. Delete bookingSession + every archive day-doc underneath it.
-    // Firestore doesn't cascade-delete subcollections — each day-doc has
-    // to be deleted individually, which is why they're in this same batch
-    // rather than a separate step. (A session realistically has at most a
-    // few dozen day-docs — one rental's worth of days — nowhere close to
-    // the 500-write batch limit alongside the other deletes here.)
+    // 3d. Delete bookingSession. No archive/{date} subcollection lives under
+    // it anymore (pings are in Sheets, untouched by this delete), so there's
+    // nothing else underneath it to clean up in this batch.
     if (sessionResult) {
       batch.delete(sessionResult.docRef);
-      for (const { docRef: dayRef } of sessionArchiveDays) {
-        batch.delete(dayRef);
-      }
     }
 
     await batch.commit();
@@ -338,11 +315,9 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     reviewsArchivesIDs,
     reviewsArchivedCount : reviewResults.length,
     sessionArchived       : Boolean(sessionResult),
-    sessionArchiveDaysCount : sessionArchiveDays.length,
     message          :
       `Booking ${bookingDocID} and ${paymentResult ? 1 : 0} payment(s), ` +
       `${reviewResults.length} review(s), ` +
-      `${sessionResult ? 1 : 0} session (${sessionArchiveDays.length} archive day-doc(s)) ` +
-      `archived and deleted successfully.`,
+      `${sessionResult ? 1 : 0} session archived and deleted successfully.`,
   };
 };

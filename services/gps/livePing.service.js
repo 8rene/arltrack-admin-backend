@@ -9,7 +9,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import { getActiveSessionByCar } from "../../services/booking/bookingSession.service.js";
 import { checkGeofence } from "./geofence.service.js";
 import { isCodingRestricted } from "./coding.service.js";
-import { phtDateFromInstant } from "../../utils/date/phtDate.js";
+import { appendCarPing } from "../sheets/sheets.service.js";
 
 /** Small in-memory cache for plateNumber lookups — rarely changes, cheap to cache per car. */
 const plateCache = {};
@@ -80,15 +80,22 @@ export const processLivePing = async (carID, lat, lng) => {
 
   await ref.update(updates);
 
-  // ── Append to today's archive day-doc ──────────────────────────
-  // Doc ID = PHT date, matching the customer backend's traceback reader
-  // (getBookingTraceback sorts archive doc IDs as strings, relying on the
-  // "YYYY-MM-DD" naming — this must stay consistent with that).
-  const dayDocID = phtDateFromInstant(now);
-  await ref.collection("archive").doc(dayDocID).set(
-    {
-      points: admin.firestore.FieldValue.arrayUnion({ lat, lng, at: now.toISOString() }),
-    },
-    { merge: true }
-  );
+  // ── Append this ping to the Sheets ping log ──────────────────────
+  // Direct append, no interval/batch buffer — see sheets.service.js's header
+  // note for why (Vercel's serverless model can freeze/kill this function
+  // instance the moment the response is sent, so a buffered write sitting in
+  // memory could silently vanish). Logs on failure but never throws — a
+  // failed Sheets write must not undo the session update that already
+  // succeeded above.
+  try {
+    await appendCarPing({
+      carId: carID,
+      sessionId: data.bookingSessionID,
+      lat,
+      lng,
+      at: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("[GPS] Sheets append failed (session doc was still updated):", err.message);
+  }
 };

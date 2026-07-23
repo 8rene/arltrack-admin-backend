@@ -5,7 +5,7 @@
 // Query helpers exist because Firestore has no joins — these resolve
 // "which session is active for this car right now" without one:
 //
-//   getActiveSessionByCar / getAllActiveSessions — read by carID / sessionStatus
+//   getActiveSessionByCar / getAllActiveSessions — read by carID / status
 //   getSessionById / getSessionByBookingID        — direct + FK lookups
 //   markSessionActive / markSessionEnded / markSessionStolen — status writes,
 //     called from wherever pickup / return / stolen actually happen
@@ -24,7 +24,7 @@ const SESSIONS = () => db.collection("bookingSessions");
 export const getActiveSessionByCar = async (carID) => {
   const snap = await SESSIONS()
     .where("carID", "==", carID)
-    .where("sessionStatus", "==", "active")
+    .where("status", "==", "active")
     .limit(1)
     .get();
   if (snap.empty) return null;
@@ -34,7 +34,7 @@ export const getActiveSessionByCar = async (carID) => {
 
 /** All sessions currently active — this is what the nightly cron iterates. */
 export const getAllActiveSessions = async () => {
-  const snap = await SESSIONS().where("sessionStatus", "==", "active").get();
+  const snap = await SESSIONS().where("status", "==", "active").get();
   return snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
 };
 
@@ -80,14 +80,14 @@ export const getSessionByBookingID = async (bookingID) => {
 export const markSessionActive = async (bookingSessionID, carID) => {
   await SESSIONS().doc(bookingSessionID).update({
     carID,
-    sessionStatus: "active",
+    status: "active",
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 };
 
 export const markSessionCancelled = async (bookingSessionID) => {
   await SESSIONS().doc(bookingSessionID).update({
-    sessionStatus: "cancelled",
+    status: "cancelled",
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 };
@@ -95,7 +95,7 @@ export const markSessionCancelled = async (bookingSessionID) => {
 /** Mark a session ended — call at return/cancel. Leaves carID as history. */
 export const markSessionEnded = async (bookingSessionID) => {
   await SESSIONS().doc(bookingSessionID).update({
-    sessionStatus: "ended",
+    status: "ended",
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 };
@@ -103,7 +103,7 @@ export const markSessionEnded = async (bookingSessionID) => {
 /** Flag a session stolen — call from the Car Tracking "Stolen" button. Manual only, no auto-trigger. */
 export const markSessionStolen = async (bookingSessionID) => {
   await SESSIONS().doc(bookingSessionID).update({
-    sessionStatus: "stolen",
+    status: "stolen",
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 };

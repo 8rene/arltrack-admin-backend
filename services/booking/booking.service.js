@@ -64,6 +64,27 @@ const resolveServiceType = async (serviceTypeID) => {
   } catch { return "—"; }
 };
 
+// bookingID → { hasHistory, bookingSessionID, lastArchivedAt } — powers the
+// "Trip History" row in the Bookings page's detail view, and the deep-link
+// into Car Tracking's History tab (see routes/booking/booking.routes.js
+// callers). hasHistory is true only once bookingHistory.service.js has
+// actually flushed a trail to Storage (archiveUrl set) — a session that
+// exists but never got flushed still reports false, same as "no session at
+// all", since either way there's nothing in History to show yet.
+const resolveHistoryInfo = async (bookingID) => {
+  if (!bookingID) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null };
+  try {
+    const snap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
+    if (snap.empty) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null };
+    const data = snap.docs[0].data();
+    return {
+      hasHistory:       !!data.archiveUrl,
+      bookingSessionID: data.bookingSessionID || null,
+      lastArchivedAt:   data.lastArchivedAt || null,
+    };
+  } catch { return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null }; }
+};
+
 // ─────────────────────────────────────────────
 // Archive to notificationsArchive when booking status resolves
 // (Frontend reads live from bookings collection directly)
@@ -121,29 +142,35 @@ export const getAllBookings = async (statusFilter) => {
   const userIDs        = [...new Set(rows.map((b) => b.userID).filter(Boolean))];
   const serviceTypeIDs = [...new Set(rows.map((b) => b.serviceTypeID).filter(Boolean))];
 
-  const [vehicleEntries, paymentEntries, userEntries, serviceTypeEntries] = await Promise.all([
+  const [vehicleEntries, paymentEntries, userEntries, serviceTypeEntries, historyEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(serviceTypeIDs.map((id) => resolveServiceType(id).then((s) => [id, s]))),
+    Promise.all(bookingIDs.map((id) => resolveHistoryInfo(id).then((h) => [id, h]))),
   ]);
 
   const vehicleMap     = Object.fromEntries(vehicleEntries);
   const paymentMap     = Object.fromEntries(paymentEntries);
   const userMap        = Object.fromEntries(userEntries);
   const serviceTypeMap = Object.fromEntries(serviceTypeEntries);
+  const historyMap     = Object.fromEntries(historyEntries);
 
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
     const payInfo = paymentMap[bID] || { paymentMethod: "—", totalFee: 0 };
+    const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null };
     return {
       ...b,
-      vehicleName:     vehicleMap[b.carID] || "—",
-      paymentMethod:   payInfo.paymentMethod,
-      totalFee:        payInfo.totalFee,        // from payments.amount
-      customerName:    userMap[b.userID]?.customerName || "—",
-      phone:           userMap[b.userID]?.phone || "—",
-      serviceTypeName: serviceTypeMap[b.serviceTypeID] || "—",
+      vehicleName:      vehicleMap[b.carID] || "—",
+      paymentMethod:    payInfo.paymentMethod,
+      totalFee:         payInfo.totalFee,        // from payments.amount
+      customerName:     userMap[b.userID]?.customerName || "—",
+      phone:            userMap[b.userID]?.phone || "—",
+      serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
+      hasHistory:       histInfo.hasHistory,
+      bookingSessionID: histInfo.bookingSessionID,
+      lastArchivedAt:   histInfo.lastArchivedAt,
     };
   });
 };
@@ -210,6 +237,19 @@ export const updateBooking = async (docID, updates) => {
       const session = await getSessionByBookingID(bID);
       if (session) {
         await markSessionActive(session.data.bookingSessionID, carID);
+        // Flush right away too — mostly just so a file actually shows up in
+        // Storage the moment tracking starts, as reassurance the pipeline is
+        // wired correctly, rather than only ever appearing at Return or
+        // whenever tonight's cron happens to run. It'll be near-empty at
+        // this exact instant (no GPS pings have landed yet), and gets
+        // overwritten with the real trail as the trip progresses and again
+        // at Return — this first flush is just an early proof-of-life, not
+        // the final archive.
+        try {
+          await flushBookingHistory(session.data.bookingSessionID);
+        } catch (flushErr) {
+          console.error("[Booking] Pickup flush failed (session still marked active, cron will retry tonight):", flushErr.message);
+        }
       } else {
         console.warn(`[Booking] No bookingSession found for booking ${bID} — GPS tracking won't start for this trip.`);
       }

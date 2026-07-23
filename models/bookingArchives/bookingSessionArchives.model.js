@@ -6,7 +6,7 @@ export const BookingSessionArchive = {
   bookingSessionID: "",
   bookingID: "",                 // FK back to the (now also archived) booking
   carID: "",
-  sessionStatus: "",             // upcoming | active | ended | stolen — frozen at archive time
+  status: "",             // upcoming | active | ended | stolen — frozen at archive time
   pickupLocation: null,
   dropoffLocation: null,
   geofenceZones: [],

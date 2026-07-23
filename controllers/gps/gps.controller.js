@@ -2,6 +2,8 @@ import { saveLocation } from "../../services/gps/gps.service.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getSessionsByCar, getActiveSessionByCar } from "../../services/booking/bookingSession.service.js";
+import { fetchCarRowsForDate } from "../../services/sheets/sheets.service.js";
+import { datesBetweenPHT } from "../../utils/date/phtDate.js";
 import admin from "firebase-admin";
 
 /** POST /api/gps  — GPS device pushes a live location */
@@ -334,7 +336,7 @@ export const getCarActiveSession = async (req, res) => {
       data: {
         hasActiveSession: true,
         bookingSessionID: data.bookingSessionID,
-        sessionStatus:    data.sessionStatus,
+        status:    data.status,
         geofenceZones:    data.geofenceZones || [],
         geofenceAlerts:   data.geofenceAlerts || [],
         codingAlerts:     data.codingAlerts || [],
@@ -391,9 +393,11 @@ export const updateCarGeofence = async (req, res) => {
 /**
  * GET /api/gps/:carId/traceback?date=YYYY-MM-DD
  * One car's full GPS trail for one day — used by Car Tracking's Traceback tab.
- * A car can have more than one session in its lifetime, so this checks every
- * session ever tied to the car for an archive/{date} day-doc, not just the
- * currently active one, and merges + sorts whatever it finds by timestamp.
+ * Ping data now lives in Google Sheets (one tab per PHT date, shared across
+ * every car) instead of a per-session Firestore archive/{date} subcollection
+ * — see services/sheets/sheets.service.js. A car's trail for a given date is
+ * just that date's tab filtered to this car, so no session lookup is needed
+ * here anymore (a session lookup IS still needed for History — see below).
  */
 export const getCarTraceback = async (req, res) => {
   try {
@@ -404,22 +408,39 @@ export const getCarTraceback = async (req, res) => {
       return res.status(400).json({ status: "error", message: "date (YYYY-MM-DD) is required." });
     }
 
-    const sessions = await getSessionsByCar(carId);
-    if (!sessions.length) {
-      return res.json({ status: "ok", data: { carId, date, records: [] } });
-    }
+    const rows = await fetchCarRowsForDate(carId, date);
 
-    const dayDocs = await Promise.all(
-      sessions.map(({ ref }) => ref.collection("archive").doc(date).get())
-    );
-
-    const records = dayDocs
-      .filter((doc) => doc.exists)
-      .flatMap((doc) => doc.data()?.points || [])
-      .filter((p) => p && typeof p.lat === "number" && typeof p.lng === "number" && p.at)
+    const records = rows
+      .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
+      .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at }))
       .sort((a, b) => new Date(a.at) - new Date(b.at));
 
-    return res.json({ status: "ok", data: { carId, date, records } });
+    // Geofence-breach / coding-restriction banner needs the zones + alert
+    // logs for whichever session actually spans this date — records above
+    // come straight from Sheets with no session context, so we look up the
+    // session separately here rather than change how records are sourced.
+    let geofenceZones = [];
+    let geofenceAlerts = [];
+    let codingAlerts = [];
+    try {
+      const sessions = await getSessionsByCar(carId);
+      const match = sessions.find((s) => {
+        const pickup = s.data.pickupTime?.toDate?.() || (s.data.pickupTime ? new Date(s.data.pickupTime) : null);
+        if (!pickup) return false;
+        const end = s.data.returnTime?.toDate?.() || (s.data.returnTime ? new Date(s.data.returnTime) : new Date());
+        return datesBetweenPHT(pickup, end).includes(date);
+      });
+      if (match) {
+        geofenceZones  = match.data.geofenceZones  || [];
+        geofenceAlerts = match.data.geofenceAlerts || [];
+        codingAlerts   = match.data.codingAlerts   || [];
+      }
+    } catch (lookupErr) {
+      console.error("[GPS] getCarTraceback session lookup error:", lookupErr.message);
+      // Non-fatal — traceback still returns points, just without zone/alert data.
+    }
+
+    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts } });
   } catch (err) {
     console.error("[GPS] getCarTraceback error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to fetch traceback." });
@@ -444,7 +465,7 @@ export const getCarHistory = async (req, res) => {
       .map(({ data }) => ({
         bookingSessionID: data.bookingSessionID,
         bookingID:        data.bookingID || null,
-        sessionStatus:    data.sessionStatus || null,
+        status:    data.status || null,
         pickupTime:       data.pickupTime || null,
         returnTime:       data.returnTime || null,
         archiveUrl:       data.archiveUrl,

@@ -13,7 +13,7 @@ export const BookingSession = {
   bookingSessionID: "",
   bookingID:         "",  // FK to bookings/{id} — doc ID is NOT this value
     // upcoming | active | ended | cancelled | stolen
-  sessionStatus:      "",
+  status:      "",
   // carID is denormalized here on dispatch/pickup, so a GPS ping can
   // resolve straight to a session with one query instead of reading the
   // booking doc on every single ping. NOT re-derived from the live

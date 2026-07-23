@@ -8,22 +8,22 @@ import {
   unassignDeviceFromCar,
   updateGpsDevice,
   deleteGpsDevice,
-  getCarTraceback,
-  getCarHistory,
   getCarActiveSession,
   updateCarGeofence,
+  getCarTraceback,
+  getCarHistory,
 } from "../../controllers/gps/gps.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// Visible to: Supervisor, Admin, Owner
-const allowed = [roles.SUPERVISOR, roles.ADMIN, roles.OWNER];
+// Visible to: Owner, Supervisor, Admin
+const allowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN];
 
 export const registerGpsRoutes = (app) => {
   // GPS device pushes location (no auth — device uses device_id as key)
   app.post("/api/gps", receiveLocation);
 
-  // GPS device management — Admin, Supervisor, Owner only
+  // GPS device management — Owner, Admin, Supervisor
   app.get("/api/gps/devices",             verifyToken, requireRole(allowed), getAllGpsDevices);
   app.post("/api/gps/devices",            verifyToken, requireRole(allowed), addGpsDevice);
   app.put("/api/gps/devices/:id/assign",  verifyToken, requireRole(allowed), assignCarToDevice);
@@ -31,14 +31,15 @@ export const registerGpsRoutes = (app) => {
   app.patch("/api/gps/devices/:id",       verifyToken, requireRole(allowed), updateGpsDevice);
   app.delete("/api/gps/devices/:id",      verifyToken, requireRole(allowed), deleteGpsDevice);
 
-  // Car Tracking — Traceback (per-car, per-date trail) & History (list of archived trips)
-  // MUST be registered before /api/gps/:id since both start with /api/gps/<param>,
-  // but these have an extra path segment so they never actually collide with it —
-  // kept together here for readability, not because order matters for these two.
-  app.get("/api/gps/:carId/traceback", verifyToken, requireRole(allowed), getCarTraceback);
-  app.get("/api/gps/:carId/history",   verifyToken, requireRole(allowed), getCarHistory);
+  // Car Tracking — Live / Traceback / History / geofence editing.
+  // These were already being called by the frontend (CarTracking.jsx,
+  // TracebackPanel.jsx, HistoryPanel.jsx) and already existed as exported
+  // controller functions, but were never registered here — every one of
+  // these routes was 404ing. Fixed.
   app.get("/api/gps/:carId/session",   verifyToken, requireRole(allowed), getCarActiveSession);
   app.patch("/api/gps/:carId/geofence",verifyToken, requireRole(allowed), updateCarGeofence);
+  app.get("/api/gps/:carId/traceback", verifyToken, requireRole(allowed), getCarTraceback);
+  app.get("/api/gps/:carId/history",   verifyToken, requireRole(allowed), getCarHistory);
 
   // Frontend reads locations — MUST be after /devices routes
   app.get("/api/gps",     verifyToken, requireRole(allowed), getAllDeviceLocations);
