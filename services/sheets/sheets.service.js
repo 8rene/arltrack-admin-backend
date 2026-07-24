@@ -24,6 +24,7 @@
 // sheet that was never shared with it.
 
 import { google } from "googleapis";
+import { phtDateFromInstant } from "../../utils/date/phtDate.js";
 
 const SPREADSHEET_ID = process.env.TRACEBACK_SHEET_ID;
 
@@ -106,7 +107,12 @@ async function ensureTabExists(dateStr) {
  *   default to 0/false when not provided by older callers.
  */
 export const appendCarPing = async ({ carId, sessionId, lat, lng, at, speed = 0, offline = false }) => {
-  const dateStr = at.split("T")[0];
+  // `at` is a UTC ISO string (now.toISOString() from livePing.service.js).
+  // Naively slicing its date portion mislabels every ping sent between
+  // UTC midnight and 8AM (PHT is UTC+8) as the previous PHT day — e.g.
+  // 2026-07-24T22:30Z is actually 2026-07-25 6:30AM in Manila, but a plain
+  // split("T")[0] would file it under the "2026-07-24" tab. Convert first.
+  const dateStr = phtDateFromInstant(at);
   await ensureTabExists(dateStr);
   const sheets = await getSheetsClient();
 
