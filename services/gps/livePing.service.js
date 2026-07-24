@@ -8,7 +8,7 @@ import admin from "firebase-admin";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getActiveSessionByCar } from "../../services/booking/bookingSession.service.js";
 import { checkGeofence } from "./geofence.service.js";
-import { isCodingRestricted } from "./coding.service.js";
+import { resolveCodingRestriction } from "./coding.service.js";
 import { appendCarPing } from "../sheets/sheets.service.js";
 
 /** Small in-memory cache for plateNumber lookups — rarely changes, cheap to cache per car. */
@@ -62,16 +62,20 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
   // entry on every single ping, only on breach/clear transitions.
 
   // ── Coding-restriction check ────────────────────────────────────
-  // See coding.service.js's header comment re: fixed MMDA rule vs the
-  // customer backend's Firestore codingRules — using the fixed rule here.
+  // Now city-aware: reverse-geocodes this ping's actual (lat, lng) and
+  // checks it against Firestore's codingRules — the same source of truth
+  // the customer backend's booking-time check uses — instead of the old
+  // fixed-schedule-only rule. See coding.service.js's header for the
+  // fallback behavior if the geocode lookup itself fails.
   const plateNumber = await getPlateNumber(carID);
-  const codingResult = isCodingRestricted(plateNumber, now);
+  const codingResult = await resolveCodingRestriction(plateNumber, lat, lng, now, data.codingSuspended === true);
   const lastCodingAlert = (data.codingAlerts || [])[data.codingAlerts?.length - 1];
   const wasRestricted = lastCodingAlert?.type === "restricted";
   if (codingResult.restricted && !wasRestricted) {
     updates.codingAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "restricted",
       reason: codingResult.reason,
+      city: codingResult.city || null,
       at: now.toISOString(),
     });
   } else if (!codingResult.restricted && wasRestricted) {
