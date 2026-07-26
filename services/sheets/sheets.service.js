@@ -125,40 +125,95 @@ export const appendCarPing = async ({ carId, sessionId, lat, lng, at, speed = 0,
   });
 };
 
-/** All rows for a given date's tab. Returns [] if the tab doesn't exist (no data that day). */
-export const fetchTabRows = async (dateStr) => {
-  if (!SPREADSHEET_ID) throw new Error("TRACEBACK_SHEET_ID is not set.");
+// ── Tab-rows cache ───────────────────────────────────────────────────────
+// The Traceback tab asks for one date's rows PER CAR (Promise.allSettled
+// over every car in gps.controller.js's getCarTraceback), but every one of
+// those requests reads the exact same tab and then filters client-side —
+// so N cars used to mean N identical Sheets API reads for one date. On top
+// of that, whatever re-triggers the frontend's fetch (the Refresh button,
+// a re-render, switching days) fires the whole batch again.
+//
+// tabRowsCache holds, per date string, either the last good rows + when they
+// were fetched, or an in-flight promise other callers can just await instead
+// of starting their own request. This turns "N cars × M re-fetches" into
+// roughly one real Sheets read per date per TTL window — the fix for
+// hitting the Sheets API's read-quota ceiling — without changing any
+// response shape callers rely on. TTL is intentionally short: pings land
+// in Sheets in near-real-time, so this is about collapsing duplicate/rapid
+// reads, not about serving genuinely stale data.
+const TAB_ROWS_CACHE_TTL_MS = 15_000;
+const tabRowsCache = new Map(); // dateStr -> { rows, fetchedAt, inflight }
+
+function parseTabRows(values) {
+  return (values || []).map((row) => {
+    const record = {};
+    HEADERS.forEach((h, i) => { record[h] = row[i] ?? null; });
+    record.lat = record.lat !== null ? parseFloat(record.lat) : null;
+    record.lng = record.lng !== null ? parseFloat(record.lng) : null;
+    // speed defaults to 0 for rows written before this column existed.
+    record.speed = record.speed !== null ? parseFloat(record.speed) || 0 : 0;
+    // Sheets returns booleans back as the strings "TRUE"/"FALSE", not real
+    // true/false — normalize once here (same pattern as the geo-test
+    // reference backend) so `offline` is a real boolean everywhere downstream.
+    record.offline = String(record.offline).toUpperCase() === "TRUE";
+    return record;
+  });
+}
+
+async function fetchTabRowsFromSheets(dateStr) {
   const sheets = await getSheetsClient();
   const tabName = tabNameForDate(dateStr);
-
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: `${tabName}!A2:G`, // skip header row; G covers speed/offline
     });
-    const rows = res.data.values || [];
-    return rows.map((row) => {
-      const record = {};
-      HEADERS.forEach((h, i) => { record[h] = row[i] ?? null; });
-      record.lat = record.lat !== null ? parseFloat(record.lat) : null;
-      record.lng = record.lng !== null ? parseFloat(record.lng) : null;
-      // speed defaults to 0 for rows written before this column existed.
-      record.speed = record.speed !== null ? parseFloat(record.speed) || 0 : 0;
-      // Sheets returns booleans back as the strings "TRUE"/"FALSE", not real
-      // true/false — normalize once here (same pattern as the geo-test
-      // reference backend) so `offline` is a real boolean everywhere downstream.
-      record.offline = String(record.offline).toUpperCase() === "TRUE";
-      return record;
-    });
+    return parseTabRows(res.data.values);
   } catch (err) {
     if (err.code === 400 || err.code === 404) return []; // tab doesn't exist yet
     throw err;
   }
+}
+
+/**
+ * All rows for a given date's tab. Returns [] if the tab doesn't exist (no
+ * data that day). Cached + de-duped per date — see tabRowsCache above.
+ * Pass `{ force: true }` to bypass the cache (e.g. an explicit user-driven
+ * refresh that should reflect pings written in the last few seconds).
+ */
+export const fetchTabRows = async (dateStr, { force = false } = {}) => {
+  if (!SPREADSHEET_ID) throw new Error("TRACEBACK_SHEET_ID is not set.");
+
+  const cached = tabRowsCache.get(dateStr);
+
+  // Someone else's request for this same date is already in flight —
+  // piggyback on it instead of starting a second identical Sheets read.
+  if (cached?.inflight) return cached.inflight;
+
+  if (!force && cached && Date.now() - cached.fetchedAt < TAB_ROWS_CACHE_TTL_MS) {
+    return cached.rows;
+  }
+
+  const inflight = fetchTabRowsFromSheets(dateStr)
+    .then((rows) => {
+      tabRowsCache.set(dateStr, { rows, fetchedAt: Date.now(), inflight: null });
+      return rows;
+    })
+    .catch((err) => {
+      // Don't cache the failure — drop back to whatever we had before (if
+      // anything) so the next call gets a clean retry against Sheets.
+      if (cached) tabRowsCache.set(dateStr, { ...cached, inflight: null });
+      else tabRowsCache.delete(dateStr);
+      throw err;
+    });
+
+  tabRowsCache.set(dateStr, { rows: cached?.rows || [], fetchedAt: cached?.fetchedAt || 0, inflight });
+  return inflight;
 };
 
 /** Rows for one car on one date. */
-export const fetchCarRowsForDate = async (carId, dateStr) => {
-  const rows = await fetchTabRows(dateStr);
+export const fetchCarRowsForDate = async (carId, dateStr, opts) => {
+  const rows = await fetchTabRows(dateStr, opts);
   return rows.filter((r) => r.carId === carId);
 };
 

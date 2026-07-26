@@ -22,22 +22,30 @@ const resolveVehicleName = async (carID) => {
   } catch { return "—"; }
 };
 
-// bookingID → { paymentMethod, totalFee } from payments collection
-// totalFee comes from payments.amount field
+// bookingID → { paymentMethod, totalFee, rentalFee, depositFee, serviceFee,
+// extraFee } from payments collection. totalFee comes from payments.amount;
+// the rest come straight off the same doc — these used to be left out here,
+// so Bookings.jsx's View panel (which reads booking.rentalFee etc. flat)
+// always showed ₱0.00 for them regardless of what was actually in payments.
+const EMPTY_PAYMENT_INFO = { paymentMethod: "—", totalFee: 0, rentalFee: 0, depositFee: 0, serviceFee: 0, extraFee: 0 };
 const resolvePaymentInfo = async (bookingID) => {
-  if (!bookingID) return { paymentMethod: "—", totalFee: 0 };
+  if (!bookingID) return EMPTY_PAYMENT_INFO;
   try {
     const snap = await db.collection("payments")
       .where("bookingID", "==", bookingID)
       .limit(1)
       .get();
-    if (snap.empty) return { paymentMethod: "—", totalFee: 0 };
+    if (snap.empty) return EMPTY_PAYMENT_INFO;
     const data = snap.docs[0].data();
     return {
       paymentMethod: data.paymentMethod || "—",
-      totalFee: data.amount ?? 0,
+      totalFee:      data.amount        ?? 0,
+      rentalFee:     data.rentalFee     ?? 0,
+      depositFee:    data.depositFee    ?? 0,
+      serviceFee:    data.serviceFee    ?? 0,
+      extraFee:      data.extraFee      ?? 0,
     };
-  } catch { return { paymentMethod: "—", totalFee: 0 }; }
+  } catch { return EMPTY_PAYMENT_INFO; }
 };
 
 const resolveUserInfo = async (userID) => {
@@ -158,13 +166,17 @@ export const getAllBookings = async (statusFilter) => {
 
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
-    const payInfo = paymentMap[bID] || { paymentMethod: "—", totalFee: 0 };
+    const payInfo = paymentMap[bID] || EMPTY_PAYMENT_INFO;
     const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null };
     return {
       ...b,
       vehicleName:      vehicleMap[b.carID] || "—",
       paymentMethod:    payInfo.paymentMethod,
       totalFee:         payInfo.totalFee,        // from payments.amount
+      rentalFee:        payInfo.rentalFee,
+      depositFee:       payInfo.depositFee,
+      serviceFee:       payInfo.serviceFee,
+      extraFee:         payInfo.extraFee,
       customerName:     userMap[b.userID]?.customerName || "—",
       phone:            userMap[b.userID]?.phone || "—",
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",

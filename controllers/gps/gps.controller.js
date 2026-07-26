@@ -478,13 +478,17 @@ export const updateCarGeofenceDefaults = async (req, res) => {
 export const getCarTraceback = async (req, res) => {
   try {
     const { carId } = req.params;
-    const { date }  = req.query;
+    const { date, force } = req.query;
 
     if (!date) {
       return res.status(400).json({ status: "error", message: "date (YYYY-MM-DD) is required." });
     }
 
-    const rows = await fetchCarRowsForDate(carId, date);
+    // `force=true` (sent by the frontend's explicit Refresh button) bypasses
+    // the short-lived tab-rows cache in sheets.service.js so a deliberate
+    // refresh actually reflects the latest pings, instead of serving
+    // whatever was cached seconds ago.
+    const rows = await fetchCarRowsForDate(carId, date, { force: force === "true" });
 
     const records = rows
       .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
