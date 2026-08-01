@@ -28,13 +28,17 @@ const getPlateNumber = async (carID) => {
  * @param {number} [speed] — km/h, straight from the tracker's own reading (not derived here)
  * @param {boolean} [offline] — true when this ping was buffered by the tracker while it had
  *   no signal and sent later on reconnect, rather than reported live
+ * @param {Date} [recordedAt] — the tracker's real GNSS timestamp for this ping. Passed
+ *   through as `now` below so geofence/coding alerts and the Sheets ping log (including
+ *   which date-tab it's routed to) reflect when the ping actually happened, not when the
+ *   backlog happened to flush. Defaults to receive time if the caller didn't have one.
  */
-export const processLivePing = async (carID, lat, lng, speed = 0, offline = false) => {
+export const processLivePing = async (carID, lat, lng, speed = 0, offline = false, recordedAt = new Date()) => {
   const session = await getActiveSessionByCar(carID);
   if (!session) return; // no active trip on this car — nothing more to do
 
   const { ref, data } = session;
-  const now = new Date();
+  const now = recordedAt;
   const updates = {
     currentPosition: { lat, lng, date: now.toISOString() },
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),

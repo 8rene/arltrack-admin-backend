@@ -16,12 +16,12 @@ const cache = {};
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Write one location to Firestore + update cache */
-export const saveLocation = async (deviceId, lat, lng) => {
+export const saveLocation = async (deviceId, lat, lng, recordedAt = new Date()) => {
   const record = {
     deviceId,
     lat: parseFloat(lat),
     lng: parseFloat(lng),
-    updatedAt: new Date().toISOString(),
+    updatedAt: recordedAt.toISOString(), // the tracker's real GNSS time, not receive time
   };
 
   // Update in-memory cache immediately
@@ -30,7 +30,7 @@ export const saveLocation = async (deviceId, lat, lng) => {
   // Persist to Firestore using admin SDK
   try {
     await db.collection("gpsLocations").doc(deviceId).set(
-      { ...record, savedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { ...record, savedAt: admin.firestore.Timestamp.fromDate(recordedAt) },
       { merge: true }
     );
   } catch (err) {

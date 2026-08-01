@@ -8,7 +8,7 @@ import admin from "firebase-admin";
 
 /** POST /api/gps  — GPS device pushes a live location */
 export const receiveLocation = async (req, res) => {
-  const { device_id, lat, lng, speed, offline } = req.body;
+  const { device_id, lat, lng, speed, offline, recorded_at } = req.body;
   if (!device_id || lat == null || lng == null) {
     return res.status(400).json({ status: "error", message: "device_id, lat, lng required." });
   }
@@ -19,9 +19,24 @@ export const receiveLocation = async (req, res) => {
   const speedVal   = speed != null ? parseFloat(speed) || 0 : 0;
   const offlineVal = offline === true || offline === "true";
 
+  // Prefer the tracker's own GNSS timestamp over receive time — critical for
+  // offline-buffered pings, which otherwise all land bunched together at
+  // whatever moment the backlog happened to flush instead of when each point
+  // actually occurred. Falls back to receive time if missing/unparseable so a
+  // malformed or older-firmware payload never crashes the ping.
+  let recordedAt = new Date();
+  if (recorded_at) {
+    const parsed = new Date(recorded_at);
+    if (!isNaN(parsed.getTime())) {
+      recordedAt = parsed;
+    } else {
+      console.warn(`[GPS] ⚠️ ${device_id} sent unparseable recorded_at ("${recorded_at}") — using receive time instead`);
+    }
+  }
+
   let data;
   try {
-    data = await saveLocation(device_id, lat, lng);
+    data = await saveLocation(device_id, lat, lng, recordedAt);
   } catch (err) {
     console.error("[GPS] saveLocation failed:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to save location." });
@@ -34,12 +49,12 @@ export const receiveLocation = async (req, res) => {
     if (!deviceSnap.empty) {
       await deviceSnap.docs[0].ref.update({
         lastLocation: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.Timestamp.fromDate(recordedAt),
       });
 
       const assignedCarID = deviceSnap.docs[0].data().carID;
       if (assignedCarID) {
-        processLivePing(assignedCarID, parseFloat(lat), parseFloat(lng), speedVal, offlineVal).catch((err) =>
+        processLivePing(assignedCarID, parseFloat(lat), parseFloat(lng), speedVal, offlineVal, recordedAt).catch((err) =>
           console.error("[GPS] processLivePing failed (raw ping was still saved):", err.message)
         );
       }
@@ -54,7 +69,7 @@ export const receiveLocation = async (req, res) => {
         longtitude: parseFloat(lng), // preserving existing typo in DB
         speed:      speedVal,
         offline:    offlineVal,
-        updatedAt:  admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt:  admin.firestore.Timestamp.fromDate(recordedAt),
       });
     } else {
       await db.collection("gpsLocation").add({
@@ -63,8 +78,8 @@ export const receiveLocation = async (req, res) => {
         longtitude:  parseFloat(lng), // preserving existing typo in DB
         speed:       speedVal,
         offline:     offlineVal,
-        updatedAt:   admin.firestore.FieldValue.serverTimestamp(),
-        createdAt:   admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt:   admin.firestore.Timestamp.fromDate(recordedAt),
+        createdAt:   admin.firestore.FieldValue.serverTimestamp(), // doc creation bookkeeping — receive time is correct here
       });
     }
   } catch (err) {
