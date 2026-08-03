@@ -7,38 +7,63 @@ const toDate = (val) => {
   return new Date(val);
 };
 
-const getRange = (period, refDate = new Date()) => {
-  const y = refDate.getFullYear();
-  const m = refDate.getMonth();
-  const d = refDate.getDate();
+/**
+ * Builds the date range for a report.
+ *
+ * All selections (year / month / week / day) are now EXPLICIT and come from
+ * the user via the Reports tab dropdowns — we no longer silently default to
+ * "today". `refDate` is only used as a last-resort fallback if a value is
+ * missing (kept for backwards compatibility / safety).
+ *
+ * @param {string} period  daily | weekly | monthly | yearly
+ * @param {object} sel     { year, month, week, day } — all 1-based, month 1-12
+ */
+const getRange = (period, sel = {}, refDate = new Date()) => {
+  const y = Number(sel.year)  || refDate.getFullYear();
+  const m = (sel.month ? Number(sel.month) - 1 : refDate.getMonth()); // 0-based
+  const d = Number(sel.day)   || refDate.getDate();
 
   if (period === "daily") {
     const start = new Date(y, m, d, 0, 0, 0, 0);
     const end   = new Date(y, m, d, 23, 59, 59, 999);
     return { start, end, label: start.toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" }) };
   }
+
   if (period === "weekly") {
-    const dow = refDate.getDay();
-    const diffMon = dow === 0 ? -6 : 1 - dow;
-    const start = new Date(y, m, d + diffMon, 0, 0, 0, 0);
-    const end   = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23,59,59,999);
-    return { start, end, label: `${start.toLocaleDateString("en-PH",{month:"short",day:"numeric"})} – ${end.toLocaleDateString("en-PH",{month:"short",day:"numeric",year:"numeric"})}` };
+    // Month is split into fixed 7-day buckets: Week 1 = days 1-7, Week 2 = 8-14,
+    // Week 3 = 15-21, Week 4 = 22-28, Week 5 = 29-end of month.
+    const week = Number(sel.week) || 1;
+    const lastDayOfMonth = new Date(y, m + 1, 0).getDate();
+
+    const startDay = Math.min((week - 1) * 7 + 1, lastDayOfMonth);
+    const endDay    = Math.min(week * 7, lastDayOfMonth);
+
+    const start = new Date(y, m, startDay, 0, 0, 0, 0);
+    const end   = new Date(y, m, endDay, 23, 59, 59, 999);
+    return {
+      start,
+      end,
+      label: `Week ${week} · ${start.toLocaleDateString("en-PH", { month: "short", day: "numeric" })} – ${end.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}`,
+    };
   }
+
   if (period === "monthly") {
     const start = new Date(y, m, 1, 0, 0, 0, 0);
     const end   = new Date(y, m + 1, 0, 23, 59, 59, 999);
     return { start, end, label: start.toLocaleDateString("en-PH", { month: "long", year: "numeric" }) };
   }
+
   if (period === "yearly") {
     const start = new Date(y, 0, 1, 0, 0, 0, 0);
     const end   = new Date(y, 11, 31, 23, 59, 59, 999);
     return { start, end, label: String(y) };
   }
+
   throw new Error("Invalid period.");
 };
 
-export const generateReport = async (period) => {
-  const { start, end, label } = getRange(period);
+export const generateReport = async (period, selection = {}) => {
+  const { start, end, label } = getRange(period, selection);
 
   const startTs = new Date(start);
   const endTs   = new Date(end);
