@@ -15,6 +15,7 @@ import { registerTransactionLogsRoutes }     from "./routes/transactionLogs/tran
 import { registerInventoryRoutes }           from "./routes/inventory/inventory.routes.js";
 import { registerVehicleDocsRoutes }         from "./routes/vehicleDocumentation/vehicleDocumentation.routes.js";
 import { registerFleetRoutes }               from "./routes/fleet/fleet.routes.js"; // ← NEW
+import { registerRefundRequestRoutes }       from "./routes/refundRequest/refundRequest.routes.js"; // ← NEW
 import { startBookingWatcher }               from "./watchers/bookingWatcher.js";
 import { registerUserLogArchiveRoutes }        from "./routes/archives/userLogArchiveRoutes.js";
 import { registerPaymentsArchiveRoutes }       from "./routes/archives/paymentsArchiveRoutes.js";
@@ -52,6 +53,7 @@ registerGpsRoutes(app);
 registerInventoryRoutes(app);
 registerVehicleDocsRoutes(app);
 registerFleetRoutes(app);              // ← NEW
+registerRefundRequestRoutes(app);      // ← NEW
 registerUserLogArchiveRoutes(app);
 registerPaymentsArchiveRoutes(app);
 registerBookingArchiveRoutes(app);

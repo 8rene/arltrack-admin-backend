@@ -141,3 +141,4 @@ export const getYearlyAnalytics = async () => {
     total: months.reduce((s, m) => s + m.revenue, 0),
   };
 };
+
