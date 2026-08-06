@@ -20,7 +20,7 @@ import {
 import { verifyToken }            from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles }     from "../../middlewares/role/role.middleware.js";
 
-const allowed = [roles.SUPERVISOR, roles.ADMIN];
+const allowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN];
 
 export const registerFleetRoutes = (app) => {
   // ── Cars ──────────────────────────────────────────
