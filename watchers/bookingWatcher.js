@@ -1,29 +1,25 @@
 /**
  * bookingWatcher.js
  *
- * Logic:
- * - Frontend reads DIRECTLY from "bookings" collection (cancellation_request)
- *   so NO notification docs are written here. New bookings land straight in
- *   "upcoming" now (no more "pending" awaiting approval), so only
- *   cancellation requests need bell attention.
+ * Bookings land straight in "upcoming" at creation now — there is no
+ * "pending awaiting approval" state anymore (see bookings.controller.js
+ * in the customer backend). So the only booking-side event that still
+ * needs admin attention is a cancellation request.
  *
- * - This watcher tracks status changes for logging purposes only.
- *   Archiving to "notificationsArchive" is handled by booking.service.js
- *   to avoid duplicate records.
+ * This watcher creates a real `notifications` doc (via notification.service.js)
+ * the moment a booking's status transitions INTO "cancellation_request",
+ * and auto-resolves it the moment the booking moves back OUT of that
+ * status (admin approved/rejected it, or it changed some other way).
  */
 
 import { db } from "../config/firebaseConnection/firebase.js";
+import { createNotification, resolveNotification } from "../services/notification/notification.service.js";
 
-// Statuses that are "active" in notifications (shown in bell/alerts)
 const ACTIVE_STATUSES = new Set(["cancellation_request"]);
-
-// Statuses that mean the booking moved out of notifications
-const ARCHIVE_STATUSES = new Set(["upcoming", "ongoing", "completed", "cancelled"]);
 
 export const startBookingWatcher = () => {
   console.log("🔔 [BookingWatcher] Watching bookings for status changes...");
 
-  // Track last known status per booking doc
   const lastStatus = new Map();
 
   db.collection("bookings").onSnapshot(async (snap) => {
@@ -33,8 +29,18 @@ export const startBookingWatcher = () => {
       const status  = booking.status?.toLowerCase();
 
       if (change.type === "added") {
-        // Just record the initial status, no archive needed
         lastStatus.set(docID, status);
+        // A booking can theoretically be created directly in cancellation_request
+        // (unlikely, but handle it) — otherwise nothing to do on add.
+        if (ACTIVE_STATUSES.has(status)) {
+          await createNotification({
+            type: "cancellation_request",
+            refID: docID,
+            refCollection: "bookings",
+            title: "Cancellation request",
+            message: `Booking ${booking.bookingID || docID} has a pending cancellation request.`,
+          });
+        }
         continue;
       }
 
@@ -42,14 +48,24 @@ export const startBookingWatcher = () => {
         const prev = lastStatus.get(docID);
         lastStatus.set(docID, status);
 
-        // Just log the status change — archiving is handled by booking.service.js
-        if (ACTIVE_STATUSES.has(prev) && ARCHIVE_STATUSES.has(status)) {
-          console.log(`📦 [BookingWatcher] Status changed ${docID}: ${prev} → ${status}`);
+        if (!ACTIVE_STATUSES.has(prev) && ACTIVE_STATUSES.has(status)) {
+          // Just entered cancellation_request — create the alert
+          await createNotification({
+            type: "cancellation_request",
+            refID: docID,
+            refCollection: "bookings",
+            title: "Cancellation request",
+            message: `Booking ${booking.bookingID || docID} has a pending cancellation request.`,
+          });
+        } else if (ACTIVE_STATUSES.has(prev) && !ACTIVE_STATUSES.has(status)) {
+          // Left cancellation_request — resolved/rejected, clear the alert
+          await resolveNotification("cancellation_request", docID);
         }
       }
 
       if (change.type === "removed") {
         lastStatus.delete(docID);
+        await resolveNotification("cancellation_request", docID);
       }
     }
   }, (err) => {

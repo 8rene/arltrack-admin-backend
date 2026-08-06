@@ -17,6 +17,7 @@ import { registerVehicleDocsRoutes }         from "./routes/vehicleDocumentation
 import { registerFleetRoutes }               from "./routes/fleet/fleet.routes.js"; // ← NEW
 import { registerRefundRequestRoutes }       from "./routes/refundRequest/refundRequest.routes.js"; // ← NEW
 import { startBookingWatcher }               from "./watchers/bookingWatcher.js";
+import { startUserWatcher }                  from "./watchers/userWatcher.js";
 import { registerUserLogArchiveRoutes }        from "./routes/archives/userLogArchiveRoutes.js";
 import { registerPaymentsArchiveRoutes }       from "./routes/archives/paymentsArchiveRoutes.js";
 import { registerBookingArchiveRoutes }        from "./routes/archives/bookingArchiveRoutes.js";
@@ -25,6 +26,7 @@ import { registerAuditLogsArchiveRoutes }      from "./routes/archives/auditLogs
 import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsArchiveRoutes.js";
 import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSessionArchiveRoutes.js";
 import { registerCronRoutes }                  from "./routes/cron/cron.routes.js";
+import { registerMaintenanceRoutes }           from "./routes/maintenance/maintenance.routes.js"; // ← NEW
 import { seedCacheFromFirestore }            from "./services/gps/gps.service.js";
 
 const app = express();
@@ -62,6 +64,7 @@ registerAuditLogsArchiveRoutes(app);
 registerReviewsArchiveRoutes(app);
 registerBookingSessionArchiveRoutes(app);  // ← NEW
 registerCronRoutes(app);              // ← NEW
+registerMaintenanceRoutes(app);       // ← NEW
 
 const PORT = process.env.PORT || 5000;
 
@@ -69,6 +72,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   await seedCacheFromFirestore();
   startBookingWatcher();
+  startUserWatcher();
 });
 
 export default app;

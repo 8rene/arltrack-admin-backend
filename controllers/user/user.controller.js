@@ -1,5 +1,42 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveRoleID, ROLE_LIST_VIEWABLE_BY } from "../../utils/roles/role.util.js";
+
+/**
+ * GET /api/users?role=Customer|Driver|Supervisor|Admin
+ *
+ * Replaces the frontend querying Firestore directly with `where("roleID",
+ * "==", <id>)`. That approach required the frontend to know each role's
+ * Firestore doc ID (previously hardcoded, then briefly a broken dynamic
+ * lookup) AND relied entirely on Firestore security rules to stop someone
+ * reading other roles' data via devtools. This endpoint does the roleID
+ * resolution here (role.util.js already owns that logic) and the actual
+ * query with the Admin SDK, so client-side Firestore rules are no longer
+ * the only thing standing between a logged-in user and this data.
+ */
+export const getUsersByRole = async (req, res) => {
+  try {
+    const { role } = req.query;
+    if (!role) return res.status(400).json({ success: false, message: "role query param required." });
+
+    const viewableBy = ROLE_LIST_VIEWABLE_BY[role];
+    if (!viewableBy) return res.status(400).json({ success: false, message: `Unknown role "${role}".` });
+    if (!viewableBy.includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: `Your role does not have permission to view ${role} accounts.` });
+    }
+
+    const roleID = await resolveRoleID(role);
+    if (!roleID) return res.status(404).json({ success: false, message: `Could not resolve an ID for role "${role}".` });
+
+    const snap = await db.collection("user").where("roleID", "==", roleID).get();
+    const users = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+    return res.status(200).json({ success: true, data: users });
+  } catch (error) {
+    console.error("[USER] getUsersByRole error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 export const deleteUser = async (req, res) => {
   try {

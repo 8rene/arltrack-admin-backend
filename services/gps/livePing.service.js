@@ -10,6 +10,7 @@ import { getActiveSessionByCar } from "../../services/booking/bookingSession.ser
 import { checkGeofence } from "./geofence.service.js";
 import { resolveCodingRestriction } from "./coding.service.js";
 import { appendCarPing } from "../sheets/sheets.service.js";
+import { createNotification, resolveNotification } from "../notification/notification.service.js";
 
 /** Small in-memory cache for plateNumber lookups — rarely changes, cheap to cache per car. */
 const plateCache = {};
@@ -55,12 +56,25 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       distanceMeters: geofenceResult.distanceMeters,
       at: now.toISOString(),
     });
+    // Notification is keyed by carID and only fired on the transition, same
+    // as the log entry above — one active bell entry per car per breach
+    // episode, not one per ping, so normal GPS jitter near a zone edge
+    // can't spam the bell even though the underlying log can still flicker.
+    createNotification({
+      type: "geofence_alert",
+      refID: carID,
+      refCollection: "cars",
+      title: "Vehicle left its zone",
+      message: `Car is currently outside its allowed zone${geofenceResult.nearestZone ? ` (nearest: ${geofenceResult.nearestZone})` : ""}.`,
+    }).catch((err) => console.error("[NOTIF] geofence_alert create failed:", err.message));
   } else if (!geofenceResult.breached && wasBreached) {
     updates.geofenceAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "cleared",
       zone: geofenceResult.nearestZone,
       at: now.toISOString(),
     });
+    resolveNotification("geofence_alert", carID)
+      .catch((err) => console.error("[NOTIF] geofence_alert resolve failed:", err.message));
   }
   // else: state unchanged since the last recorded alert — don't spam an
   // entry on every single ping, only on breach/clear transitions.
@@ -82,11 +96,20 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       city: codingResult.city || null,
       at: now.toISOString(),
     });
+    createNotification({
+      type: "coding_alert",
+      refID: carID,
+      refCollection: "cars",
+      title: "Coding restriction",
+      message: `Car is currently in a number-coding restricted zone${codingResult.city ? ` (${codingResult.city})` : ""}.`,
+    }).catch((err) => console.error("[NOTIF] coding_alert create failed:", err.message));
   } else if (!codingResult.restricted && wasRestricted) {
     updates.codingAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "cleared",
       at: now.toISOString(),
     });
+    resolveNotification("coding_alert", carID)
+      .catch((err) => console.error("[NOTIF] coding_alert resolve failed:", err.message));
   }
 
   await ref.update(updates);

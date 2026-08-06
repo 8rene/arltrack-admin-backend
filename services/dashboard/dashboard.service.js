@@ -16,13 +16,17 @@ export const getTotalVehicles = async () => {
   return snap.size;
 };
 
+// "approved" and "pending" were retired — bookings go straight to "upcoming"
+// at creation now (see the customer backend's bookings.controller.js), the
+// only booking-side state that still needs admin attention is a
+// cancellation request. These two were silently returning 0 before this fix.
 export const getActiveBookings = async () => {
-  const snap = await db.collection("bookings").where("status", "==", "approved").get();
+  const snap = await db.collection("bookings").where("status", "==", "upcoming").get();
   return snap.size;
 };
 
 export const getPendingBookings = async () => {
-  const snap = await db.collection("bookings").where("status", "==", "pending").get();
+  const snap = await db.collection("bookings").where("status", "==", "cancellation_request").get();
   return snap.size;
 };
 
