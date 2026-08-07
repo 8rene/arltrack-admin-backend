@@ -7,9 +7,14 @@ const allowed = [roles.ADMIN];
 
 // Delete/archive is one step further up the trust chain — Owner gets it
 // too, on top of Admin. Kept as its own array (rather than widening
-// `allowed`) so this doesn't also loosen role-editing, which is meant to
-// stay Admin-only.
+// `allowed`) so this doesn't also loosen the other Admin-only endpoints
+// below (by-uid, details) by accident.
 const deleteAllowed = [roles.OWNER, roles.ADMIN];
+
+// Role-editing: same reasoning as deleteAllowed above — Owner gets this
+// too, on top of Admin, but kept as its own array so `allowed` (the other
+// Admin-only endpoints below) doesn't get loosened by accident.
+const roleAllowed = [roles.OWNER, roles.ADMIN];
 
 // Broader at the route level — getUsersByRole checks per-target-role
 // permission itself (ROLE_LIST_VIEWABLE_BY in role.util.js), since "can
@@ -22,5 +27,5 @@ export const registerUserRoutes = (app) => {
   app.delete("/api/users/:uid",          verifyToken, requireRole(deleteAllowed), deleteUser);
   app.get("/api/users/by-uid/:uid",      verifyToken, requireRole(allowed), getUserByUid);
   app.get("/api/users/details/:uid",     verifyToken, requireRole(allowed), getUserDetails);
-  app.patch("/api/users/:uid/role",      verifyToken, requireRole(allowed), updateUserRole);
+  app.patch("/api/users/:uid/role",      verifyToken, requireRole(roleAllowed), updateUserRole);
 };

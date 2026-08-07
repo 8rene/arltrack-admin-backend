@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { resolveRoleID, ROLE_LIST_VIEWABLE_BY } from "../../utils/roles/role.util.js";
+import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
 
 /**
  * GET /api/users?role=Customer|Driver|Supervisor|Admin
@@ -160,6 +160,16 @@ export const updateUserRole = async (req, res) => {
     const userDocRef = db.collection("user").doc(uid);
     const userDoc = await userDocRef.get();
     if (!userDoc.exists) return res.status(404).json({ success: false, message: "User not found." });
+
+    // Belt-and-suspenders: Owner accounts currently have no tab in
+    // Users.jsx and no key in ROLE_LIST_VIEWABLE_BY, so nothing in the UI
+    // can ever select one as an edit target today. That's the real
+    // protection. This check exists so that stays true even if this
+    // endpoint is ever hit directly, or a future "Owner" tab gets added
+    // without someone remembering to re-check this file.
+    if (userDoc.data().roleID === ROLE_IDS.OWNER) {
+      return res.status(403).json({ success: false, message: "Cannot change the role of an Owner account." });
+    }
 
     await userDocRef.update({ roleID, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
 
