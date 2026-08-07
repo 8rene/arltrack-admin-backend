@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
+import { hasCompleteBeforeTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -227,6 +228,19 @@ export const updateBooking = async (docID, updates) => {
       throw new Error(
         `Cannot approve booking: payment is still "${payStatus}". ` +
         `Please approve the payment first in the Payments page.`
+      );
+    }
+  }
+
+  // ── Vehicle documentation validation: cannot mark picked-up/ongoing
+  // without a completed before-trip photo set (front/side/back views) ──
+  if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
+    const bID = bookingID || docID;
+    const docsComplete = await hasCompleteBeforeTripDocs(bID);
+    if (!docsComplete) {
+      throw new Error(
+        "Cannot mark picked up: before-trip vehicle documentation is incomplete. " +
+        "Fill in the front, side, and back view photos in Vehicle Documentation first."
       );
     }
   }

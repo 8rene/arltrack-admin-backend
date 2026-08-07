@@ -65,6 +65,19 @@ export const getVehicleDocsByBooking = async (bookingID) => {
 };
 
 // ─────────────────────────────────────────────
+// Gate used by booking.service.js before a booking can move to "ongoing"
+// (i.e. Pickup). Only the 3 exterior shots are required — matches
+// VehicleDocs.jsx, where part photos are shown but never marked Required.
+// ─────────────────────────────────────────────
+export const hasCompleteBeforeTripDocs = async (bookingID) => {
+  if (!bookingID) return false;
+  const snap = await db.collection("vehicleDocumentationBeforeTrip").where("bookingID", "==", bookingID).get();
+  const doc = pickLatest(snap);
+  if (!doc) return false;
+  return !!(doc.frontViewUrl && doc.sideViewUrl && doc.backViewUrl);
+};
+
+// ─────────────────────────────────────────────
 // SAVE / UPSERT — Before Trip Documentation
 // ─────────────────────────────────────────────
 /**
