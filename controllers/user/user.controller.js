@@ -130,3 +130,42 @@ export const getUserDetails = async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 };
+
+/**
+ * PATCH /api/users/:uid/role
+ * Body: { role: "Customer" | "Driver" | "Supervisor" | "Admin" }
+ *
+ * Moves a user to a different role by pointing their `roleID` at the
+ * target role's Firestore doc ID (resolved via role.util.js, same helper
+ * getUsersByRole uses). Route-level `requireRole([roles.ADMIN])` is the
+ * actual gate — this handler assumes it already ran.
+ *
+ * Deliberately does not accept "Owner" as a target: promoting an account
+ * to Owner isn't something this endpoint should be able to do.
+ */
+export const updateUserRole = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { role } = req.body;
+
+    if (!uid) return res.status(400).json({ success: false, message: "User ID required." });
+    if (!role) return res.status(400).json({ success: false, message: "role is required." });
+    if (role === "Owner") {
+      return res.status(403).json({ success: false, message: "Cannot assign the Owner role." });
+    }
+
+    const roleID = await resolveRoleID(role);
+    if (!roleID) return res.status(404).json({ success: false, message: `Could not resolve an ID for role "${role}".` });
+
+    const userDocRef = db.collection("user").doc(uid);
+    const userDoc = await userDocRef.get();
+    if (!userDoc.exists) return res.status(404).json({ success: false, message: "User not found." });
+
+    await userDocRef.update({ roleID, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+    return res.status(200).json({ success: true, message: `Role updated to ${role}.` });
+  } catch (error) {
+    console.error("[USER] updateUserRole error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};

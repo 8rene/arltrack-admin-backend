@@ -60,8 +60,11 @@ export const getYearlyRevenue = async () => {
   return total;
 };
 
+// Same retired-status issue as getActiveBookings/getPendingBookings above —
+// "approved" no longer exists. "In use" means a trip is actively underway,
+// which is the "ongoing" status now.
 export const getVehiclesInUse = async () => {
-  const snap = await db.collection("bookings").where("status", "==", "approved").get();
+  const snap = await db.collection("bookings").where("status", "==", "ongoing").get();
   const unique = new Set();
   snap.forEach((doc) => { const id = doc.data().carID; if (id) unique.add(id); });
   return unique.size;

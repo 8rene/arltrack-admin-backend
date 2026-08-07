@@ -7,8 +7,8 @@ import {
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// Visible to: Supervisor, Admin
-const allowed = [roles.SUPERVISOR, roles.ADMIN];
+// Visible to: Owner, Supervisor, Admin
+const allowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN];
 
 export const registerInventoryRoutes = (app) => {
   app.get("/api/inventory/booking/:bookingID",          verifyToken, requireRole(allowed), getInventory);
