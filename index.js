@@ -27,6 +27,7 @@ import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsAr
 import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSessionArchiveRoutes.js";
 import { registerCronRoutes }                  from "./routes/cron/cron.routes.js";
 import { registerMaintenanceRoutes }           from "./routes/maintenance/maintenance.routes.js"; // ← NEW
+import { registerDriverDispatchRoutes }        from "./routes/driverDispatch/driverDispatch.routes.js"; // ← NEW
 import { seedCacheFromFirestore }            from "./services/gps/gps.service.js";
 
 const app = express();
@@ -65,6 +66,7 @@ registerReviewsArchiveRoutes(app);
 registerBookingSessionArchiveRoutes(app);  // ← NEW
 registerCronRoutes(app);              // ← NEW
 registerMaintenanceRoutes(app);       // ← NEW
+registerDriverDispatchRoutes(app);    // ← NEW
 
 const PORT = process.env.PORT || 5000;
 
