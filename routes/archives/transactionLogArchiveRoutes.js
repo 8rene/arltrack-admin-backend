@@ -7,7 +7,7 @@ import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
 // Archives visible to: Owner only
-const allowed = [roles.OWNER];
+const allowed = [roles.OWNER, roles.ADMIN];
 
 export const registerTransactionLogArchiveRoutes = (app) => {
   app.get("/api/archives/transaction-logs",                                              verifyToken, requireRole(allowed), listTransactionLogArchives);

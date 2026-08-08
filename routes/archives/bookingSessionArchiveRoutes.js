@@ -7,7 +7,7 @@ import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
 // Archives visible to: Owner only — same access level as every other archive
-const allowed = [roles.OWNER];
+const allowed = [roles.OWNER, roles.ADMIN];
 
 export const registerBookingSessionArchiveRoutes = (app) => {
   app.get("/api/archives/booking-sessions",                                          verifyToken, requireRole(allowed), listBookingSessionArchives);

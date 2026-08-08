@@ -1,6 +1,8 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
+import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
+import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -235,5 +237,114 @@ export const unassignDriver = async (bookingDocID) => {
     updatedAt: timestamp(),
   });
 
+  return { id: bookingDocID };
+};
+
+// ─────────────────────────────────────────────
+// DRIVER SELF-SERVICE — scoped to the logged-in driver's own uid.
+// Deliberately separate from getDispatchBoard/assignDriver/unassignDriver
+// above (which are Owner/Admin/Supervisor tools over every driver and
+// every car) — a Driver hitting these should only ever see or touch their
+// own assignments, enforced here via assertOwnsBooking, not just hidden
+// in the UI.
+// ─────────────────────────────────────────────
+
+const assertOwnsBooking = async (bookingDocID, driverID) => {
+  const doc = await db.collection("bookings").doc(bookingDocID).get();
+  if (!doc.exists) throw new Error("Booking not found.");
+  if (doc.data().driverID !== driverID) {
+    const err = new Error("This booking is not assigned to you.");
+    err.status = 403;
+    throw err;
+  }
+  return doc.data();
+};
+
+/** A driver's own live trips (upcoming + ongoing), same shape as getDispatchBoard's per-booking entries. */
+export const getMyTrips = async (driverID) => {
+  if (!driverID) throw new Error("driverID is required.");
+
+  const snaps = await Promise.all(
+    DISPATCHABLE_STATUSES.map((s) =>
+      db.collection("bookings").where("driverID", "==", driverID).where("status", "==", s).get()
+    )
+  );
+
+  let bookings = [];
+  snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
+
+  return shapeTripsForDriver(bookings);
+};
+
+/** A driver's past trips — completed/cancelled/stolen — most recent first. Simple, no pagination (per-driver volume is small). */
+export const getMyTripHistory = async (driverID) => {
+  if (!driverID) throw new Error("driverID is required.");
+
+  const snaps = await Promise.all(
+    ["completed", "cancelled", "stolen"].map((s) =>
+      db.collection("bookings").where("driverID", "==", driverID).where("status", "==", s).get()
+    )
+  );
+
+  let bookings = [];
+  snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
+
+  const shaped = await shapeTripsForDriver(bookings);
+  return shaped.sort((a, b) => (b.startDateTime?.getTime() ?? 0) - (a.startDateTime?.getTime() ?? 0));
+};
+
+// Shared shaping for the two driver-facing lists above — same vehicle/
+// customer resolution as getDispatchBoard, plus each booking's session
+// (for pickupTime/customerDroppedOffAt/returnTime display).
+const shapeTripsForDriver = async (bookings) => {
+  const carIDs  = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
+  const userIDs = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
+
+  const [vehicleEntries, userEntries, sessions] = await Promise.all([
+    Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
+    Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
+    Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
+  ]);
+  const vehicleMap = Object.fromEntries(vehicleEntries);
+  const userMap    = Object.fromEntries(userEntries);
+
+  return bookings
+    .map((b, i) => ({
+      id:                   b.id,
+      bookingID:            b.bookingID || b.id,
+      status:               b.status,
+      modeOfDriving:        b.modeOfDriving,
+      startDateTime:        toJSDate(b.startDateTime),
+      endDateTime:          toJSDate(b.endDateTime),
+      location:             b.location || "—",
+      vehicleName:          vehicleMap[b.carID] || "—",
+      carID:                b.carID || null,
+      customerName:         userMap[b.userID]?.name || "—",
+      customerPhone:        userMap[b.userID]?.phone || "—",
+      pickupTime:           toJSDate(sessions[i]?.data?.pickupTime),
+      customerDroppedOffAt: toJSDate(sessions[i]?.data?.customerDroppedOffAt),
+      returnTime:           toJSDate(sessions[i]?.data?.returnTime),
+    }))
+    .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
+};
+
+/** Driver-triggered pickup — ownership-checked, then reuses the same gated updateBooking staff already use (vehicle-docs check included). */
+export const driverPickup = async (bookingDocID, driverID) => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  await updateBooking(bookingDocID, { status: "ongoing" });
+  return { id: bookingDocID };
+};
+
+/** Driver-triggered drop-off — ownership-checked, then the same rules as the staff dropoff endpoint. */
+export const driverDropoff = async (bookingDocID, driverID) => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  await markBookingDroppedOff(bookingDocID);
+  return { id: bookingDocID };
+};
+
+/** Driver-triggered return — ownership-checked, then the same gated updateBooking staff use. */
+export const driverReturn = async (bookingDocID, driverID) => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  await updateBooking(bookingDocID, { status: "completed" });
   return { id: bookingDocID };
 };

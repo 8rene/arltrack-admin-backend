@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen } from "../../services/booking/bookingSession.service.js";
+import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markCustomerDroppedOff } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
 import { hasCompleteBeforeTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 // ─────────────────────────────────────────────
@@ -81,17 +81,23 @@ const resolveServiceType = async (serviceTypeID) => {
 // exists but never got flushed still reports false, same as "no session at
 // all", since either way there's nothing in History to show yet.
 const resolveHistoryInfo = async (bookingID) => {
-  if (!bookingID) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null };
+  if (!bookingID) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, customerDroppedOffAt: null };
   try {
     const snap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
-    if (snap.empty) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null };
+    if (snap.empty) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, customerDroppedOffAt: null };
     const data = snap.docs[0].data();
     return {
-      hasHistory:       !!data.archiveUrl,
-      bookingSessionID: data.bookingSessionID || null,
-      lastArchivedAt:   data.lastArchivedAt || null,
+      hasHistory:           !!data.archiveUrl,
+      bookingSessionID:     data.bookingSessionID || null,
+      lastArchivedAt:       data.lastArchivedAt || null,
+      // Surfaced here (rather than a separate fetch) since this query
+      // already reads the session doc for hasHistory/bookingSessionID —
+      // Car Tracking's "Current trip" panel needs both to show the
+      // Dropped Off marker without an extra round trip per booking.
+      pickupTime:           data.pickupTime || null,
+      customerDroppedOffAt: data.customerDroppedOffAt || null,
     };
-  } catch { return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null }; }
+  } catch { return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, customerDroppedOffAt: null }; }
 };
 
 // ─────────────────────────────────────────────
@@ -168,7 +174,7 @@ export const getAllBookings = async (statusFilter) => {
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
     const payInfo = paymentMap[bID] || EMPTY_PAYMENT_INFO;
-    const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null };
+    const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, customerDroppedOffAt: null };
     return {
       ...b,
       vehicleName:      vehicleMap[b.carID] || "—",
@@ -184,6 +190,8 @@ export const getAllBookings = async (statusFilter) => {
       hasHistory:       histInfo.hasHistory,
       bookingSessionID: histInfo.bookingSessionID,
       lastArchivedAt:   histInfo.lastArchivedAt,
+      pickupTime:           histInfo.pickupTime,
+      customerDroppedOffAt: histInfo.customerDroppedOffAt,
     };
   });
 };
@@ -374,4 +382,33 @@ export const updateBooking = async (docID, updates) => {
   }
 
   return { success: true };
+};
+
+// ─────────────────────────────────────────────
+// Mark the customer's leg of a chauffeur trip done, distinct from Return.
+// Session stays "active" — only the timestamp changes. See
+// bookingsession.model.js for why this is never auto-filled/backfilled.
+// ─────────────────────────────────────────────
+export const markBookingDroppedOff = async (docID) => {
+  const bookingRef = db.collection("bookings").doc(docID);
+  const bookingDoc = await bookingRef.get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+
+  if (booking.modeOfDriving !== "With Chauffeur") {
+    throw new Error("Only chauffeur bookings have a drop-off step — this one is Self Drive.");
+  }
+  if (booking.status?.toLowerCase() !== "ongoing") {
+    throw new Error(`Cannot mark dropped off: booking status is "${booking.status}", not "ongoing" (has it been picked up yet?).`);
+  }
+
+  const bID = booking.bookingID || docID;
+  const session = await getSessionByBookingID(bID);
+  if (!session) throw new Error("No active trip session found for this booking.");
+  if (session.data.customerDroppedOffAt) {
+    throw new Error("Already marked dropped off — this can't be re-triggered or edited.");
+  }
+
+  await markCustomerDroppedOff(session.ref.id);
+  return { id: docID };
 };

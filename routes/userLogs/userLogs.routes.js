@@ -6,8 +6,8 @@ import {
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// Visible to: Supervisor, Admin
-const allowed = [roles.SUPERVISOR, roles.ADMIN];
+// Visible to: Admin
+const allowed = [roles.ADMIN];
 
 export const registerUserLogsRoutes = (app) => {
   app.get("/api/user-logs",          verifyToken, requireRole(allowed), listUserLogs);

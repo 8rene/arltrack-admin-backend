@@ -2,8 +2,8 @@ import { listAuditLogs, deleteAuditLog } from "../../controllers/auditLogs/audit
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// Visible to: Supervisor, Admin
-const allowed = [roles.SUPERVISOR, roles.ADMIN];
+// Visible to: Admin
+const allowed = [roles.ADMIN];
 
 export const registerAuditLogsRoutes = (app) => {
   app.get("/api/audit-logs",      verifyToken, requireRole(allowed), listAuditLogs);

@@ -1,4 +1,4 @@
-import { getAllBookings, updateBooking } from "../../services/booking/booking.service.js";
+import { getAllBookings, updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
 import { deleteBookingWithCascade } from "../../services/booking/bookingDelete.service.js";
 
 export const listBookings = async (req, res) => {
@@ -19,6 +19,18 @@ export const editBooking = async (req, res) => {
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("[BOOKINGS] edit error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// ── Chauffeur-only: mark customer dropped off, separate from Return ──
+export const markDroppedOff = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await markBookingDroppedOff(id);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[BOOKINGS] markDroppedOff error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

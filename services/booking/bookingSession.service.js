@@ -133,6 +133,20 @@ export const markSessionStolen = async (bookingSessionID) => {
   });
 };
 
+/**
+ * Chauffeur-only marker: the customer's leg of the trip is over, but the
+ * session stays "active" — the driver still has the car until Return.
+ * Deliberately doesn't touch `status`; this is purely an extra timestamp
+ * alongside pickupTime/returnTime. No backfill, no re-editing — the
+ * caller (booking.service.js) is responsible for only calling this once.
+ */
+export const markCustomerDroppedOff = async (bookingSessionID) => {
+  await SESSIONS().doc(bookingSessionID).update({
+    customerDroppedOffAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+};
+
 /** Record the result of a successful archive flush. */
 export const recordArchiveFlush = async (bookingSessionID, archiveUrl) => {
   await SESSIONS().doc(bookingSessionID).update({

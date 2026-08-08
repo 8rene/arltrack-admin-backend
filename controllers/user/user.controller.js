@@ -2,6 +2,49 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
 
+const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
+
+/**
+ * Keeps the `staffUser` collection (what auth.controller.js's login query
+ * reads) in sync whenever a user's roleID changes. This is the ONLY place
+ * that writes to `staffUser` — nothing else in the backend touches it, so
+ * every role change MUST go through here or logins silently break again.
+ *
+ * - Moving INTO a staff role (Admin/Supervisor/Driver): create the
+ *   staffUser doc if none exists yet for this uid, or update the existing
+ *   one in place (never insert a second doc for the same uid/email —
+ *   login's `.where("email","==",email)` query would then return
+ *   whichever one Firestore happens to hand back first, which could be a
+ *   stale copy with an old roleID/status).
+ * - Moving OUT to Customer (or any non-staff role): delete the staffUser
+ *   doc(s) for this uid so the account can no longer log into the admin
+ *   panel.
+ */
+async function syncStaffUser(uid, newRoleID, email) {
+  const existingSnap = await db.collection("staffUser").where("userID", "==", uid).get();
+
+  if (STAFF_ROLES.has(newRoleID)) {
+    if (!existingSnap.empty) {
+      // Update in place; also clean up any accidental duplicates.
+      const [first, ...dupes] = existingSnap.docs;
+      await first.ref.update({ roleID: newRoleID, status: "active", email });
+      await Promise.all(dupes.map((d) => d.ref.delete()));
+    } else {
+      await db.collection("staffUser").add({
+        userID: uid,
+        roleID: newRoleID,
+        email,
+        status: "active",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  } else {
+    // Not a staff role (e.g. Customer) — remove any staffUser doc(s) so
+    // login is blocked going forward.
+    await Promise.all(existingSnap.docs.map((d) => d.ref.delete()));
+  }
+}
+
 /**
  * GET /api/users?role=Customer|Driver|Supervisor|Admin
  *
@@ -79,6 +122,10 @@ export const deleteUser = async (req, res) => {
 
       // Delete user Firestore doc
       await userDocRef.delete();
+
+      // Delete any staffUser doc(s) so a removed account can't still log in.
+      const staffSnap = await db.collection("staffUser").where("userID", "==", uid).get();
+      await Promise.all(staffSnap.docs.map((d) => d.ref.delete()));
     }
 
     // Delete from Firebase Auth (uses UID which is the Firestore doc ID)
@@ -172,6 +219,9 @@ export const updateUserRole = async (req, res) => {
     }
 
     await userDocRef.update({ roleID, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+    // Keep staffUser (what login checks) in sync with the new role.
+    await syncStaffUser(uid, roleID, userDoc.data().email || "");
 
     return res.status(200).json({ success: true, message: `Role updated to ${role}.` });
   } catch (error) {

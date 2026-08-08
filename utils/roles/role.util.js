@@ -84,7 +84,7 @@ export async function resolveRoleID(roleName) {
 // keep these two in sync by hand, same caveat as pagePermissions.js has for
 // the sidebar/route gating.
 export const ROLE_LIST_VIEWABLE_BY = {
-  Customer:   [ROLES.OWNER, ROLES.ADMIN],
+  Customer:   [ROLES.OWNER, ROLES.ADMIN, ROLES.SUPERVISOR],
   [ROLES.DRIVER]:     [ROLES.OWNER, ROLES.ADMIN, ROLES.SUPERVISOR],
   [ROLES.SUPERVISOR]: [ROLES.OWNER, ROLES.ADMIN],
   [ROLES.ADMIN]:      [ROLES.OWNER],
