@@ -17,6 +17,111 @@ import { getAllActiveSessions } from "../services/booking/bookingSession.service
 import { flushBookingHistory } from "../services/storage/bookingHistory.service.js";
 import { db } from "../config/firebaseConnection/firebase.js";
 import { createNotification, resolveNotification } from "../services/notification/notification.service.js";
+import { sendLicenseExpiryEmail } from "../services/email/email.service.js";
+import { ROLE_IDS } from "../utils/roles/role.util.js";
+
+// ── Driver's license expiry check ─────────────────────────────────
+// Piggybacks on this same daily cron, same reasoning as the overdue-booking
+// check above: daily granularity is fine for this, no separate schedule
+// needed. Scoped to Driver/Supervisor accounts only — customer enforcement
+// is out of scope for now (customer app is owned by another dev).
+//
+// Auto-lock is intentionally one-directional here: an expired license locks
+// the account automatically (no grace period — this is a legal/compliance
+// requirement, not just a UX nicety), but a renewed date does NOT
+// auto-unlock. Un-flipping status back to "active" is left as a manual
+// admin action (Users.jsx's existing status dropdown) so a typo'd expiry
+// date can't both wrongly lock AND wrongly auto-unlock someone with zero
+// human involved either way.
+const LICENSE_WARNING_DAYS = 14;
+
+const parseExpiry = (val) => {
+  if (!val) return null;
+  if (typeof val?.toDate === "function") return val.toDate();
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d;
+};
+
+const checkLicenseExpiry = async () => {
+  const now = new Date();
+  const docsSnap = await db.collection("userDocument").get();
+
+  for (const docSnap of docsSnap.docs) {
+    const data = docSnap.data();
+    const expiry = parseExpiry(data.driverLicenseExpiry);
+    if (!expiry || !data.userID) continue;
+
+    const userRef  = db.collection("user").doc(data.userID);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) continue;
+    const userData = userSnap.data();
+
+    // Only Driver/Supervisor accounts — see note above.
+    if (userData.roleID !== ROLE_IDS.DRIVER && userData.roleID !== ROLE_IDS.SUPERVISOR) continue;
+
+    const refID = data.userID;
+    const msLeft = expiry.getTime() - now.getTime();
+    const daysLeft = Math.ceil(msLeft / (24 * 60 * 60 * 1000));
+    const isExpired = msLeft < 0;
+    const isWarning = !isExpired && daysLeft <= LICENSE_WARNING_DAYS;
+    const toName = userData.username || userData.email || "Team Member";
+    const expiryDateLabel = expiry.toDateString();
+
+    if (isExpired) {
+      await resolveNotification("license_expiring", refID).catch(() => {});
+
+      // Check-before-create so the email only fires the first time this
+      // account crosses into "expired" (not every night it stays expired).
+      const existing = await db.collection("notifications")
+        .where("type", "==", "license_expired")
+        .where("refID", "==", refID)
+        .where("status", "==", "active")
+        .limit(1).get();
+      const isNewNotif = existing.empty;
+
+      await createNotification({
+        type: "license_expired",
+        refID,
+        refCollection: "user",
+        title: "Driver's license expired",
+        message: `${toName}'s driver's license expired on ${expiryDateLabel}. Account auto-locked.`,
+      }).catch((err) => console.error("[NOTIF] license_expired create failed:", err.message));
+
+      if (isNewNotif && userData.email) {
+        await sendLicenseExpiryEmail({ toEmail: userData.email, toName, isExpired: true, expiryDate: expiryDateLabel })
+          .catch((err) => console.error("[EMAIL] license_expired send failed:", err.message));
+      }
+
+      if (userData.status !== "locked") {
+        await userRef.update({ status: "locked" })
+          .catch((err) => console.error("[CRON] auto-lock failed for", refID, err.message));
+      }
+    } else if (isWarning) {
+      const existing = await db.collection("notifications")
+        .where("type", "==", "license_expiring")
+        .where("refID", "==", refID)
+        .where("status", "==", "active")
+        .limit(1).get();
+      const isNewNotif = existing.empty;
+
+      await createNotification({
+        type: "license_expiring",
+        refID,
+        refCollection: "user",
+        title: "Driver's license expiring soon",
+        message: `${toName}'s driver's license expires in ${daysLeft} day(s) (${expiryDateLabel}).`,
+      }).catch((err) => console.error("[NOTIF] license_expiring create failed:", err.message));
+
+      if (isNewNotif && userData.email) {
+        await sendLicenseExpiryEmail({ toEmail: userData.email, toName, isExpired: false, daysLeft, expiryDate: expiryDateLabel })
+          .catch((err) => console.error("[EMAIL] license_expiring send failed:", err.message));
+      }
+    } else {
+      await resolveNotification("license_expiring", refID).catch(() => {});
+      await resolveNotification("license_expired", refID).catch(() => {});
+    }
+  }
+};
 
 // ── Pickup/return overdue checks ──────────────────────────────────
 // Piggybacks on this same daily cron rather than a separate job —
@@ -64,6 +169,10 @@ const checkOverdueBookings = async () => {
 export const runMidnightFlush = async () => {
   await checkOverdueBookings().catch((err) =>
     console.error("[CRON] ❌ Overdue booking check failed:", err.message)
+  );
+
+  await checkLicenseExpiry().catch((err) =>
+    console.error("[CRON] ❌ License expiry check failed:", err.message)
   );
 
   console.log("[CRON] ⏰ Midnight archive flush starting...");

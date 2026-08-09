@@ -1,0 +1,128 @@
+import { db } from "../../config/firebaseConnection/firebase.js";
+
+// In-memory cache — location data almost never changes.
+// Cache is cleared only on server restart/cold start (acceptable on Vercel).
+// Same approach as the customer backend's location.controller.js — kept
+// as its own cache here since this is a separate server process/instance.
+const cache = {
+  regions: null,
+  provinces: {}, // keyed by regionID
+  municipalities: {}, // keyed by provinceID
+  barangays: {}, // keyed by municipalityID
+};
+
+/**
+ * GET /api/location/regions
+ * Returns all regions from Firestore.
+ */
+export const getRegions = async (req, res) => {
+  try {
+    if (cache.regions) return res.json(cache.regions);
+
+    const snapshot = await db.collection("regions").get();
+    const regions = snapshot.docs.map((doc) => ({
+      regionID: doc.data().regionID,
+      regionName: doc.data().regionName,
+    }));
+    regions.sort((a, b) => a.regionName.localeCompare(b.regionName));
+
+    cache.regions = regions;
+    res.json(regions);
+  } catch (error) {
+    console.error("getRegions error:", error);
+    res.status(500).json({ error: "Failed to fetch regions" });
+  }
+};
+
+/**
+ * GET /api/location/provinces?regionID=xxx
+ * Returns all provinces for a given region.
+ */
+export const getProvinces = async (req, res) => {
+  const { regionID } = req.query;
+  if (!regionID) return res.status(400).json({ error: "regionID is required" });
+
+  try {
+    if (cache.provinces[regionID]) return res.json(cache.provinces[regionID]);
+
+    const snapshot = await db
+      .collection("provinces")
+      .where("regionID", "==", regionID)
+      .get();
+
+    const provinces = snapshot.docs.map((doc) => ({
+      provinceID: doc.data().provinceID,
+      provinceName: doc.data().provinceName,
+      regionID: doc.data().regionID,
+    }));
+    provinces.sort((a, b) => a.provinceName.localeCompare(b.provinceName));
+
+    cache.provinces[regionID] = provinces;
+    res.json(provinces);
+  } catch (error) {
+    console.error("getProvinces error:", error);
+    res.status(500).json({ error: "Failed to fetch provinces" });
+  }
+};
+
+/**
+ * GET /api/location/municipalities?provinceID=xxx
+ * Returns all municipalities for a given province.
+ */
+export const getMunicipalities = async (req, res) => {
+  const { provinceID } = req.query;
+  if (!provinceID) return res.status(400).json({ error: "provinceID is required" });
+
+  try {
+    if (cache.municipalities[provinceID]) return res.json(cache.municipalities[provinceID]);
+
+    const snapshot = await db
+      .collection("municipalities")
+      .where("provinceID", "==", provinceID)
+      .get();
+
+    const municipalities = snapshot.docs.map((doc) => ({
+      municipalityID: doc.data().municipalityID,
+      municipalityName: doc.data().municipalityName,
+      provinceID: doc.data().provinceID,
+    }));
+    municipalities.sort((a, b) => a.municipalityName.localeCompare(b.municipalityName));
+
+    cache.municipalities[provinceID] = municipalities;
+    res.json(municipalities);
+  } catch (error) {
+    console.error("getMunicipalities error:", error);
+    res.status(500).json({ error: "Failed to fetch municipalities" });
+  }
+};
+
+/**
+ * GET /api/location/barangays?municipalityID=xxx
+ * Returns all barangays for a given municipality.
+ */
+export const getBarangays = async (req, res) => {
+  const { municipalityID } = req.query;
+  if (!municipalityID) return res.status(400).json({ error: "municipalityID is required" });
+
+  try {
+    if (cache.barangays[municipalityID]) return res.json(cache.barangays[municipalityID]);
+
+    const snapshot = await db
+      .collection("barangays")
+      .where("municipalityID", "==", municipalityID)
+      .get();
+
+    const barangays = snapshot.docs.map((doc) => ({
+      barangayID: doc.data().barangayID,
+      barangayName: doc.data().barangayName,
+      municipalityID: doc.data().municipalityID,
+    }));
+    barangays.sort((a, b) => a.barangayName.localeCompare(b.barangayName));
+
+    cache.barangays[municipalityID] = barangays;
+    res.json(barangays);
+  } catch (error) {
+    console.error("getBarangays error:", error);
+    res.status(500).json({ error: "Failed to fetch barangays" });
+  }
+};

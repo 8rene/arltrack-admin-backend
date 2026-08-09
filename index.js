@@ -16,6 +16,7 @@ import { registerInventoryRoutes }           from "./routes/inventory/inventory.
 import { registerVehicleDocsRoutes }         from "./routes/vehicleDocumentation/vehicleDocumentation.routes.js";
 import { registerFleetRoutes }               from "./routes/fleet/fleet.routes.js"; // ← NEW
 import { registerRefundRequestRoutes }       from "./routes/refundRequest/refundRequest.routes.js"; // ← NEW
+import { registerLocationRoutes }            from "./routes/location/location.routes.js"; // ← NEW
 import { startBookingWatcher }               from "./watchers/bookingWatcher.js";
 import { startUserWatcher }                  from "./watchers/userWatcher.js";
 import { registerUserLogArchiveRoutes }        from "./routes/archives/userLogArchiveRoutes.js";
@@ -53,6 +54,7 @@ registerTransactionLogsRoutes(app);
 registerPaymentsRoutes(app);
 registerReportsRoutes(app);
 registerGpsRoutes(app);
+registerLocationRoutes(app);
 registerInventoryRoutes(app);
 registerVehicleDocsRoutes(app);
 registerFleetRoutes(app);              // ← NEW

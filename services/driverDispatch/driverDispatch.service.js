@@ -324,6 +324,10 @@ const shapeTripsForDriver = async (bookings) => {
       pickupTime:           toJSDate(sessions[i]?.data?.pickupTime),
       customerDroppedOffAt: toJSDate(sessions[i]?.data?.customerDroppedOffAt),
       returnTime:           toJSDate(sessions[i]?.data?.returnTime),
+      // Set by the customer backend at booking time (see bookingsession.model.js).
+      // Null when a session hasn't been created yet / doesn't have coords geocoded.
+      pickupLocation:       sessions[i]?.data?.pickupLocation || null,
+      dropoffLocation:      sessions[i]?.data?.dropoffLocation || null,
     }))
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
 };
