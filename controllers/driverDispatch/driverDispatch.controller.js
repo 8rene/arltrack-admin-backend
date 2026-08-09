@@ -1,6 +1,6 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver,
-  getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverReturn, driverCollectBalance,
+  getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverReturn, driverCollectBalance, driverConfirmPayment,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
 export const getBoard = async (req, res) => {
@@ -106,6 +106,16 @@ export const myCollectBalance = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[DRIVER DISPATCH] my-collect-balance error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+export const myConfirmPayment = async (req, res) => {
+  try {
+    const result = await driverConfirmPayment(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] my-confirm-payment error:", error);
     return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };

@@ -1,4 +1,4 @@
-import { listPayments, getPayment, patchPaymentStatus, collectBalance } from "../../controllers/payments/payments.controller.js";
+import { listPayments, getPayment, patchPaymentStatus, collectBalance, confirmPayment } from "../../controllers/payments/payments.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -12,4 +12,7 @@ export const registerPaymentsRoutes = (app) => {
   // Keyed by bookingID (not the payment doc id) since that's what staff
   // screens like Car Tracking have on hand for a booking.
   app.patch("/api/payments/booking/:bookingID/collect-balance", verifyToken, requireRole(allowed), collectBalance);
+  // Confirm a cash/in-person initial payment directly from Car Tracking —
+  // no need to go to the Payments page just for this.
+  app.patch("/api/payments/booking/:bookingID/confirm", verifyToken, requireRole(allowed), confirmPayment);
 };

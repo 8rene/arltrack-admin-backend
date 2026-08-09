@@ -3,7 +3,7 @@ import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
 import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
-import { computeAmounts, collectRemainingBalance } from "../../services/payments/payments.service.js";
+import { computeAmounts, collectRemainingBalance, confirmInitialPayment } from "../../services/payments/payments.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -394,5 +394,13 @@ export const driverCollectBalance = async (bookingDocID, driverID) => {
   const booking = await assertOwnsBooking(bookingDocID, driverID);
   const bID = booking.bookingID || bookingDocID;
   await collectRemainingBalance(bID, driverID);
+  return { id: bookingDocID };
+};
+
+/** Driver confirming cash/in-person receipt of the initial payment — same confirmInitialPayment() staff use on the Payments page, just ownership-checked to the driver's own trip first. Lets a driver confirm cash right at pickup without needing Payments page access. */
+export const driverConfirmPayment = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+  await confirmInitialPayment(bID, driverID);
   return { id: bookingDocID };
 };

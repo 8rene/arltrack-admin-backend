@@ -3,6 +3,7 @@ import {
   updatePaymentStatus,
   getPaymentById,
   collectRemainingBalance,
+  confirmInitialPayment,
 } from "../../services/payments/payments.service.js";
 
 export const listPayments = async (req, res) => {
@@ -34,6 +35,24 @@ export const patchPaymentStatus = async (req, res) => {
     return res.status(200).json({ success: true, message: "Status updated." });
   } catch (error) {
     console.error("[PAYMENTS] patch error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Staff (Owner/Admin/Supervisor) confirming cash/in-person receipt of a
+// booking's initial payment — e.g. at the counter or at pickup — without
+// having to leave Car Tracking for the Payments page. PayMongo payments
+// never need this; the webhook already confirms those automatically.
+// See driverDispatch controller's confirmPayment for the driver-facing
+// equivalent of this.
+export const confirmPayment = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const confirmedBy = req.user?.email || req.user?.uid || "staff";
+    await confirmInitialPayment(bookingID, confirmedBy);
+    return res.status(200).json({ success: true, message: "Payment marked as received." });
+  } catch (error) {
+    console.error("[PAYMENTS] confirm error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };
