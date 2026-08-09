@@ -3,6 +3,7 @@ import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
 import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
+import { computeAmounts, collectRemainingBalance } from "../../services/payments/payments.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -38,6 +39,28 @@ const resolveVehicleName = async (carID) => {
     const brandName = brandDoc.exists ? brandDoc.data().brandName : "";
     return [brandName, modelName].filter(Boolean).join(" ") || "—";
   } catch { return "—"; }
+};
+
+// bookingID → { totalFee, amountPaid, balance, payType, paymentStatus } —
+// same computeAmounts() logic booking.service.js and payments.service.js
+// use, so the driver's My Trips payment modal matches the admin side
+// exactly instead of being derived a third, different way (or not at all,
+// which is what was happening here before).
+const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—" };
+const resolvePaymentInfo = async (bookingID) => {
+  if (!bookingID) return EMPTY_PAYMENT;
+  try {
+    const snap = await db.collection("payments")
+      .where("bookingID", "==", bookingID)
+      .limit(1)
+      .get();
+    if (snap.empty) return EMPTY_PAYMENT;
+    const data = snap.docs[0].data();
+    const { amountPaid, balance, payType } = computeAmounts(data);
+    let paymentStatus = data.status || "Pending";
+    if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
+    return { totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus };
+  } catch { return EMPTY_PAYMENT; }
 };
 
 const resolveUserInfo = async (userID) => {
@@ -297,38 +320,51 @@ export const getMyTripHistory = async (driverID) => {
 // customer resolution as getDispatchBoard, plus each booking's session
 // (for pickupTime/customerDroppedOffAt/returnTime display).
 const shapeTripsForDriver = async (bookings) => {
-  const carIDs  = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
-  const userIDs = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
+  const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
+  const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
+  const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
 
-  const [vehicleEntries, userEntries, sessions] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
+    Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
   ]);
   const vehicleMap = Object.fromEntries(vehicleEntries);
   const userMap    = Object.fromEntries(userEntries);
+  const paymentMap = Object.fromEntries(paymentEntries);
 
   return bookings
-    .map((b, i) => ({
-      id:                   b.id,
-      bookingID:            b.bookingID || b.id,
-      status:               b.status,
-      modeOfDriving:        b.modeOfDriving,
-      startDateTime:        toJSDate(b.startDateTime),
-      endDateTime:          toJSDate(b.endDateTime),
-      location:             b.location || "—",
-      vehicleName:          vehicleMap[b.carID] || "—",
-      carID:                b.carID || null,
-      customerName:         userMap[b.userID]?.name || "—",
-      customerPhone:        userMap[b.userID]?.phone || "—",
-      pickupTime:           toJSDate(sessions[i]?.data?.pickupTime),
-      customerDroppedOffAt: toJSDate(sessions[i]?.data?.customerDroppedOffAt),
-      returnTime:           toJSDate(sessions[i]?.data?.returnTime),
-      // Set by the customer backend at booking time (see bookingsession.model.js).
-      // Null when a session hasn't been created yet / doesn't have coords geocoded.
-      pickupLocation:       sessions[i]?.data?.pickupLocation || null,
-      dropoffLocation:      sessions[i]?.data?.dropoffLocation || null,
-    }))
+    .map((b, i) => {
+      const bID = b.bookingID || b.id;
+      // A cancelled booking always shows "Cancelled" payment status,
+      // matching booking.service.js/payments.service.js's same override.
+      const payInfo = paymentMap[bID] || EMPTY_PAYMENT;
+      const paymentStatus = (b.status || "").toLowerCase() === "cancelled" ? "Cancelled" : payInfo.paymentStatus;
+      return {
+        id:                   b.id,
+        bookingID:            bID,
+        status:               b.status,
+        modeOfDriving:        b.modeOfDriving,
+        startDateTime:        toJSDate(b.startDateTime),
+        endDateTime:          toJSDate(b.endDateTime),
+        location:             b.location || "—",
+        vehicleName:          vehicleMap[b.carID] || "—",
+        carID:                b.carID || null,
+        customerName:         userMap[b.userID]?.name || "—",
+        customerPhone:        userMap[b.userID]?.phone || "—",
+        pickupTime:           toJSDate(sessions[i]?.data?.pickupTime),
+        customerDroppedOffAt: toJSDate(sessions[i]?.data?.customerDroppedOffAt),
+        returnTime:           toJSDate(sessions[i]?.data?.returnTime),
+        // Set by the customer backend at booking time (see bookingsession.model.js).
+        // Null when a session hasn't been created yet / doesn't have coords geocoded.
+        pickupLocation:       sessions[i]?.data?.pickupLocation || null,
+        dropoffLocation:      sessions[i]?.data?.dropoffLocation || null,
+        // Nested to match PaymentStatusModal's `payment` prop shape exactly
+        // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
+        payment: { ...payInfo, paymentStatus },
+      };
+    })
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
 };
 
@@ -350,5 +386,13 @@ export const driverDropoff = async (bookingDocID, driverID) => {
 export const driverReturn = async (bookingDocID, driverID) => {
   await assertOwnsBooking(bookingDocID, driverID);
   await updateBooking(bookingDocID, { status: "completed" });
+  return { id: bookingDocID };
+};
+
+/** Driver receiving cash/in-person payment of the remaining balance — same collectRemainingBalance() staff use on the Payments page, just ownership-checked to the driver's own trip first. */
+export const driverCollectBalance = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+  await collectRemainingBalance(bID, driverID);
   return { id: bookingDocID };
 };

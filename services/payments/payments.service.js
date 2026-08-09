@@ -40,7 +40,7 @@ const resolveVehicleName = async (carID) => {
 };
 
 // Compute amountPaid and balance based on methodOfPayment (the payment type field)
-const computeAmounts = (payment) => {
+export const computeAmounts = (payment) => {
   const amount     = Number(payment.amount)     || 0;
   const depositFee = Number(payment.depositFee) || 0;
   // methodOfPayment = "Full" | "Downpayment" | "Deposit" (the TYPE)
@@ -77,7 +77,66 @@ const computeAmounts = (payment) => {
     }
   }
 
+  // Staff/driver manually collected the remaining balance in person (cash
+  // at pickup or return) via collectRemainingBalance() below — overrides
+  // whatever the Downpayment/Deposit split above computed. Deliberately
+  // doesn't touch methodOfPayment itself, so reporting still reflects how
+  // the *initial* portion actually came in.
+  if (payment.balanceCollected) {
+    amountPaid = amount;
+    balance    = 0;
+  }
+
   return { amountPaid, balance, payType };
+};
+
+// ─────────────────────────────────────────────
+// Manually mark a booking's remaining balance as collected — for
+// Cash/in-person payments where staff or the driver physically receive
+// the rest of the fee at pickup or return, rather than it coming through
+// an online GCash/Maya proof that gets Approved on the Payments page.
+//
+// Requires the payment's initial portion to already be Approved/Paid
+// first (this mirrors the same gate updateBooking() already applies
+// before a booking can move to "ongoing" — by the time anyone is at
+// pickup, the payment record is guaranteed to already be Approved).
+// ─────────────────────────────────────────────
+export const collectRemainingBalance = async (bookingID, collectedBy) => {
+  if (!bookingID) throw new Error("bookingID is required.");
+
+  const snap = await db.collection("payments")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+  if (snap.empty) throw new Error("No payment record found for this booking.");
+
+  const doc  = snap.docs[0];
+  const data = doc.data();
+
+  const status = (data.status || "").toLowerCase();
+  if (status !== "approved" && status !== "paid") {
+    throw new Error(
+      `Cannot collect balance: payment is still "${data.status || "Pending"}". ` +
+      `Approve the payment first in the Payments page.`
+    );
+  }
+  if (data.balanceCollected) {
+    throw new Error("This booking is already marked fully paid.");
+  }
+
+  const { balance } = computeAmounts(data);
+  if (balance <= 0) {
+    throw new Error("There is no remaining balance to collect.");
+  }
+
+  await doc.ref.update({
+    balanceCollected:   true,
+    balanceCollectedAt: admin.firestore.FieldValue.serverTimestamp(),
+    balanceCollectedBy: collectedBy || "—",
+    updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { id: doc.id, bookingID };
 };
 
 export const getAllPayments = async () => {
@@ -207,4 +266,3 @@ export const getPaymentById = async (id) => {
 
   };
 };
-

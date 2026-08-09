@@ -2,6 +2,7 @@ import {
   getAllPayments,
   updatePaymentStatus,
   getPaymentById,
+  collectRemainingBalance,
 } from "../../services/payments/payments.service.js";
 
 export const listPayments = async (req, res) => {
@@ -33,6 +34,21 @@ export const patchPaymentStatus = async (req, res) => {
     return res.status(200).json({ success: true, message: "Status updated." });
   } catch (error) {
     console.error("[PAYMENTS] patch error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Staff (Owner/Admin/Supervisor) receiving cash/in-person payment of the
+// remaining balance — e.g. before or during pickup. See driverDispatch
+// controller's collectBalance for the driver-facing equivalent of this.
+export const collectBalance = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const collectedBy = req.user?.email || req.user?.uid || "staff";
+    await collectRemainingBalance(bookingID, collectedBy);
+    return res.status(200).json({ success: true, message: "Balance marked as collected." });
+  } catch (error) {
+    console.error("[PAYMENTS] collect-balance error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

@@ -3,6 +3,7 @@ import admin from "firebase-admin";
 import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markCustomerDroppedOff } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
 import { hasCompleteBeforeTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { computeAmounts } from "../../services/payments/payments.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -24,11 +25,20 @@ const resolveVehicleName = async (carID) => {
 };
 
 // bookingID → { paymentMethod, totalFee, rentalFee, depositFee, serviceFee,
-// extraFee } from payments collection. totalFee comes from payments.amount;
-// the rest come straight off the same doc — these used to be left out here,
-// so Bookings.jsx's View panel (which reads booking.rentalFee etc. flat)
-// always showed ₱0.00 for them regardless of what was actually in payments.
-const EMPTY_PAYMENT_INFO = { paymentMethod: "—", totalFee: 0, rentalFee: 0, depositFee: 0, serviceFee: 0, extraFee: 0 };
+// extraFee, amountPaid, balance, payType, paymentStatus } from payments
+// collection. totalFee comes from payments.amount; the fee breakdown comes
+// straight off the same doc. amountPaid/balance/payType are derived via the
+// shared computeAmounts() (same logic payments.service.js uses for
+// /api/payments), so these numbers can't drift between Bookings, Car
+// Tracking, and driver-facing screens. paymentStatus mirrors the "Paid" →
+// "Approved" normalization getAllPayments() applies, so badge styling in
+// PaymentStatusModal lines up regardless of which endpoint fed it; a
+// cancelled *booking* still forces "Cancelled" (applied by the caller,
+// which has b.status handy — see getAllBookings below).
+const EMPTY_PAYMENT_INFO = {
+  paymentMethod: "—", totalFee: 0, rentalFee: 0, depositFee: 0, serviceFee: 0, extraFee: 0,
+  amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—",
+};
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT_INFO;
   try {
@@ -38,6 +48,9 @@ const resolvePaymentInfo = async (bookingID) => {
       .get();
     if (snap.empty) return EMPTY_PAYMENT_INFO;
     const data = snap.docs[0].data();
+    const { amountPaid, balance, payType } = computeAmounts(data);
+    let paymentStatus = data.status || "Pending";
+    if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
     return {
       paymentMethod: data.paymentMethod || "—",
       totalFee:      data.amount        ?? 0,
@@ -45,6 +58,10 @@ const resolvePaymentInfo = async (bookingID) => {
       depositFee:    data.depositFee    ?? 0,
       serviceFee:    data.serviceFee    ?? 0,
       extraFee:      data.extraFee      ?? 0,
+      amountPaid,
+      balance,
+      payType,
+      paymentStatus,
     };
   } catch { return EMPTY_PAYMENT_INFO; }
 };
@@ -175,6 +192,10 @@ export const getAllBookings = async (statusFilter) => {
     const bID     = b.bookingID || b.id;
     const payInfo = paymentMap[bID] || EMPTY_PAYMENT_INFO;
     const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, customerDroppedOffAt: null };
+    // A cancelled booking always shows "Cancelled" payment status, matching
+    // getAllPayments()'s override — the underlying payment doc's own status
+    // (e.g. still "Pending") isn't what matters once the trip itself is off.
+    const paymentStatus = (b.status || "").toLowerCase() === "cancelled" ? "Cancelled" : payInfo.paymentStatus;
     return {
       ...b,
       vehicleName:      vehicleMap[b.carID] || "—",
@@ -184,6 +205,10 @@ export const getAllBookings = async (statusFilter) => {
       depositFee:       payInfo.depositFee,
       serviceFee:       payInfo.serviceFee,
       extraFee:         payInfo.extraFee,
+      amountPaid:       payInfo.amountPaid,
+      balance:          payInfo.balance,
+      payType:          payInfo.payType,
+      paymentStatus,
       customerName:     userMap[b.userID]?.customerName || "—",
       phone:            userMap[b.userID]?.phone || "—",
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
