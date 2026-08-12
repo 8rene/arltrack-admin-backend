@@ -46,7 +46,7 @@ const resolveVehicleName = async (carID) => {
 // use, so the driver's My Trips payment modal matches the admin side
 // exactly instead of being derived a third, different way (or not at all,
 // which is what was happening here before).
-const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—" };
+const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0 };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT;
   try {
@@ -59,7 +59,7 @@ const resolvePaymentInfo = async (bookingID) => {
     const { amountPaid, balance, payType } = computeAmounts(data);
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
-    return { totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus };
+    return { totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus, discountAmount: Number(data.discountAmount) || 0 };
   } catch { return EMPTY_PAYMENT; }
 };
 

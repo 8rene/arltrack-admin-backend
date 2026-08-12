@@ -37,7 +37,7 @@ const resolveVehicleName = async (carID) => {
 // which has b.status handy — see getAllBookings below).
 const EMPTY_PAYMENT_INFO = {
   paymentMethod: "—", totalFee: 0, rentalFee: 0, depositFee: 0, serviceFee: 0, extraFee: 0,
-  amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—",
+  amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0,
 };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT_INFO;
@@ -62,6 +62,7 @@ const resolvePaymentInfo = async (bookingID) => {
       balance,
       payType,
       paymentStatus,
+      discountAmount: Number(data.discountAmount) || 0,
     };
   } catch { return EMPTY_PAYMENT_INFO; }
 };
@@ -208,6 +209,7 @@ export const getAllBookings = async (statusFilter) => {
       amountPaid:       payInfo.amountPaid,
       balance:          payInfo.balance,
       payType:          payInfo.payType,
+      discountAmount:   payInfo.discountAmount,
       paymentStatus,
       customerName:     userMap[b.userID]?.customerName || "—",
       phone:            userMap[b.userID]?.phone || "—",

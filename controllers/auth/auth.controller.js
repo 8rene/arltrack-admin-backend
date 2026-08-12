@@ -40,14 +40,7 @@ export const login = async (req, res) => {
 
     const staffData = staffSnap.docs[0].data();
 
-    // 3. CHECK STATUS
-    if (staffData.status && staffData.status.toLowerCase() !== "active") {
-      return res.status(403).json({
-        message: "Your staff account is currently inactive. Please contact your administrator.",
-      });
-    }
-
-    // 4. GET userID from staffUser doc
+    // 3. GET userID from staffUser doc
     const userID = staffData.userID;
 
     if (!userID) {
@@ -56,7 +49,7 @@ export const login = async (req, res) => {
       });
     }
 
-    // 5. GET user doc — doc ID is the userID
+    // 4. GET user doc — doc ID is the userID
     const userSnap = await db.collection("user").doc(userID).get();
 
     if (!userSnap.exists) {
@@ -66,6 +59,19 @@ export const login = async (req, res) => {
     }
 
     const userData = userSnap.data();
+
+    // 5. CHECK STATUS — the real, actively-enforced field (set by signup
+    // verification and the license-expiry cron job). staffUser no longer
+    // carries its own status; this is the only status check in login now.
+    if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
+      return res.status(403).json({
+        message:
+          userData.status.toLowerCase() === "locked"
+            ? "Your account is locked. Please contact your administrator."
+            : "Your account is currently inactive. Please contact your administrator.",
+      });
+    }
+
     const roleID = userData.roleID;
 
     if (!roleID) {

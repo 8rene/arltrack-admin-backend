@@ -1,4 +1,4 @@
-import { listPayments, getPayment, patchPaymentStatus, collectBalance, confirmPayment } from "../../controllers/payments/payments.controller.js";
+import { listPayments, getPayment, patchPaymentStatus, collectBalance, confirmPayment, discountPayment } from "../../controllers/payments/payments.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -15,4 +15,7 @@ export const registerPaymentsRoutes = (app) => {
   // Confirm a cash/in-person initial payment directly from Car Tracking —
   // no need to go to the Payments page just for this.
   app.patch("/api/payments/booking/:bookingID/confirm", verifyToken, requireRole(allowed), confirmPayment);
+  // Flat-peso discount — staff only (Payments.jsx and Car Tracking).
+  // Deliberately no driver-facing equivalent of this one.
+  app.patch("/api/payments/booking/:bookingID/discount", verifyToken, requireRole(allowed), discountPayment);
 };

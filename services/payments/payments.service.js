@@ -105,6 +105,25 @@ export const computeAmounts = (payment) => {
     balance    = 0;
   }
 
+  // Flat-peso discount applied by staff via applyDiscount() below — comes
+  // off whatever's still owed first; if the balance can't absorb all of
+  // it (e.g. the booking's already fully paid, balance already 0), the
+  // rest spills onto amountPaid instead. This keeps amountPaid + balance
+  // always equal to (totalFee - discountAmount), regardless of whether
+  // the discount was applied before or after the customer finished
+  // paying. Drivers see this reflected here (read-only) but can't apply
+  // it themselves — only staff can, via Payments.jsx or Car Tracking.
+  const discountAmount = Number(payment.discountAmount) || 0;
+  if (discountAmount > 0) {
+    if (balance >= discountAmount) {
+      balance -= discountAmount;
+    } else {
+      const spillover = discountAmount - balance;
+      balance = 0;
+      amountPaid = Math.max(0, amountPaid - spillover);
+    }
+  }
+
   return { amountPaid, balance, payType };
 };
 
@@ -198,6 +217,40 @@ export const collectRemainingBalance = async (bookingID, collectedBy) => {
   return { id: doc.id, bookingID };
 };
 
+// ─────────────────────────────────────────────
+// Staff applying a flat-peso discount to a booking's payment — e.g. a
+// goodwill deduction at pickup. Flat peso only, deliberately no
+// percentage option (matches how discounts are actually decided in
+// person). Staff-only (Payments.jsx or Car Tracking) — drivers can see
+// the resulting numbers via computeAmounts() above, but never call this
+// themselves; there's no driver-facing route for it.
+// ─────────────────────────────────────────────
+export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
+  if (!bookingID) throw new Error("bookingID is required.");
+  const discountAmount = Number(amount);
+  if (!Number.isFinite(discountAmount) || discountAmount < 0) {
+    throw new Error("Discount must be a valid, non-negative peso amount.");
+  }
+
+  const snap = await db.collection("payments")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+  if (snap.empty) throw new Error("No payment record found for this booking.");
+
+  const doc = snap.docs[0];
+
+  await doc.ref.update({
+    discountAmount,
+    discountReason: reason || "",
+    discountBy:     appliedBy || "—",
+    discountAt:     admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { id: doc.id, bookingID, discountAmount };
+};
+
 export const getAllPayments = async () => {
   const snapshot = await db.collection("payments").orderBy("createdAt", "desc").get();
   const docs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
@@ -256,6 +309,8 @@ export const getAllPayments = async () => {
       amountPaid,
       balance,
       payType,
+      discountAmount: Number(payment.discountAmount) || 0,
+      discountReason: payment.discountReason || "",
       methodOfPayment: payment.methodOfPayment || "—",
       paymentMethod: payment.paymentMethod || "—",
       referenceNumber: payment.referenceNumber || "—",
@@ -311,6 +366,8 @@ export const getPaymentById = async (id) => {
     amountPaid,
     balance,
     payType,
+    discountAmount: Number(payment.discountAmount) || 0,
+    discountReason: payment.discountReason || "",
     methodOfPayment: payment.methodOfPayment || "—",
     paymentMethod: payment.paymentMethod || "—",
     referenceNumber: payment.referenceNumber || "—",

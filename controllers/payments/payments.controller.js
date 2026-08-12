@@ -4,6 +4,7 @@ import {
   getPaymentById,
   collectRemainingBalance,
   confirmInitialPayment,
+  applyDiscount,
 } from "../../services/payments/payments.service.js";
 
 export const listPayments = async (req, res) => {
@@ -35,6 +36,23 @@ export const patchPaymentStatus = async (req, res) => {
     return res.status(200).json({ success: true, message: "Status updated." });
   } catch (error) {
     console.error("[PAYMENTS] patch error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Staff (Owner/Admin/Supervisor) applying a flat-peso discount to a
+// booking — from Payments.jsx or Car Tracking. Deliberately not exposed
+// to drivers: they see the resulting discounted balance (via
+// resolvePaymentInfo/computeAmounts) but can't set the discount itself.
+export const discountPayment = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const { amount, reason } = req.body;
+    const appliedBy = req.user?.email || req.user?.uid || "staff";
+    const result = await applyDiscount(bookingID, amount, reason, appliedBy);
+    return res.status(200).json({ success: true, data: result, message: "Discount applied." });
+  } catch (error) {
+    console.error("[PAYMENTS] discount error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };
