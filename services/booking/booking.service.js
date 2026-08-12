@@ -8,7 +8,7 @@ import { computeAmounts } from "../../services/payments/payments.service.js";
 // Helpers
 // ─────────────────────────────────────────────
 
-const resolveVehicleName = async (carID) => {
+export const resolveVehicleName = async (carID) => {
   if (!carID) return "—";
   try {
     const carDoc = await db.collection("cars").doc(carID).get();
@@ -38,6 +38,7 @@ const resolveVehicleName = async (carID) => {
 const EMPTY_PAYMENT_INFO = {
   paymentMethod: "—", totalFee: 0, rentalFee: 0, depositFee: 0, serviceFee: 0, extraFee: 0,
   amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0,
+  refundDue: 0, refundIssued: false,
 };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT_INFO;
@@ -48,7 +49,7 @@ const resolvePaymentInfo = async (bookingID) => {
       .get();
     if (snap.empty) return EMPTY_PAYMENT_INFO;
     const data = snap.docs[0].data();
-    const { amountPaid, balance, payType } = computeAmounts(data);
+    const { amountPaid, balance, payType, refundDue } = computeAmounts(data);
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
     return {
@@ -63,6 +64,8 @@ const resolvePaymentInfo = async (bookingID) => {
       payType,
       paymentStatus,
       discountAmount: Number(data.discountAmount) || 0,
+      refundDue,
+      refundIssued: !!data.refundIssued,
     };
   } catch { return EMPTY_PAYMENT_INFO; }
 };

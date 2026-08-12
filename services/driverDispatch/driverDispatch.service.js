@@ -3,7 +3,7 @@ import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
 import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
-import { computeAmounts, collectRemainingBalance, confirmInitialPayment } from "../../services/payments/payments.service.js";
+import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -46,7 +46,7 @@ const resolveVehicleName = async (carID) => {
 // use, so the driver's My Trips payment modal matches the admin side
 // exactly instead of being derived a third, different way (or not at all,
 // which is what was happening here before).
-const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0 };
+const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0, refundDue: 0, refundIssued: false };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT;
   try {
@@ -56,10 +56,14 @@ const resolvePaymentInfo = async (bookingID) => {
       .get();
     if (snap.empty) return EMPTY_PAYMENT;
     const data = snap.docs[0].data();
-    const { amountPaid, balance, payType } = computeAmounts(data);
+    const { amountPaid, balance, payType, refundDue } = computeAmounts(data);
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
-    return { totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus, discountAmount: Number(data.discountAmount) || 0 };
+    return {
+      totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus,
+      discountAmount: Number(data.discountAmount) || 0,
+      refundDue, refundIssued: !!data.refundIssued,
+    };
   } catch { return EMPTY_PAYMENT; }
 };
 
@@ -402,5 +406,13 @@ export const driverConfirmPayment = async (bookingDocID, driverID) => {
   const booking = await assertOwnsBooking(bookingDocID, driverID);
   const bID = booking.bookingID || bookingDocID;
   await confirmInitialPayment(bID, driverID);
+  return { id: bookingDocID };
+};
+
+/** Driver confirming they handed a refund-due amount back to the customer (created when a staff discount overshot the balance) — same markRefundIssued() staff use, ownership-checked to the driver's own trip first. The driver is usually the one physically holding the cash. */
+export const driverMarkRefundIssued = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+  await markRefundIssued(bID, driverID);
   return { id: bookingDocID };
 };

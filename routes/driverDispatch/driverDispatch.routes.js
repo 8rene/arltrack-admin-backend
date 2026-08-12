@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myReturn, myCollectBalance, myConfirmPayment } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myReturn, myCollectBalance, myConfirmPayment, myRefundIssued } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -27,4 +27,9 @@ export const registerDriverDispatchRoutes = (app) => {
   // Confirm a cash/in-person initial payment right at pickup — driver
   // never needs Payments page access for this.
   app.patch("/api/driver-dispatch/my-trips/:id/confirm-payment", verifyToken, requireRole(driverOnly), myConfirmPayment);
+  // Driver confirming they handed back a refund-due amount (created when
+  // a staff discount overshot the balance) — they're usually the one
+  // physically holding the cash. See payments routes for the staff
+  // equivalent of this same action.
+  app.patch("/api/driver-dispatch/my-trips/:id/refund-issued", verifyToken, requireRole(driverOnly), myRefundIssued);
 };

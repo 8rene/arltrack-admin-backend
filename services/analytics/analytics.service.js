@@ -142,3 +142,103 @@ export const getYearlyAnalytics = async () => {
   };
 };
 
+// ─────────────────────────────────────────────────────────────
+// BOOKING TREND — same bucketing shape as the revenue functions
+// above, but counting `bookings` docs (by createdAt) instead of
+// summing `payments`. Counts every booking regardless of status
+// (upcoming/ongoing/completed/cancelled) — this is a *demand*
+// trend, not a revenue trend, so a cancelled booking still counts
+// as someone having tried to book.
+// ─────────────────────────────────────────────────────────────
+
+export const getDailyBookingTrend = async () => {
+  const now = new Date();
+  const start = toTimestamp(new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
+  const end   = toTimestamp(new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999));
+
+  const snap = await db.collection("bookings")
+    .where("createdAt", ">=", start)
+    .where("createdAt", "<=", end)
+    .get();
+
+  const hours = Array.from({ length: 24 }, (_, i) => ({
+    label: `${i.toString().padStart(2, "0")}:00`,
+    count: 0,
+  }));
+
+  snap.forEach((doc) => {
+    const data = doc.data();
+    const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
+    const h = d.getHours();
+    if (h >= 0 && h < 24) hours[h].count += 1;
+  });
+
+  return {
+    type: "daily",
+    date: now.toISOString().split("T")[0],
+    data: hours,
+    total: hours.reduce((s, h) => s + h.count, 0),
+  };
+};
+
+export const getWeeklyBookingTrend = async () => {
+  const now = new Date();
+  const day = now.getDay();
+  const diffToMon = (day === 0 ? -6 : 1 - day);
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMon, 0, 0, 0, 0);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  sunday.setHours(23, 59, 59, 999);
+
+  const snap = await db.collection("bookings")
+    .where("createdAt", ">=", toTimestamp(monday))
+    .where("createdAt", "<=", toTimestamp(sunday))
+    .get();
+
+  const days = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+    .map((label) => ({ label, count: 0 }));
+
+  snap.forEach((doc) => {
+    const data = doc.data();
+    const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
+    const wd = d.getDay();
+    const idx = wd === 0 ? 6 : wd - 1;
+    days[idx].count += 1;
+  });
+
+  return {
+    type: "weekly",
+    weekStart: monday.toISOString().split("T")[0],
+    weekEnd: sunday.toISOString().split("T")[0],
+    data: days,
+    total: days.reduce((s, d) => s + d.count, 0),
+  };
+};
+
+export const getMonthlyBookingTrend = async () => {
+  const now = new Date();
+  const start = toTimestamp(new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0));
+  const end   = toTimestamp(new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999));
+
+  const snap = await db.collection("bookings")
+    .where("createdAt", ">=", start)
+    .where("createdAt", "<=", end)
+    .get();
+
+  const weeks = Array.from({ length: 5 }, (_, i) => ({ label: `Week ${i + 1}`, count: 0 }));
+
+  snap.forEach((doc) => {
+    const data = doc.data();
+    const d = data.createdAt?.toDate?.() || new Date(data.createdAt);
+    const wi = Math.min(Math.floor((d.getDate() - 1) / 7), 4);
+    weeks[wi].count += 1;
+  });
+
+  return {
+    type: "monthly",
+    month: now.toLocaleString("default", { month: "long" }),
+    year: now.getFullYear(),
+    data: weeks,
+    total: weeks.reduce((s, w) => s + w.count, 0),
+  };
+};

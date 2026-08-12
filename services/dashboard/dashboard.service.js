@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveVehicleName } from "../booking/booking.service.js";
 
 const parsePaymentTotal = (data) => {
   const rental  = parseFloat(data.rentalFee  ?? 0) || 0;
@@ -87,8 +88,9 @@ export const getRecentBookings = async () => {
     return tb - ta;
   });
 
-  // Collect unique userIDs
+  // Collect unique userIDs and carIDs
   const userIDs = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
+  const carIDs  = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
 
   // Batch-fetch userDetails only — firstName + lastName
   const detailDocs = await Promise.all(
@@ -108,10 +110,19 @@ export const getRecentBookings = async () => {
     }
   });
 
-  // Attach customerName to every booking
+  // Build vehicle name map using the same brand+model resolution Bookings.jsx
+  // relies on (resolveVehicleName lives in booking.service.js) — keeps the
+  // "Car ID" shown here from ever drifting out of sync with the Bookings page.
+  const vehicleEntries = await Promise.all(
+    carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))
+  );
+  const vehicleMap = Object.fromEntries(vehicleEntries);
+
+  // Attach customerName + vehicleName to every booking
   return bookings.map((b) => ({
     ...b,
     customerName: nameMap[b.userID] || null,
+    vehicleName:  vehicleMap[b.carID] || "—",
   }));
 };
 

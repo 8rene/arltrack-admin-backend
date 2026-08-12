@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { createNotification, resolveNotification } from "../notification/notification.service.js";
 
 // resolve customer name: firstName+lastName (priority), fallback to username
 const resolveCustomerName = async (userID) => {
@@ -113,7 +114,14 @@ export const computeAmounts = (payment) => {
   // the discount was applied before or after the customer finished
   // paying. Drivers see this reflected here (read-only) but can't apply
   // it themselves — only staff can, via Payments.jsx or Car Tracking.
+  //
+  // That spillover is cash now owed BACK to the customer — refundDue
+  // below surfaces it. Computed fresh here (not trusted from a stored
+  // field) so it can never drift from the actual amount/discount numbers
+  // on the doc; only whether it's been handed back (refundIssued) is
+  // persisted, by markRefundIssued().
   const discountAmount = Number(payment.discountAmount) || 0;
+  let refundDue = 0;
   if (discountAmount > 0) {
     if (balance >= discountAmount) {
       balance -= discountAmount;
@@ -121,10 +129,11 @@ export const computeAmounts = (payment) => {
       const spillover = discountAmount - balance;
       balance = 0;
       amountPaid = Math.max(0, amountPaid - spillover);
+      refundDue = payment.refundIssued ? 0 : spillover;
     }
   }
 
-  return { amountPaid, balance, payType };
+  return { amountPaid, balance, payType, refundDue };
 };
 
 // ─────────────────────────────────────────────
@@ -240,15 +249,74 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
 
   const doc = snap.docs[0];
 
+  // Figure out if this new discount amount spills past the outstanding
+  // balance — i.e. creates a refund owed to the customer. Reset
+  // refundIssued to false here: this is a fresh discount value, so any
+  // earlier "returned" mark doesn't necessarily still apply to it.
+  const { refundDue } = computeAmounts({ ...doc.data(), discountAmount, refundIssued: false });
+
   await doc.ref.update({
     discountAmount,
     discountReason: reason || "",
     discountBy:     appliedBy || "—",
     discountAt:     admin.firestore.FieldValue.serverTimestamp(),
+    refundDue,
+    refundIssued:   false,
     updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  return { id: doc.id, bookingID, discountAmount };
+  if (refundDue > 0) {
+    // Visible to everyone logged into the admin panel (the notification
+    // bell isn't role-filtered) — the driver holding the cash needs to
+    // see this, and staff should be able to track it got handled.
+    await createNotification({
+      type: "refund_due",
+      refID: bookingID,
+      refCollection: "bookings",
+      title: "Refund due to customer",
+      message: `A discount was applied to booking ${bookingID} after it was already paid — ₱${refundDue.toLocaleString()} needs to be returned to the customer.`,
+    });
+  } else {
+    // Discount was reduced/removed so it no longer creates a refund —
+    // clear out any stale active alert for this booking.
+    await resolveNotification("refund_due", bookingID);
+  }
+
+  return { id: doc.id, bookingID, discountAmount, refundDue };
+};
+
+// ─────────────────────────────────────────────
+// Staff OR the driver holding the cash confirming a refund-due amount
+// (see applyDiscount()'s refundDue above) was actually handed back to
+// the customer. Resolves the refund_due notification once marked.
+// ─────────────────────────────────────────────
+export const markRefundIssued = async (bookingID, issuedBy) => {
+  if (!bookingID) throw new Error("bookingID is required.");
+
+  const snap = await db.collection("payments")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+  if (snap.empty) throw new Error("No payment record found for this booking.");
+
+  const doc  = snap.docs[0];
+  const data = doc.data();
+
+  const { refundDue } = computeAmounts(data);
+  if (refundDue <= 0) {
+    throw new Error("There is no refund due on this booking.");
+  }
+
+  await doc.ref.update({
+    refundIssued:   true,
+    refundIssuedBy: issuedBy || "—",
+    refundIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  await resolveNotification("refund_due", bookingID);
+
+  return { id: doc.id, bookingID };
 };
 
 export const getAllPayments = async () => {
@@ -287,7 +355,7 @@ export const getAllPayments = async () => {
     const booking = bookingMap[payment.bookingID] || {};
     const vehicleName = vehicleMap[booking.carID] || "—";
     const customerName = nameMap[booking.userID] || "—";
-    const { amountPaid, balance, payType } = computeAmounts(payment);
+    const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
 
     // Normalize status: Paid → Approved (case-insensitive, since automated
     // PayMongo payments — GCash/PayMaya/QRPH — are saved as lowercase "paid"
@@ -311,6 +379,8 @@ export const getAllPayments = async () => {
       payType,
       discountAmount: Number(payment.discountAmount) || 0,
       discountReason: payment.discountReason || "",
+      refundDue: refundDue,
+      refundIssued: !!payment.refundIssued,
       methodOfPayment: payment.methodOfPayment || "—",
       paymentMethod: payment.paymentMethod || "—",
       referenceNumber: payment.referenceNumber || "—",
@@ -351,7 +421,7 @@ export const getPaymentById = async (id) => {
     resolveVehicleName(bookingData.carID),
   ]);
 
-  const { amountPaid, balance, payType } = computeAmounts(payment);
+  const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
 
   let status = payment.status || "Pending";
   if (status.toLowerCase() === "paid") status = "Approved";
@@ -369,6 +439,8 @@ export const getPaymentById = async (id) => {
     payType,
     discountAmount: Number(payment.discountAmount) || 0,
     discountReason: payment.discountReason || "",
+    refundDue: refundDue,
+    refundIssued: !!payment.refundIssued,
     methodOfPayment: payment.methodOfPayment || "—",
     paymentMethod: payment.paymentMethod || "—",
     referenceNumber: payment.referenceNumber || "—",

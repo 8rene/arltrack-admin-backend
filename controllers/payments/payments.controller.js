@@ -5,6 +5,7 @@ import {
   collectRemainingBalance,
   confirmInitialPayment,
   applyDiscount,
+  markRefundIssued,
 } from "../../services/payments/payments.service.js";
 
 export const listPayments = async (req, res) => {
@@ -53,6 +54,22 @@ export const discountPayment = async (req, res) => {
     return res.status(200).json({ success: true, data: result, message: "Discount applied." });
   } catch (error) {
     console.error("[PAYMENTS] discount error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Staff (Owner/Admin/Supervisor) confirming a refund-due amount (see
+// applyDiscount's refundDue) was actually handed back to the customer.
+// See driverDispatch controller's myRefundIssued for the driver-facing
+// equivalent — the driver holding the cash can mark this too.
+export const refundIssued = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const issuedBy = req.user?.email || req.user?.uid || "staff";
+    await markRefundIssued(bookingID, issuedBy);
+    return res.status(200).json({ success: true, message: "Refund marked as returned." });
+  } catch (error) {
+    console.error("[PAYMENTS] refund-issued error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

@@ -11,7 +11,7 @@
 export const Notification = {
   type: "",
   //   "cancellation_request" | "new_user" | "geofence_alert" |
-  //   "coding_alert" | "pickup_overdue" | "return_overdue"
+  //   "coding_alert" | "pickup_overdue" | "return_overdue" | "refund_due"
 
   refID: "",            // doc ID of the record this notification is about
   refCollection: "",     // which collection refID lives in: "bookings" | "user" | "cars"
