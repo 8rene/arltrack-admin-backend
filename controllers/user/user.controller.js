@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
+import { consumeOtp } from "../otp/otp.controller.js";
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
 
@@ -212,12 +213,22 @@ export const getUserDetails = async (req, res) => {
 export const updateUserRole = async (req, res) => {
   try {
     const { uid } = req.params;
-    const { role } = req.body;
+    const { role, otp } = req.body;
 
     if (!uid) return res.status(400).json({ success: false, message: "User ID required." });
     if (!role) return res.status(400).json({ success: false, message: "role is required." });
     if (role === "Owner") {
       return res.status(403).json({ success: false, message: "Cannot assign the Owner role." });
+    }
+
+    // Require a fresh OTP, sent via POST /api/auth/send-otp to the ACTING
+    // admin's own email, before a role change is applied. This is the
+    // step that actually gates the action — everything below is unchanged
+    // from before. Checked before resolveRoleID/user lookup so a bad or
+    // missing code fails fast without doing extra Firestore reads.
+    const verification = await consumeOtp(req.user.email, otp);
+    if (!verification.ok) {
+      return res.status(verification.status).json({ success: false, message: verification.message });
     }
 
     const roleID = await resolveRoleID(role);

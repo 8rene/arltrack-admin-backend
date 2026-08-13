@@ -55,6 +55,12 @@ export const SERVICE_CATALOG = [
     ],
   },
   {
+    group: "GPS & Tracking",
+    services: [
+      { serviceID: "sim_load",          serviceName: "SIM Load",                 price: 300 },
+    ],
+  },
+  {
     group: "Body & Interior",
     services: [
       { serviceID: "car_wash",          serviceName: "Full Car Wash/Detailing",  price: 800 },

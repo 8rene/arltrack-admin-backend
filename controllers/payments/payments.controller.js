@@ -5,6 +5,7 @@ import {
   collectRemainingBalance,
   confirmInitialPayment,
   applyDiscount,
+  correctIssuedDiscount,
   markRefundIssued,
 } from "../../services/payments/payments.service.js";
 
@@ -54,6 +55,23 @@ export const discountPayment = async (req, res) => {
     return res.status(200).json({ success: true, data: result, message: "Discount applied." });
   } catch (error) {
     console.error("[PAYMENTS] discount error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Admin-only "backdoor" — corrects an already-issued discount's recorded
+// amount (see correctIssuedDiscount() for why this is separate from
+// discountPayment above). Owner/Supervisor cannot call this route at all
+// (see payments.routes.js) — they get a 403 before this ever runs.
+export const correctDiscount = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const { amount, reason } = req.body;
+    const correctedBy = req.user?.email || req.user?.uid || "admin";
+    const result = await correctIssuedDiscount(bookingID, amount, reason, correctedBy);
+    return res.status(200).json({ success: true, data: result, message: "Discount record corrected." });
+  } catch (error) {
+    console.error("[PAYMENTS] discount correction error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

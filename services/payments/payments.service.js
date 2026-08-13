@@ -248,12 +248,26 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   if (snap.empty) throw new Error("No payment record found for this booking.");
 
   const doc = snap.docs[0];
+  const existing = doc.data();
+
+  // Once a refund created by this discount has already been physically
+  // handed back (refundIssued: true), this route is no longer the right
+  // one — reopening/renotifying over a discount that's already been
+  // settled in person would be misleading (see correctIssuedDiscount()
+  // below, which is the Admin-only path for fixing the number on record
+  // after the fact, without reopening or re-notifying anyone).
+  if (existing.refundIssued) {
+    throw new Error(
+      "This discount's refund has already been marked as returned. " +
+      "Only an Admin can correct the recorded amount now, via the discount correction option."
+    );
+  }
 
   // Figure out if this new discount amount spills past the outstanding
   // balance — i.e. creates a refund owed to the customer. Reset
   // refundIssued to false here: this is a fresh discount value, so any
   // earlier "returned" mark doesn't necessarily still apply to it.
-  const { refundDue } = computeAmounts({ ...doc.data(), discountAmount, refundIssued: false });
+  const { refundDue } = computeAmounts({ ...existing, discountAmount, refundIssued: false });
 
   await doc.ref.update({
     discountAmount,
@@ -283,6 +297,68 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   }
 
   return { id: doc.id, bookingID, discountAmount, refundDue };
+};
+
+// ─────────────────────────────────────────────
+// Admin-only "backdoor" correction — for when a discount's refund has
+// ALREADY been marked as returned (refundIssued: true) via
+// markRefundIssued(), but the recorded amount was wrong (e.g. staff
+// verbally told the driver ₱500 but only entered ₱50 in the system, the
+// driver handed over ₱500 and clicked "given" against the ₱50 figure).
+//
+// This exists purely to fix the paper trail after the fact — it does NOT
+// reopen the refund (refundIssued stays true) and does NOT create or
+// touch the refund_due notification, since nothing further is being
+// asked of the driver or anyone else; the money already changed hands.
+// Route-gated to Admin only (see payments.routes.js) — Owner and
+// Supervisor go through the normal applyDiscount() edit flow instead,
+// which is blocked once refundIssued is true (see above).
+// ─────────────────────────────────────────────
+export const correctIssuedDiscount = async (bookingID, amount, reason, correctedBy) => {
+  if (!bookingID) throw new Error("bookingID is required.");
+  const discountAmount = Number(amount);
+  if (!Number.isFinite(discountAmount) || discountAmount < 0) {
+    throw new Error("Discount must be a valid, non-negative peso amount.");
+  }
+  if (!reason || !reason.trim()) {
+    throw new Error("A reason is required when correcting an already-issued discount.");
+  }
+
+  const snap = await db.collection("payments")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+  if (snap.empty) throw new Error("No payment record found for this booking.");
+
+  const doc = snap.docs[0];
+  const existing = doc.data();
+
+  if (!existing.refundIssued) {
+    throw new Error(
+      "This booking's refund hasn't been marked as returned yet — use the normal discount edit instead."
+    );
+  }
+
+  const previousAmount = Number(existing.discountAmount) || 0;
+
+  // Recompute refundDue against the corrected number, but leave
+  // refundIssued exactly as it was (true) — this is a records-only fix,
+  // not a new refund event.
+  const { refundDue } = computeAmounts({ ...existing, discountAmount, refundIssued: true });
+
+  await doc.ref.update({
+    discountAmount,
+    discountReason: reason.trim(),
+    refundDue,
+    discountCorrectedBy: correctedBy || "—",
+    discountCorrectedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:           admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  // Deliberately no createNotification()/resolveNotification() call here
+  // — see comment above.
+
+  return { id: doc.id, bookingID, previousAmount, discountAmount, refundDue };
 };
 
 // ─────────────────────────────────────────────

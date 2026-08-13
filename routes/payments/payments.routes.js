@@ -1,4 +1,4 @@
-import { listPayments, getPayment, patchPaymentStatus, collectBalance, confirmPayment, discountPayment, refundIssued } from "../../controllers/payments/payments.controller.js";
+import { listPayments, getPayment, patchPaymentStatus, collectBalance, confirmPayment, discountPayment, correctDiscount, refundIssued } from "../../controllers/payments/payments.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -18,6 +18,12 @@ export const registerPaymentsRoutes = (app) => {
   // Flat-peso discount — staff only (Payments.jsx and Car Tracking).
   // Deliberately no driver-facing equivalent of this one.
   app.patch("/api/payments/booking/:bookingID/discount", verifyToken, requireRole(allowed), discountPayment);
+  // Admin-ONLY backdoor — corrects an already-issued discount's recorded
+  // amount for the books, without reopening the refund or notifying
+  // anyone. Deliberately NOT in `allowed` above: Owner and Supervisor get
+  // a 403 here even though they can use the normal /discount route,
+  // since this is a documentation-correction path, not a business action.
+  app.patch("/api/payments/booking/:bookingID/discount/correct", verifyToken, requireRole([roles.ADMIN]), correctDiscount);
   // Marks a refund-due amount (created by an over-covering discount) as
   // actually handed back to the customer. Staff-facing here — see
   // driverDispatch routes for the driver-facing equivalent, since the
