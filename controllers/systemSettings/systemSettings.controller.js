@@ -1,12 +1,12 @@
 import {
-  getPricingSettings,
-  updatePricingSettings,
-} from "../../services/pricingSettings/pricingSettings.service.js";
+  getSystemSettings,
+  updateSystemSettings,
+} from "../../services/systemSettings/systemSettings.service.js";
 
 // GET /api/settings/pricing
 export const getPricing = async (req, res) => {
   try {
-    const data = await getPricingSettings();
+    const data = await getSystemSettings();
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[SETTINGS] getPricing error:", error);
@@ -20,7 +20,7 @@ export const getPricing = async (req, res) => {
 export const updatePricing = async (req, res) => {
   try {
     const actor = req.user ? { userID: req.user.uid, name: req.user.email } : null;
-    const data = await updatePricingSettings(req.body || {}, actor);
+    const data = await updateSystemSettings(req.body || {}, actor);
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[SETTINGS] updatePricing error:", error);

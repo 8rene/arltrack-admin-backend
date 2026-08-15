@@ -29,7 +29,7 @@ import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSe
 import { registerCronRoutes }                  from "./routes/cron/cron.routes.js";
 import { registerMaintenanceRoutes }           from "./routes/maintenance/maintenance.routes.js"; // ← NEW
 import { registerDriverDispatchRoutes }        from "./routes/driverDispatch/driverDispatch.routes.js"; // ← NEW
-import { registerPricingSettingsRoutes }       from "./routes/pricingSettings/pricingSettings.routes.js"; // ← NEW
+import { registerSystemSettingsRoutes }        from "./routes/systemSettings/systemSettings.routes.js"; // ← NEW
 import { registerLocationOptionsRoutes }       from "./routes/locationOptions/locationOptions.routes.js"; // ← NEW
 import { seedCacheFromFirestore }            from "./services/gps/gps.service.js";
 
@@ -71,7 +71,7 @@ registerBookingSessionArchiveRoutes(app);  // ← NEW
 registerCronRoutes(app);              // ← NEW
 registerMaintenanceRoutes(app);       // ← NEW
 registerDriverDispatchRoutes(app);    // ← NEW
-registerPricingSettingsRoutes(app);   // ← NEW
+registerSystemSettingsRoutes(app);   // ← NEW
 registerLocationOptionsRoutes(app);   // ← NEW
 
 const PORT = process.env.PORT || 5000;

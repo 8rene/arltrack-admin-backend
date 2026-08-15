@@ -1,10 +1,17 @@
 // ─────────────────────────────────────────────
-// systemSettings/pricing — singleton Firestore doc
+// systemSettings/{systemSettingsID} — Firestore collection
 // ─────────────────────────────────────────────
-// One document (id: "pricing") holding every adjustable fee/rule the
-// customer-facing pricing engine (customer-backend/utils/pricing.js)
-// currently has hardcoded. This model file just documents the shape —
-// pricingSettings.service.js is what actually reads/writes it.
+// One combined doc shape — NOT split by a "type" field. Every save writes
+// a full snapshot of every settings area onto this same doc shape (only
+// pricing exists today; other areas, e.g. maintenance, would add their own
+// fields onto this same shape later rather than creating a separate kind
+// of doc). Follows the same append-only convention as the rest of the app
+// (e.g. carMaintenance): every save adds a NEW auto-ID doc rather than
+// mutating one fixed doc, with the ID mirrored onto itself as
+// systemSettingsID and a createdAt server timestamp. The "current"
+// settings are just the most recently created doc. This model file just
+// documents the shape — systemSettings.service.js is what actually
+// reads/writes it.
 //
 // NOTE: as of this change, the customer backend still uses its own
 // hardcoded constants — it has NOT been wired up to read from this doc
@@ -35,6 +42,7 @@ export const PricingSettings = {
   // logic would just be a setting that silently does nothing. It stays a
   // hardcoded constant in customer-backend/utils/pricing.js.
 
-  updatedAt: null,   // Firestore server timestamp
-  updatedBy: null,   // { userID, name } of the staff member who last saved
+  systemSettingsID: null,  // mirrors this doc's own Firestore ID
+  createdAt: null,         // Firestore server timestamp
+  updatedBy: null,         // { userID, name } of the staff member who saved this snapshot
 };
