@@ -171,7 +171,7 @@ export const saveVehicleDocAfter = async ({ bookingID, carID, photoFields }) => 
       bookingID,
       carID,
       vehicleDocumentationAfterTripID: "", // will be back-filled below
-      frontViewUrl: "",
+      frontViewUrl: "", 
       sideViewUrl:  "",
       backViewUrl:  "",
       ...photoFields,
