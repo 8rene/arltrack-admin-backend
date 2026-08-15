@@ -77,6 +77,19 @@ export const hasCompleteBeforeTripDocs = async (bookingID) => {
   return !!(doc.frontViewUrl && doc.sideViewUrl && doc.backViewUrl);
 };
 
+/**
+ * Same check as hasCompleteBeforeTripDocs, but for the after-trip photo
+ * set — used to gate the "completed" (Return) transition the same way
+ * before-trip docs gate "ongoing" (Pickup).
+ */
+export const hasCompleteAfterTripDocs = async (bookingID) => {
+  if (!bookingID) return false;
+  const snap = await db.collection("vehicleDocumentationAfterTrip").where("bookingID", "==", bookingID).get();
+  const doc = pickLatest(snap);
+  if (!doc) return false;
+  return !!(doc.frontViewUrl && doc.sideViewUrl && doc.backViewUrl);
+};
+
 // ─────────────────────────────────────────────
 // SAVE / UPSERT — Before Trip Documentation
 // ─────────────────────────────────────────────

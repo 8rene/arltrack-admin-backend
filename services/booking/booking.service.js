@@ -2,7 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markCustomerDroppedOff } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
-import { hasCompleteBeforeTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { computeAmounts } from "../../services/payments/payments.service.js";
 // ─────────────────────────────────────────────
 // Helpers
@@ -278,6 +278,21 @@ export const updateBooking = async (docID, updates) => {
     if (!docsComplete) {
       throw new Error(
         "Cannot mark picked up: before-trip vehicle documentation is incomplete. " +
+        "Fill in the front, side, and back view photos in Vehicle Documentation first."
+      );
+    }
+  }
+
+  // ── Vehicle documentation validation: cannot mark completed/returned
+  // without a completed after-trip photo set (front/side/back views) ──
+  // Mirrors the before-trip guard above so Return can't skip documentation
+  // the same way Pickup can't.
+  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+    const bID = bookingID || docID;
+    const docsComplete = await hasCompleteAfterTripDocs(bID);
+    if (!docsComplete) {
+      throw new Error(
+        "Cannot mark returned: after-trip vehicle documentation is incomplete. " +
         "Fill in the front, side, and back view photos in Vehicle Documentation first."
       );
     }

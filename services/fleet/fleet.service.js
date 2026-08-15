@@ -120,12 +120,31 @@ export const updateCar = async (carID, carData) => {
 
   const { pricing, ...rest } = carData;
 
-  await carRef.update({
-    ...rest,
-    seatingCapacity: Number(rest.seatingCapacity) || rest.seatingCapacity,
-    year: Number(rest.year) || rest.year,
-    updatedAt: timestamp(),
+  const updates = { ...rest, updatedAt: timestamp() };
+
+  // Number(undefined) is NaN, and NaN || rest.seatingCapacity falls straight
+  // back to that same undefined — which Firestore's update() throws on
+  // outright ("Cannot use 'undefined' as a Firestore value"), taking down
+  // the whole save even though nothing was actually wrong with the request.
+  // This hit any edit where seatingCapacity/year weren't both included in
+  // the body. Only coerce them when they were actually sent.
+  if (rest.seatingCapacity !== undefined) {
+    const n = Number(rest.seatingCapacity);
+    updates.seatingCapacity = Number.isFinite(n) ? n : rest.seatingCapacity;
+  }
+  if (rest.year !== undefined) {
+    const n = Number(rest.year);
+    updates.year = Number.isFinite(n) ? n : rest.year;
+  }
+
+  // Belt-and-suspenders: strip any other undefined values too, so one
+  // missing/optional field anywhere in the body can't fail the entire
+  // update the same way.
+  Object.keys(updates).forEach((key) => {
+    if (updates[key] === undefined) delete updates[key];
   });
+
+  await carRef.update(updates);
 
   return { id: carID };
 };
