@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
 import { consumeOtp } from "../otp/otp.controller.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
 
@@ -256,6 +257,83 @@ export const updateUserRole = async (req, res) => {
     return res.status(200).json({ success: true, message: `Role updated to ${role}.` });
   } catch (error) {
     console.error("[USER] updateUserRole error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * PATCH /api/users/:uid/verify
+ * Body: { isVerified: boolean }
+ *
+ * Approves/rejects a user's uploaded ID document. Was previously a direct
+ * `updateDoc(doc(db, "user", user.id), { isVerified: approve })` call from
+ * both Customers.jsx and Users.jsx's DocumentsTab — moved here so it's
+ * role-gated and audit-logged instead of any authenticated Firebase client
+ * being able to write it directly.
+ */
+export const verifyUserDocument = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { isVerified } = req.body;
+    if (typeof isVerified !== "boolean") {
+      return res.status(400).json({ success: false, message: "isVerified (boolean) is required." });
+    }
+
+    const userDocRef = db.collection("user").doc(uid);
+    const userDoc = await userDocRef.get();
+    if (!userDoc.exists) return res.status(404).json({ success: false, message: "User not found." });
+
+    await userDocRef.update({ isVerified });
+
+    const name = userDoc.data().username || userDoc.data().email || uid;
+    createAuditLog({
+      action: "update",
+      description: `${isVerified ? "Approved" : "Rejected"} ID document for ${name}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[USER] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data: { id: uid, isVerified } });
+  } catch (error) {
+    console.error("[USER] verifyUserDocument error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * PATCH /api/users/:uid/status
+ * Body: { status, isFlagged }
+ *
+ * Edits a user's account status + flagged state. `status` is what
+ * auth.controller.js's login checks to allow/block sign-in, so this write
+ * has real access-control consequences — it was previously a direct
+ * `updateDoc` from both Customers.jsx's EditUserModal and Users.jsx's
+ * equivalent, with no server-side check on who could flip it.
+ */
+export const updateUserStatus = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { status, isFlagged } = req.body;
+
+    const userDocRef = db.collection("user").doc(uid);
+    const userDoc = await userDocRef.get();
+    if (!userDoc.exists) return res.status(404).json({ success: false, message: "User not found." });
+
+    const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    if (status !== undefined) update.status = status;
+    if (isFlagged !== undefined) update.isFlagged = isFlagged;
+
+    await userDocRef.update(update);
+
+    const name = userDoc.data().username || userDoc.data().email || uid;
+    createAuditLog({
+      action: "update",
+      description: `Updated account for ${name}${status !== undefined ? ` (status: ${status})` : ""}${isFlagged ? " — flagged" : ""}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[USER] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data: { id: uid, ...update } });
+  } catch (error) {
+    console.error("[USER] updateUserStatus error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

@@ -184,3 +184,52 @@ export const saveVehicleDocAfter = async ({ bookingID, carID, photoFields }) => 
 
   return { success: true, vehicleDocumentationAfterTripID: docID };
 };
+
+// ─────────────────────────────────────────────
+// SAVE / UPSERT — Inventory status (Good/Damaged part flags)
+// Separate collections from the photo docs above (inventoryBeforeTrip /
+// inventoryAfterTrip vs vehicleDocumentationBeforeTrip / …AfterTrip) —
+// same upsert-by-bookingID pattern, just a different pair of collections.
+// damageParts/overallStatus arrive already computed (merged against the
+// previous record) from VehicleDocs.jsx's commitStatusEdits — this only
+// moves the write itself, same as everywhere else in this migration.
+// ─────────────────────────────────────────────
+const INVENTORY_COLLECTION = {
+  before: "inventoryBeforeTrip",
+  after:  "inventoryAfterTrip",
+};
+
+export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallStatus, damageParts }) => {
+  if (!bookingID || !carID) throw new Error("bookingID and carID are required.");
+  if (tripType !== "before" && tripType !== "after") throw new Error("tripType must be 'before' or 'after'.");
+
+  const collectionName = INVENTORY_COLLECTION[tripType];
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+
+  const existingSnap = await db
+    .collection(collectionName)
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+
+  let docID;
+  if (!existingSnap.empty) {
+    docID = existingSnap.docs[0].id;
+    await existingSnap.docs[0].ref.update({
+      inventoryOverallStatus: overallStatus,
+      damageParts,
+      recordedAt: timestamp,
+    });
+  } else {
+    const newRef = await db.collection(collectionName).add({
+      bookingID,
+      carID,
+      inventoryOverallStatus: overallStatus,
+      damageParts,
+      recordedAt: timestamp,
+    });
+    docID = newRef.id;
+  }
+
+  return { success: true, id: docID };
+};

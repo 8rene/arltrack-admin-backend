@@ -1,6 +1,8 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { generateToken } from "../../utils/jwt/jwt.util.js";
 import { roleIDToName } from "../../utils/roles/role.util.js";
+import { createUserLog, closeUserLog } from "../../services/userLogs/userLogs.service.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import admin from "firebase-admin";
 
 export const login = async (req, res) => {
@@ -101,10 +103,32 @@ export const login = async (req, res) => {
       roleID,
     });
 
-    // 8. RESPOND
+    // 8. LOG THE SESSION START. Never let a logging failure block a real
+    // login — both of these are fire-and-forget from the response's point
+    // of view, but we still await createUserLog specifically because we
+    // need its ID back to give to the frontend (so logout can close the
+    // right session).
+    let sessionLogID = null;
+    try {
+      sessionLogID = await createUserLog({
+        uID: firebaseUID,
+        username: userData.username || email,
+      });
+    } catch (err) {
+      console.error("[AUTH] Failed to write user log:", err);
+    }
+
+    createAuditLog({
+      action: "auth",
+      description: `${userData.username || email} logged in.`,
+      userID: firebaseUID,
+    }).catch((err) => console.error("[AUTH] Failed to write audit log:", err));
+
+    // 9. RESPOND
     return res.status(200).json({
       message: "Login successful. Welcome back.",
       token,
+      sessionLogID,
       user: {
         uid: firebaseUID,
         email,
@@ -117,6 +141,35 @@ export const login = async (req, res) => {
 
   } catch (error) {
     console.error("[AUTH] Login error:", error);
+    return res.status(500).json({
+      message: "An unexpected error occurred. Please try again.",
+    });
+  }
+};
+
+// Closes out the userLogs entry created at login and writes a matching
+// audit log entry. req.user is set by verifyToken, so the identity here
+// can't be spoofed by the client — only the sessionLogID (which session to
+// close) comes from the request body.
+export const logout = async (req, res) => {
+  try {
+    const { sessionLogID } = req.body;
+
+    if (sessionLogID) {
+      await closeUserLog(sessionLogID).catch((err) =>
+        console.error("[AUTH] Failed to close user log:", err)
+      );
+    }
+
+    createAuditLog({
+      action: "auth",
+      description: `${req.user?.email || req.user?.uid || "A user"} logged out.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[AUTH] Failed to write audit log:", err));
+
+    return res.status(200).json({ message: "Logged out." });
+  } catch (error) {
+    console.error("[AUTH] Logout error:", error);
     return res.status(500).json({
       message: "An unexpected error occurred. Please try again.",
     });

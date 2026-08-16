@@ -16,6 +16,7 @@ import {
   getModels,
   createModel,
   removeModel,
+  setCarImage,
 } from "../../controllers/fleet/fleet.controller.js";
 import { verifyToken }            from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles }     from "../../middlewares/role/role.middleware.js";
@@ -30,6 +31,9 @@ export const registerFleetRoutes = (app) => {
   app.put   ("/api/fleet/cars/:carID",                   verifyToken, requireRole(allowed), editCar);
   app.patch ("/api/fleet/cars/:carID/status",            verifyToken, requireRole(allowed), changeCarStatus);
   app.delete("/api/fleet/cars/:carID",                   verifyToken, requireRole(allowed), removeCar);
+
+  // ── Images ────────────────────────────────────────
+  app.post  ("/api/fleet/cars/:carID/image",             verifyToken, requireRole(allowed), setCarImage);
 
   // ── Pricing ───────────────────────────────────────
   app.get   ("/api/fleet/cars/:carID/pricing",           verifyToken, requireRole(allowed), getCarPricing);

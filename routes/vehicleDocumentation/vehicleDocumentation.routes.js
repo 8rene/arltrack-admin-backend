@@ -2,6 +2,7 @@ import {
   getVehicleDocs,
   saveBeforeTrip,
   saveAfterTrip,
+  saveInventoryStatusHandler,
 } from "../../controllers/vehicleDocumentation/vehicleDocumentation.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
@@ -13,7 +14,8 @@ import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 const allowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN, roles.DRIVER];
 
 export const registerVehicleDocsRoutes = (app) => {
-  app.get("/api/vehicle-docs/booking/:bookingID", verifyToken, requireRole(allowed), getVehicleDocs);
-  app.post("/api/vehicle-docs/before-trip",       verifyToken, requireRole(allowed), saveBeforeTrip);
-  app.post("/api/vehicle-docs/after-trip",        verifyToken, requireRole(allowed), saveAfterTrip);
+  app.get("/api/vehicle-docs/booking/:bookingID",   verifyToken, requireRole(allowed), getVehicleDocs);
+  app.post("/api/vehicle-docs/before-trip",         verifyToken, requireRole(allowed), saveBeforeTrip);
+  app.post("/api/vehicle-docs/after-trip",          verifyToken, requireRole(allowed), saveAfterTrip);
+  app.put("/api/vehicle-docs/inventory-status",     verifyToken, requireRole(allowed), saveInventoryStatusHandler);
 };

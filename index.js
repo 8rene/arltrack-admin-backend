@@ -28,8 +28,10 @@ import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsAr
 import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSessionArchiveRoutes.js";
 import { registerCronRoutes }                  from "./routes/cron/cron.routes.js";
 import { registerMaintenanceRoutes }           from "./routes/maintenance/maintenance.routes.js"; // ← NEW
+import { registerCarPartsRoutes }              from "./routes/carParts/carParts.routes.js"; // ← NEW
+import { registerProfileRequestsRoutes }       from "./routes/profileRequests/profileRequests.routes.js"; // ← NEW
 import { registerDriverDispatchRoutes }        from "./routes/driverDispatch/driverDispatch.routes.js"; // ← NEW
-import { registerSystemSettingsRoutes }        from "./routes/systemSettings/systemSettings.routes.js"; // ← NEW
+import { registerSystemSettingsRoutes }       from "./routes/systemSettings/systemSettings.routes.js"; // ← NEW
 import { registerLocationOptionsRoutes }       from "./routes/locationOptions/locationOptions.routes.js"; // ← NEW
 import { seedCacheFromFirestore }            from "./services/gps/gps.service.js";
 
@@ -70,6 +72,8 @@ registerReviewsArchiveRoutes(app);
 registerBookingSessionArchiveRoutes(app);  // ← NEW
 registerCronRoutes(app);              // ← NEW
 registerMaintenanceRoutes(app);       // ← NEW
+registerCarPartsRoutes(app);          // ← NEW
+registerProfileRequestsRoutes(app);   // ← NEW
 registerDriverDispatchRoutes(app);    // ← NEW
 registerSystemSettingsRoutes(app);   // ← NEW
 registerLocationOptionsRoutes(app);   // ← NEW

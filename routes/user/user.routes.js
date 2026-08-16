@@ -1,6 +1,6 @@
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
-import { deleteUser, getUserByUid, getUserDetails, getUsersByRole, updateUserRole } from "../../controllers/user/user.controller.js";
+import { deleteUser, getUserByUid, getUserDetails, getUsersByRole, updateUserRole, verifyUserDocument, updateUserStatus } from "../../controllers/user/user.controller.js";
 
 // Visible to: Admin only (user management)
 const allowed = [roles.ADMIN];
@@ -22,10 +22,18 @@ const roleAllowed = [roles.OWNER, roles.ADMIN];
 // that a single flat allowed[] here can't express.
 const listAllowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 
+// verify/status: matches the Customer tab's own visibleTo in Users.jsx /
+// pagePermissions.js ([Owner, Admin, Supervisor]) — these two actions are
+// used from both the Customers tab and the Users page's Driver tab, both
+// of which share that same access level.
+const editAllowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
+
 export const registerUserRoutes = (app) => {
   app.get("/api/users",                  verifyToken, requireRole(listAllowed), getUsersByRole);
   app.delete("/api/users/:uid",          verifyToken, requireRole(deleteAllowed), deleteUser);
   app.get("/api/users/by-uid/:uid",      verifyToken, requireRole(allowed), getUserByUid);
   app.get("/api/users/details/:uid",     verifyToken, requireRole(allowed), getUserDetails);
   app.patch("/api/users/:uid/role",      verifyToken, requireRole(roleAllowed), updateUserRole);
+  app.patch("/api/users/:uid/verify",    verifyToken, requireRole(editAllowed), verifyUserDocument);
+  app.patch("/api/users/:uid/status",    verifyToken, requireRole(editAllowed), updateUserStatus);
 };

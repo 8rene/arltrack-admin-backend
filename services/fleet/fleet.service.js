@@ -323,3 +323,35 @@ export const deleteModel = async (modelID) => {
   await db.collection("model").doc(modelID).delete();
   return { id: modelID, deleted: true };
 };
+
+// ─────────────────────────────────────────────
+// IMAGES — Upsert the primary image for a car
+// (Upload to Storage still happens client-side with the Firebase SDK —
+// only the resulting Firestore carImages doc write moves here.)
+// ─────────────────────────────────────────────
+export const setPrimaryCarImage = async (carID, imageURL) => {
+  if (!imageURL) throw new Error("imageURL is required.");
+
+  const carDoc = await db.collection("cars").doc(carID).get();
+  if (!carDoc.exists) throw new Error("Car not found.");
+
+  const existingSnap = await db.collection("carImages")
+    .where("carID", "==", carID)
+    .where("isPrimary", "==", true)
+    .limit(1)
+    .get();
+
+  if (!existingSnap.empty) {
+    await existingSnap.docs[0].ref.update({ imageURL });
+    return { id: existingSnap.docs[0].id, carID, imageURL, isPrimary: true, label: "Primary" };
+  }
+
+  const ref = await db.collection("carImages").add({
+    carID,
+    imageURL,
+    isPrimary: true,
+    label: "Primary",
+    createdAt: timestamp(),
+  });
+  return { id: ref.id, carID, imageURL, isPrimary: true, label: "Primary" };
+};

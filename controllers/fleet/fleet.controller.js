@@ -16,7 +16,9 @@ import {
   getAllModels,
   addModel,
   deleteModel,
+  setPrimaryCarImage,
 } from "../../services/fleet/fleet.service.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 // ─────────────────────────────────────────────
 // CARS
@@ -256,6 +258,35 @@ export const removeModel = async (req, res) => {
   } catch (error) {
     console.error("[FLEET] removeModel error:", error);
     const status = error.message === "Model not found." ? 404 : 500;
+    return res.status(status).json({ success: false, message: error.message });
+  }
+};
+
+// ─────────────────────────────────────────────
+// IMAGES
+// ─────────────────────────────────────────────
+
+// POST /api/fleet/cars/:carID/image
+// Body: { imageURL } — the frontend uploads the file to Firebase Storage
+// itself (client SDK) and sends the resulting downloadURL here; this
+// endpoint only handles the Firestore carImages doc write, which used to
+// happen directly from the browser with no role check or audit trail.
+export const setCarImage = async (req, res) => {
+  try {
+    const { carID } = req.params;
+    const { imageURL } = req.body;
+    const data = await setPrimaryCarImage(carID, imageURL);
+
+    createAuditLog({
+      action: "update",
+      description: `Updated primary image for car ${carID}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[FLEET] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[FLEET] setCarImage error:", error);
+    const status = error.message === "Car not found." ? 404 : 400;
     return res.status(status).json({ success: false, message: error.message });
   }
 };
