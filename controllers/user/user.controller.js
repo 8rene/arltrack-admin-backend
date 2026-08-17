@@ -6,6 +6,13 @@ import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
 
+// Mirrors Users.jsx's KNOWN_STATUSES on the frontend — kept here too since
+// PATCH /api/users/:uid/status is a real HTTP route, not something only
+// reachable through that dropdown. Login (auth.controller.js) hardcodes
+// this same ["inactive", "locked"] pairing, so any value outside this set
+// would silently fail to block/unblock login as expected.
+const VALID_USER_STATUSES = new Set(["active", "inactive", "locked"]);
+
 /**
  * Keeps the `staffUser` collection (what auth.controller.js's login query
  * reads) in sync whenever a user's roleID changes. This is the ONLY place
@@ -109,9 +116,11 @@ export const deleteUser = async (req, res) => {
 
     const userDocRef = db.collection("user").doc(uid);
     const userDoc = await userDocRef.get();
+    let deletedUserName = uid;
 
     if (userDoc.exists) {
       const userData = userDoc.data();
+      deletedUserName = userData.username || userData.email || uid;
 
       // Archive user
       await db.collection("userArchive").add({
@@ -156,6 +165,12 @@ export const deleteUser = async (req, res) => {
       // Don't fail if auth user doesn't exist
       console.warn("[USER] Auth delete warning:", authErr.message);
     }
+
+    createAuditLog({
+      action: "delete",
+      description: `Deleted and archived account for ${deletedUserName}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[USER] Failed to write audit log:", err));
 
     return res.status(200).json({ success: true, message: "User deleted and archived." });
   } catch (error) {
@@ -313,6 +328,13 @@ export const updateUserStatus = async (req, res) => {
   try {
     const { uid } = req.params;
     const { status, isFlagged } = req.body;
+
+    if (status !== undefined && !VALID_USER_STATUSES.has(String(status).toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${[...VALID_USER_STATUSES].join(", ")}.`,
+      });
+    }
 
     const userDocRef = db.collection("user").doc(uid);
     const userDoc = await userDocRef.get();

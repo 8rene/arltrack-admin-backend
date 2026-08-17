@@ -26,6 +26,7 @@ import { registerTransactionLogArchiveRoutes } from "./routes/archives/transacti
 import { registerAuditLogsArchiveRoutes }      from "./routes/archives/auditLogsArchiveRoutes.js";
 import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsArchiveRoutes.js";
 import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSessionArchiveRoutes.js";
+import { registerUserArchiveRoutes }           from "./routes/archives/userArchiveRoutes.js"; // ← NEW
 import { registerCronRoutes }                  from "./routes/cron/cron.routes.js";
 import { registerMaintenanceRoutes }           from "./routes/maintenance/maintenance.routes.js"; // ← NEW
 import { registerCarPartsRoutes }              from "./routes/carParts/carParts.routes.js"; // ← NEW
@@ -70,6 +71,7 @@ registerTransactionLogArchiveRoutes(app);
 registerAuditLogsArchiveRoutes(app);
 registerReviewsArchiveRoutes(app);
 registerBookingSessionArchiveRoutes(app);  // ← NEW
+registerUserArchiveRoutes(app);            // ← NEW
 registerCronRoutes(app);              // ← NEW
 registerMaintenanceRoutes(app);       // ← NEW
 registerCarPartsRoutes(app);          // ← NEW

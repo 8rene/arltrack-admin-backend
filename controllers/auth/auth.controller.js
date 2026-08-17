@@ -66,9 +66,15 @@ export const login = async (req, res) => {
     // verification and the license-expiry cron job). staffUser no longer
     // carries its own status; this is the only status check in login now.
     if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
+      const blockedStatus = userData.status.toLowerCase();
+      createAuditLog({
+        action: "auth",
+        description: `Blocked login attempt: ${userData.username || email} (status: ${blockedStatus}).`,
+        userID: firebaseUID,
+      }).catch((err) => console.error("[AUTH] Failed to write audit log:", err));
       return res.status(403).json({
         message:
-          userData.status.toLowerCase() === "locked"
+          blockedStatus === "locked"
             ? "Your account is locked. Please contact your administrator."
             : "Your account is currently inactive. Please contact your administrator.",
       });

@@ -52,7 +52,7 @@ export const archiveAuditLog = async (id) => {
 
   const logData = logDoc.data();
 
-  await db.collection("auditLogsArchive").add({
+  await db.collection("auditLogsArchives").add({
     ...logData,
     originalId: id,
     archivedAt: admin.firestore.FieldValue.serverTimestamp(),

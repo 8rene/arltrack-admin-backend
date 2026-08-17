@@ -3,6 +3,7 @@ import {
   restoreTransactionLogArchive,
   deleteTransactionLogArchive,
 } from "../../services/archives/transactionLogArchives.service.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 export const listTransactionLogArchives = async (req, res) => {
   try {
@@ -19,6 +20,11 @@ export const restoreTransactionLogArchiveHandler = async (req, res) => {
     const { transactionLogArchivesId } = req.params;
     const restoredBy = req.user?.username || req.user?.uid || "admin";
     await restoreTransactionLogArchive(transactionLogArchivesId, restoredBy);
+    createAuditLog({
+      action: "update",
+      description: `Restored archived transaction log ${transactionLogArchivesId}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[TRANSACTION LOG ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({ success: true, message: "Transaction log restored successfully." });
   } catch (error) {
     console.error("[TRANSACTION LOG ARCHIVE] restore error:", error);
@@ -30,6 +36,11 @@ export const deleteTransactionLogArchiveHandler = async (req, res) => {
   try {
     const { transactionLogArchivesId } = req.params;
     await deleteTransactionLogArchive(transactionLogArchivesId);
+    createAuditLog({
+      action: "delete",
+      description: `Permanently deleted archived transaction log ${transactionLogArchivesId}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[TRANSACTION LOG ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({ success: true, message: "Archived transaction log permanently deleted." });
   } catch (error) {
     console.error("[TRANSACTION LOG ARCHIVE] delete error:", error);

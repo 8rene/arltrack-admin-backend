@@ -3,6 +3,7 @@ import {
   restoreBookingArchive,
   deleteBookingArchive,
 } from "../../services/archives/bookingArchives.service.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 export const listBookingArchives = async (req, res) => {
   try {
@@ -19,6 +20,11 @@ export const restoreBookingArchiveHandler = async (req, res) => {
     const { bookingArchivesId } = req.params;
     const restoredBy = req.user?.username || req.user?.uid || "admin";
     const result = await restoreBookingArchive(bookingArchivesId, restoredBy);
+    createAuditLog({
+      action: "update",
+      description: `Restored archived booking ${bookingArchivesId}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[BOOKING ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
       message: `Booking restored successfully.${result.restoredPayment ? " Payment also restored." : ""}${result.restoredReviews > 0 ? ` ${result.restoredReviews} review(s) also restored.` : ""}`,
@@ -34,6 +40,11 @@ export const deleteBookingArchiveHandler = async (req, res) => {
   try {
     const { bookingArchivesId } = req.params;
     const result = await deleteBookingArchive(bookingArchivesId);
+    createAuditLog({
+      action: "delete",
+      description: `Permanently deleted archived booking ${bookingArchivesId}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[BOOKING ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
       message: `Archived booking permanently deleted.${result.deletedPaymentArchive ? " Linked payment archive also deleted." : ""}${result.deletedReviewArchives > 0 ? ` ${result.deletedReviewArchives} review archive(s) also deleted.` : ""}`,

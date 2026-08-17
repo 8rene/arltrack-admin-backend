@@ -97,7 +97,7 @@ export const archiveUserLog = async (id) => {
 
   const logData = logDoc.data();
 
-  await db.collection("userLogsArchive").add({
+  await db.collection("userLogArchives").add({
     ...logData,
     originalId: id,
     archivedAt: admin.firestore.FieldValue.serverTimestamp(),

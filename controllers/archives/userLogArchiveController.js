@@ -3,6 +3,7 @@ import {
   restoreUserLogArchive,
   deleteUserLogArchive,
 } from "../../services/archives/userLogArchives.service.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 export const listUserLogArchives = async (req, res) => {
   try {
@@ -19,6 +20,11 @@ export const restoreUserLogArchiveHandler = async (req, res) => {
     const { userLogArchivesId } = req.params;
     const restoredBy = req.user?.username || req.user?.uid || "admin";
     await restoreUserLogArchive(userLogArchivesId, restoredBy);
+    createAuditLog({
+      action: "update",
+      description: `Restored archived user log ${userLogArchivesId}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[USER LOG ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({ success: true, message: "User log restored successfully." });
   } catch (error) {
     console.error("[USER LOG ARCHIVE] restore error:", error);
@@ -30,6 +36,11 @@ export const deleteUserLogArchiveHandler = async (req, res) => {
   try {
     const { userLogArchivesId } = req.params;
     await deleteUserLogArchive(userLogArchivesId);
+    createAuditLog({
+      action: "delete",
+      description: `Permanently deleted archived user log ${userLogArchivesId}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[USER LOG ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({ success: true, message: "Archived user log permanently deleted." });
   } catch (error) {
     console.error("[USER LOG ARCHIVE] delete error:", error);

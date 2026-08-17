@@ -27,7 +27,7 @@ export const archiveTransactionLog = async (id) => {
 
   const logData = logDoc.data();
 
-  await db.collection("transactionLogsArchive").add({
+  await db.collection("transactionLogArchives").add({
     ...logData,
     originalId: id,
     archivedAt: admin.firestore.FieldValue.serverTimestamp(),
