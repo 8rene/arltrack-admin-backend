@@ -58,10 +58,17 @@ export const sendOTP = async (req, res) => {
     if (!result.success) {
       // Code is stored either way — surface the email failure so the UI
       // can tell the admin to contact support instead of silently hanging.
+      // "config" (a missing/misscoped env var) gets a message that says so
+      // explicitly, since retrying changes nothing until it's fixed on
+      // Vercel — unlike a genuine transient EmailJS/network failure.
       return res.status(200).json({
         success: true,
         emailSent: false,
-        message: "Could not send the email right now. Please try again in a moment.",
+        reason: result.reason,
+        message:
+          result.reason === "config"
+            ? "Verification email is misconfigured on the server (missing EmailJS setting). Retrying won't help — check the Vercel function logs for details."
+            : "Could not send the email right now. Please try again in a moment.",
       });
     }
 

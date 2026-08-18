@@ -18,6 +18,12 @@ const DEFAULTS = {
   baseAreaKeywords: ["manila", "bulacan"],
   // billingBlockHours intentionally omitted — see systemSettings.model.js
   // for why it stays a hardcoded constant in the customer backend instead.
+
+  // In-store pickup location — null lat/lng means "not configured", and
+  // the customer app hides the "Pick up in-store" option until both are set.
+  storeName: "",
+  storeLat: null,
+  storeLng: null,
 };
 
 const NUMERIC_FIELDS = [
@@ -101,6 +107,39 @@ export const updateSystemSettings = async (payload, actor) => {
     update.baseAreaKeywords = payload.baseAreaKeywords
       .map((k) => String(k).trim().toLowerCase())
       .filter(Boolean);
+  }
+
+  // ── Store location (in-store pickup) ──
+  // storeLat/storeLng are validated as a pair — a name with no coordinates
+  // (or vice versa) would leave the customer app's "in-store pickup"
+  // condition (STORE_CONFIGURED-equivalent: name AND both coords set)
+  // silently half-broken, so require them together.
+  if (payload.storeName !== undefined || payload.storeLat !== undefined || payload.storeLng !== undefined) {
+    const name = payload.storeName !== undefined ? String(payload.storeName).trim() : current.storeName;
+    const lat  = payload.storeLat  !== undefined ? payload.storeLat  : current.storeLat;
+    const lng  = payload.storeLng  !== undefined ? payload.storeLng  : current.storeLng;
+
+    // Allow fully clearing it (all three blank/null) to turn the option off.
+    const clearing = !name && (lat === null || lat === undefined) && (lng === null || lng === undefined);
+
+    if (clearing) {
+      update.storeName = "";
+      update.storeLat  = null;
+      update.storeLng  = null;
+    } else {
+      const latNum = Number(lat);
+      const lngNum = Number(lng);
+      if (!name) throw new Error("storeName is required when setting a store location.");
+      if (!Number.isFinite(latNum) || latNum < -90 || latNum > 90) {
+        throw new Error("storeLat must be a valid latitude between -90 and 90.");
+      }
+      if (!Number.isFinite(lngNum) || lngNum < -180 || lngNum > 180) {
+        throw new Error("storeLng must be a valid longitude between -180 and 180.");
+      }
+      update.storeName = name;
+      update.storeLat  = latNum;
+      update.storeLng  = lngNum;
+    }
   }
 
   if (Object.keys(update).length === 0) {
