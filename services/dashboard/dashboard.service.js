@@ -6,7 +6,7 @@ const parsePaymentTotal = (data) => {
   const rental  = parseFloat(data.rentalFee  ?? 0) || 0;
   const service = parseFloat(data.serviceFee ?? 0) || 0;
   const deposit = parseFloat(data.depositFee ?? 0) || 0;
-  const extra   = parseFloat(data.extrafee   ?? 0) || 0;
+  const extra   = parseFloat(data.extraFee   ?? 0) || 0;
   return rental + service + deposit + extra;
 };
 

@@ -8,6 +8,7 @@
 
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -18,7 +19,7 @@ export const getAllReviewsArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
-  return snapshot.docs.map((doc) => {
+  const rows = snapshot.docs.map((doc) => {
     const data = doc.data();
     return {
       reviewsArchivesID : doc.id,
@@ -29,6 +30,19 @@ export const getAllReviewsArchives = async () => {
       archivedAt : toISO(data.archivedAt),
       restoredAt : toISO(data.restoredAt),
     };
+  });
+
+  // Reviews store the reviewer as userID (some older rows may instead use
+  // reviewerID, depending on what the customer-facing app wrote); resolve
+  // whichever is present to a display name so the UI shows "who reviewed"
+  // instead of a raw Firestore ID. archivedBy is already a readable
+  // username/uid captured at delete time (see bookingDelete.service.js),
+  // so it's returned as-is for "deleted by".
+  const reviewerIDs = rows.map((r) => r.userID || r.reviewerID).filter(Boolean);
+  const nameMap = await resolveUserNames(reviewerIDs);
+  return rows.map((r) => {
+    const reviewerID = r.userID || r.reviewerID || null;
+    return { ...r, reviewerName: reviewerID ? nameMap[reviewerID] : null };
   });
 };
 

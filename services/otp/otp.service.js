@@ -23,10 +23,7 @@ import axios from "axios";
 // deploy that predates when the var was added (Vercel bakes env vars in
 // at build/deploy time; adding one afterward needs a redeploy to apply).
 const REQUIRED_ENV_VARS = ["EMAILJS_SERVICE_ID", "EMAILJS_PUBLIC_KEY", "EMAILJS_PRIVATE_KEY", "EMAILJS_TEMPLATE_ID"];
-console.log(
-  "[OTP service] EmailJS env var check:",
-  REQUIRED_ENV_VARS.map((name) => `${name}=${process.env[name] ? `present (${process.env[name].length} chars)` : "MISSING"}`).join(", ")
-);
+
 
 /**
  * Sends a one-time verification code to an admin/owner's own email.

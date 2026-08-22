@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -10,7 +11,7 @@ export const getAllTransactionLogArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
-  return snapshot.docs.map((doc) => {
+  const rows = snapshot.docs.map((doc) => {
     const data = doc.data();
     return {
       transactionLogArchivesId: doc.id,
@@ -20,6 +21,12 @@ export const getAllTransactionLogArchives = async () => {
       restoredAt: toISO(data.restoredAt),
     };
   });
+
+  // transactionLogArchives stores userID per the model (see
+  // models/transactionLogArchives/transactionLogArchives.model.js) but
+  // nothing resolved it to a name for the admin UI — add it here.
+  const nameMap = await resolveUserNames(rows.map((r) => r.userID));
+  return rows.map((r) => ({ ...r, userName: r.userID ? nameMap[r.userID] : null }));
 };
 
 // ── RESTORE ──────────────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ export const Payment = {
   rentalFee: 0,
   depositFee: 0,
   serviceFee: 0,
-  extrafee: 0,
+  extraFee: 0,
   status: "",         // "Paid" | "Pending" | "Refunded"
   discountAmount: 0,
   discountReason: "",

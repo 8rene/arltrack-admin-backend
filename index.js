@@ -30,6 +30,7 @@ import { registerUserArchiveRoutes }           from "./routes/archives/userArchi
 import { registerCronRoutes }                  from "./routes/cron/cron.routes.js";
 import { registerMaintenanceRoutes }           from "./routes/maintenance/maintenance.routes.js"; // ← NEW
 import { registerCarPartsRoutes }              from "./routes/carParts/carParts.routes.js"; // ← NEW
+import { registerReviewsRoutes }               from "./routes/reviews/reviews.routes.js"; // ← NEW
 import { registerProfileRequestsRoutes }       from "./routes/profileRequests/profileRequests.routes.js"; // ← NEW
 import { registerDriverDispatchRoutes }        from "./routes/driverDispatch/driverDispatch.routes.js"; // ← NEW
 import { registerSystemSettingsRoutes }       from "./routes/systemSettings/systemSettings.routes.js"; // ← NEW
@@ -70,6 +71,7 @@ registerBookingArchiveRoutes(app);
 registerTransactionLogArchiveRoutes(app);
 registerAuditLogsArchiveRoutes(app);
 registerReviewsArchiveRoutes(app);
+registerReviewsRoutes(app); // ← NEW: live Reviews page (list + delete-to-archive)
 registerBookingSessionArchiveRoutes(app);  // ← NEW
 registerUserArchiveRoutes(app);            // ← NEW
 registerCronRoutes(app);              // ← NEW

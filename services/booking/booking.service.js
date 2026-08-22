@@ -90,7 +90,10 @@ const resolveServiceType = async (serviceTypeID) => {
   try {
     const doc = await db.collection("serviceType").doc(serviceTypeID).get();
     if (!doc.exists) return "—";
-    return doc.data().serviceTypeName || doc.data().name || "—";
+    // The serviceType collection's actual field is `serviceType` (see
+    // customer-backend/controllers/services/services.controller.js, which
+    // creates/reads this same shape) — not serviceTypeName/name.
+    return doc.data().serviceType || "—";
   } catch { return "—"; }
 };
 

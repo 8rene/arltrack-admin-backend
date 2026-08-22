@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -10,7 +11,7 @@ export const getAllAuditLogsArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
-  return snapshot.docs.map((doc) => {
+  const rows = snapshot.docs.map((doc) => {
     const data = doc.data();
     return {
       auditLogsArchivesId: doc.id,
@@ -20,6 +21,12 @@ export const getAllAuditLogsArchives = async () => {
       restoredAt: toISO(data.restoredAt),
     };
   });
+
+  // The live Audit Log page (AuditLog.jsx) resolves userID -> a name for
+  // display; the archive was showing the raw ID instead. Resolve it here
+  // once for the whole page so the two views stay consistent.
+  const nameMap = await resolveUserNames(rows.map((r) => r.userID));
+  return rows.map((r) => ({ ...r, userName: r.userID ? nameMap[r.userID] : null }));
 };
 
 // ── RESTORE ──────────────────────────────────────────────────────────────────
