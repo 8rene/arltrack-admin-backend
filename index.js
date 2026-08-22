@@ -23,6 +23,7 @@ import { registerUserLogArchiveRoutes }        from "./routes/archives/userLogAr
 import { registerPaymentsArchiveRoutes }       from "./routes/archives/paymentsArchiveRoutes.js";
 import { registerBookingArchiveRoutes }        from "./routes/archives/bookingArchiveRoutes.js";
 import { registerTransactionLogArchiveRoutes } from "./routes/archives/transactionLogArchiveRoutes.js";
+import { registerRefundArchiveRoutes }         from "./routes/archives/refundArchiveRoutes.js"; // ← NEW
 import { registerAuditLogsArchiveRoutes }      from "./routes/archives/auditLogsArchiveRoutes.js";
 import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsArchiveRoutes.js";
 import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSessionArchiveRoutes.js";
@@ -69,6 +70,7 @@ registerUserLogArchiveRoutes(app);
 registerPaymentsArchiveRoutes(app);
 registerBookingArchiveRoutes(app);
 registerTransactionLogArchiveRoutes(app);
+registerRefundArchiveRoutes(app);      // ← NEW
 registerAuditLogsArchiveRoutes(app);
 registerReviewsArchiveRoutes(app);
 registerReviewsRoutes(app); // ← NEW: live Reviews page (list + delete-to-archive)

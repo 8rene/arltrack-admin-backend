@@ -1,4 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
+import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -178,6 +179,20 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
     processedBy: adminUserID,
     processedAt: now,
     updatedAt: now,
+  });
+
+  createTransactionLog({
+    bookingID: refundRequest.bookingID,
+    paymentID: refundRequest.paymentID,
+    refundRequestID,
+    userID: refundRequest.userID,
+    type: "Refund",
+    amount: refundRequest.amount || 0,
+    status: "Rejected",
+    description: rejectReason
+      ? `Refund request rejected: ${rejectReason}`
+      : `Refund request rejected.`,
+    performedBy: adminUserID,
   });
 
   return { ...refundRequest, status: "Rejected", rejectReason: rejectReason || null };

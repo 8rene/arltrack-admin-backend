@@ -91,6 +91,25 @@ const fetchBookingSession = async (bookingID) => {
   return { docRef: doc.ref, data: doc.data() };
 };
 
+/**
+ * Fetches the refundRequest document linked to a bookingID, if one exists
+ * (in any status — Pending/Approved/Refunded/Rejected/Failed). Previously
+ * nothing archived or deleted this on booking deletion, so it was left
+ * pointing at a booking/payment that no longer existed. Returns
+ * { docRef, data } or null if this booking never had a refund request.
+ */
+const fetchRefundRequest = async (bookingID) => {
+  const snap = await db
+    .collection("refundRequests")
+    .where("bookingID", "==", bookingID)
+    .limit(1)
+    .get();
+
+  if (snap.empty) return null;
+  const doc = snap.docs[0];
+  return { docRef: doc.ref, data: doc.data() };
+};
+
 // ─────────────────────────────────────────────────────────────
 // Archive writers
 // ─────────────────────────────────────────────────────────────
@@ -193,6 +212,31 @@ const archiveBookingSession = async (sessionDocID, sessionData, archivedBy = "ad
   return archiveRef.id;
 };
 
+/**
+ * Writes a refundRequest archive document. No standalone viewer page reads
+ * this collection (see models/refundArchives/refundArchives.model.js) — it
+ * exists solely so a refund request tied to a deleted booking isn't lost.
+ * Returns the new refundArchivesID.
+ */
+const archiveRefundRequest = async (refundRequestDocID, refundRequestData, archivedBy = "admin") => {
+  const archiveRef = db.collection("refundArchives").doc(); // auto-ID
+
+  const archiveDoc = {
+    refundArchivesId : archiveRef.id,
+    refundRequestID   : refundRequestData.refundRequestID ?? refundRequestDocID,
+    originalId         : refundRequestDocID,
+    archiveDate         : admin.firestore.FieldValue.serverTimestamp(),
+    archivedAt           : admin.firestore.FieldValue.serverTimestamp(),
+    archivedBy,
+    // ── spread all original refund request fields ──
+    ...refundRequestData,
+  };
+
+  await archiveRef.set(archiveDoc);
+  console.log(`[ARCHIVE] RefundRequest archived → refundArchives/${archiveRef.id}`);
+  return archiveRef.id;
+};
+
 // ─────────────────────────────────────────────────────────────
 // Main exported function
 // ─────────────────────────────────────────────────────────────
@@ -214,18 +258,21 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   const paymentResult = await fetchPayment(bookingID);
   const reviewResults = await fetchReviews(bookingID);
   const sessionResult = await fetchBookingSession(bookingID);
+  const refundRequestResult = await fetchRefundRequest(bookingID);
 
   console.log(
     `[DELETE] Booking ${bookingDocID} | ` +
     `payment: ${paymentResult ? "found" : "none"} | ` +
     `reviews: ${reviewResults.length} | ` +
-    `session: ${sessionResult ? "found" : "none"}`
+    `session: ${sessionResult ? "found" : "none"} | ` +
+    `refundRequest: ${refundRequestResult ? "found" : "none"}`
   );
 
   // ── 2. Archive phase (must all succeed before any delete) ─────────────────
   let bookingArchivesID;
   let paymentsArchivesID = null;
   let bookingSessionArchivesID = null;
+  let refundArchivesID = null;
   const reviewsArchivesIDs = [];
 
   try {
@@ -253,6 +300,17 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       bookingSessionArchivesID = await archiveBookingSession(
         sessionResult.docRef.id,
         sessionResult.data,
+        archivedBy
+      );
+    }
+
+    // 2e. Archive refundRequest (if exists) — in any status. Closes the gap
+    // where a refund request tied to this booking would otherwise be left
+    // pointing at a booking/payment that no longer exists.
+    if (refundRequestResult) {
+      refundArchivesID = await archiveRefundRequest(
+        refundRequestResult.docRef.id,
+        refundRequestResult.data,
         archivedBy
       );
     }
@@ -288,6 +346,11 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       batch.delete(sessionResult.docRef);
     }
 
+    // 3e. Delete refundRequest
+    if (refundRequestResult) {
+      batch.delete(refundRequestResult.docRef);
+    }
+
     await batch.commit();
     console.log(`[DELETE] Batch delete committed for booking ${bookingDocID}`);
   } catch (deleteError) {
@@ -312,12 +375,15 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     bookingArchivesID,
     paymentsArchivesID,
     bookingSessionArchivesID,
+    refundArchivesID,
     reviewsArchivesIDs,
     reviewsArchivedCount : reviewResults.length,
     sessionArchived       : Boolean(sessionResult),
+    refundRequestArchived : Boolean(refundRequestResult),
     message          :
       `Booking ${bookingDocID} and ${paymentResult ? 1 : 0} payment(s), ` +
       `${reviewResults.length} review(s), ` +
-      `${sessionResult ? 1 : 0} session archived and deleted successfully.`,
+      `${sessionResult ? 1 : 0} session, ` +
+      `${refundRequestResult ? 1 : 0} refund request archived and deleted successfully.`,
   };
 };

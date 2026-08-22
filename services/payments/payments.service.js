@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { createNotification, resolveNotification } from "../notification/notification.service.js";
+import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 
 // resolve customer name: firstName+lastName (priority), fallback to username
 const resolveCustomerName = async (userID) => {
@@ -174,6 +175,19 @@ export const confirmInitialPayment = async (bookingID, confirmedBy) => {
     updatedAt:   admin.firestore.FieldValue.serverTimestamp(),
   });
 
+  createTransactionLog({
+    bookingID,
+    paymentID: data.paymentID || doc.id,
+    userID: data.userID || null,
+    type: "Payment",
+    amount: Number(data.amount) || 0,
+    status: "Success",
+    paymentMethod: data.paymentMethod || "Cash",
+    referenceNumber: data.referenceNumber || "—",
+    description: `Cash payment confirmed by staff for booking ${bookingID}.`,
+    performedBy: confirmedBy || "—",
+  });
+
   return { id: doc.id, bookingID };
 };
 
@@ -221,6 +235,19 @@ export const collectRemainingBalance = async (bookingID, collectedBy) => {
     balanceCollectedAt: admin.firestore.FieldValue.serverTimestamp(),
     balanceCollectedBy: collectedBy || "—",
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  createTransactionLog({
+    bookingID,
+    paymentID: data.paymentID || doc.id,
+    userID: data.userID || null,
+    type: "Payment",
+    amount: balance,
+    status: "Success",
+    paymentMethod: data.paymentMethod || "Cash",
+    referenceNumber: data.referenceNumber || "—",
+    description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID}.`,
+    performedBy: collectedBy || "—",
   });
 
   return { id: doc.id, bookingID };
@@ -295,6 +322,19 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     // clear out any stale active alert for this booking.
     await resolveNotification("refund_due", bookingID);
   }
+
+  createTransactionLog({
+    bookingID,
+    paymentID: existing.paymentID || doc.id,
+    userID: existing.userID || null,
+    type: "Discount",
+    amount: discountAmount,
+    status: "Success",
+    description: reason
+      ? `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}: ${reason}`
+      : `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}.`,
+    performedBy: appliedBy || "—",
+  });
 
   return { id: doc.id, bookingID, discountAmount, refundDue };
 };
@@ -391,6 +431,17 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
   });
 
   await resolveNotification("refund_due", bookingID);
+
+  createTransactionLog({
+    bookingID,
+    paymentID: data.paymentID || doc.id,
+    userID: data.userID || null,
+    type: "Refund",
+    amount: refundDue,
+    status: "Refunded",
+    description: `Discount-spillover refund of ₱${refundDue.toLocaleString()} handed back to customer for booking ${bookingID}.`,
+    performedBy: issuedBy || "—",
+  });
 
   return { id: doc.id, bookingID };
 };
