@@ -1,5 +1,22 @@
-import { getAllReviewsGroupedByCar, getReviewsForCar, archiveAndDeleteReview } from "../../services/reviews/reviews.service.js";
+import { getAllReviewsGroupedByCar, getReviewsForCar, getReviewCountsForCars, archiveAndDeleteReview } from "../../services/reviews/reviews.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+
+// POST /api/reviews/counts — { carIDs: [...] } -> { carID: count, ... }
+// Count-only, no review content — see getReviewCountsForCars for why this
+// is a separate lean endpoint rather than reusing listReviews.
+export const getReviewCounts = async (req, res) => {
+  try {
+    const { carIDs } = req.body;
+    if (!Array.isArray(carIDs)) {
+      return res.status(400).json({ success: false, message: "carIDs must be an array." });
+    }
+    const counts = await getReviewCountsForCars(carIDs);
+    return res.status(200).json({ success: true, data: counts });
+  } catch (error) {
+    console.error("[REVIEWS] getReviewCounts error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 // GET /api/reviews — live reviews grouped by car, for the admin Reviews page
 export const listReviews = async (req, res) => {

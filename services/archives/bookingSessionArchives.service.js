@@ -24,6 +24,24 @@ export const getAllBookingSessionArchives = async () => {
   });
 };
 
+// ── HELPER: all archived sessions for a car — mirrors getSessionsByCar in
+// bookingSession.service.js, but against bookingSessionArchives. Used by
+// Traceback's session lookup as a fallback once a booking has been
+// archived (its live bookingSessions doc is deleted, so getSessionsByCar
+// alone would silently lose all geofence/alert/status context for that
+// date — see gps.controller.js's getCarTraceback). Same shape ({ ref, data })
+// as getSessionsByCar so callers don't need to branch on which one matched. ──
+export const getSessionArchivesByCar = async (carID) => {
+  const snap = await db.collection("bookingSessionArchives").where("carID", "==", carID).get();
+  const sessions = snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
+  sessions.sort((a, b) => {
+    const at = a.data.pickupTime?._seconds ?? a.data.pickupTime?.seconds ?? 0;
+    const bt = b.data.pickupTime?._seconds ?? b.data.pickupTime?.seconds ?? 0;
+    return bt - at;
+  });
+  return sessions;
+};
+
 // ── HELPER: find the linked archive doc by bookingID — mirrors
 // findLinkedPaymentArchive/findLinkedReviewArchives in bookingArchives.service.js ──
 export const findLinkedBookingSessionArchive = async (bookingID) => {

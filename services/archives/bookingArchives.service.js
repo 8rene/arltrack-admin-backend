@@ -68,6 +68,49 @@ const findLinkedReviewArchives = async (bookingID) => {
   return snap.docs;
 };
 
+// Vehicle Inspection records (damage/parts status + photos) are NEVER
+// archived — they live permanently in these four live collections, keyed
+// by bookingID, regardless of what happens to the booking itself. Used by
+// (a) the "View Vehicle Inspection" modal on the Booking Archive page, and
+// (b) the permanent-delete cascade below, so these don't get orphaned
+// forever once nothing points back to their bookingID anymore.
+const INSPECTION_COLLECTIONS = [
+  "inventoryBeforeTrip",
+  "inventoryAfterTrip",
+  "vehicleDocumentationBeforeTrip",
+  "vehicleDocumentationAfterTrip",
+];
+
+export const findLinkedInspectionDocs = async (bookingID) => {
+  if (!bookingID) return [];
+  const snaps = await Promise.all(
+    INSPECTION_COLLECTIONS.map((name) =>
+      db.collection(name).where("bookingID", "==", bookingID).get()
+    )
+  );
+  return snaps.flatMap((snap) => snap.docs);
+};
+
+// Same data as findLinkedInspectionDocs, but shaped for direct display
+// (grouped by collection, timestamps normalized) rather than for deletion.
+export const getInspectionRecordsForBooking = async (bookingID) => {
+  if (!bookingID) return { inventoryBeforeTrip: [], inventoryAfterTrip: [], vehicleDocumentationBeforeTrip: [], vehicleDocumentationAfterTrip: [] };
+  const snaps = await Promise.all(
+    INSPECTION_COLLECTIONS.map((name) =>
+      db.collection(name).where("bookingID", "==", bookingID).get()
+    )
+  );
+  const result = {};
+  INSPECTION_COLLECTIONS.forEach((name, i) => {
+    result[name] = snaps[i].docs.map((d) => ({
+      id: d.id,
+      ...d.data(),
+      createdAt: toISO(d.data().createdAt),
+    }));
+  });
+  return result;
+};
+
 // ── RESTORE (cascade) ─────────────────────────────────────────────────────────
 // 1. Restore booking → bookings collection
 // 2. Restore linked paymentsArchives entry → payments collection (if found)
@@ -217,6 +260,11 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   const paymentArchiveDoc  = await findLinkedPaymentArchive(bookingID);
   const reviewArchiveDocs  = await findLinkedReviewArchives(bookingID);
   const sessionArchiveDoc  = await findLinkedBookingSessionArchive(bookingID);
+  // Inspection records were never archived in the first place (they live
+  // permanently in their own collections) — so a permanent delete here is
+  // the only place that ever cleans them up. Without this, they'd be
+  // orphaned forever: no booking, live or archived, left pointing to them.
+  const inspectionDocs     = await findLinkedInspectionDocs(bookingID);
 
   // Delete all in batch
   const batch = db.batch();
@@ -231,6 +279,9 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   if (sessionArchiveDoc) {
     batch.delete(sessionArchiveDoc.ref);
   }
+  for (const inspectionDoc of inspectionDocs) {
+    batch.delete(inspectionDoc.ref);
+  }
 
   await batch.commit();
 
@@ -238,5 +289,6 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
     deletedPaymentArchive: !!paymentArchiveDoc,
     deletedReviewArchives: reviewArchiveDocs.length,
     deletedSessionArchive: !!sessionArchiveDoc,
+    deletedInspectionDocs: inspectionDocs.length,
   };
 };

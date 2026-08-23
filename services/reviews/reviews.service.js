@@ -19,6 +19,25 @@ const toISO = (val) => {
 };
 
 /**
+ * Returns { carID: count } for the given list of car IDs, using Firestore's
+ * count() aggregation query — this reads only a count per car, never the
+ * review documents themselves, so it doesn't undercut the reason
+ * getReviewsForCar/getAllReviewsGroupedByCar are only called on demand
+ * (see file header comment). Used to show a review-count badge on each
+ * car card in the admin Reviews page before a car is even selected.
+ */
+export const getReviewCountsForCars = async (carIDs) => {
+  const uniqueIDs = [...new Set((carIDs || []).filter(Boolean))];
+  const entries = await Promise.all(
+    uniqueIDs.map(async (carID) => {
+      const snap = await db.collection("reviews").where("carID", "==", carID).count().get();
+      return [carID, snap.data().count];
+    })
+  );
+  return Object.fromEntries(entries);
+};
+
+/**
  * Returns every live review for one car, enriched with the reviewer's
  * display name. Used by the admin Reviews page, which fetches cars
  * directly (like Inventory.jsx) and only loads a car's reviews once it's

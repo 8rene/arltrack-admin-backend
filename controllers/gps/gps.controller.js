@@ -2,8 +2,10 @@ import { saveLocation } from "../../services/gps/gps.service.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getSessionsByCar, getActiveSessionByCar } from "../../services/booking/bookingSession.service.js";
+import { getSessionArchivesByCar } from "../../services/archives/bookingSessionArchives.service.js";
 import { fetchCarRowsForDate } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
+import { isWithinPhilippines } from "../../utils/gps/philippinesBounds.js";
 import admin from "firebase-admin";
 
 /** POST /api/gps  — GPS device pushes a live location */
@@ -12,6 +14,21 @@ export const receiveLocation = async (req, res) => {
   if (!device_id || lat == null || lng == null) {
     return res.status(400).json({ status: "error", message: "device_id, lat, lng required." });
   }
+
+  const latVal = parseFloat(lat);
+  const lngVal = parseFloat(lng);
+
+  // Plausibility check — catches wildly-wrong fixes (bad GPS chip, cold
+  // start, multipath — the kind of glitch that reports a point on another
+  // continent while the car hasn't moved) before they're saved anywhere.
+  // Silent drop, by design: no error surfaced to the device, nothing
+  // written to gpsLocation/gpsDevice/session/Sheets for this ping. See
+  // utils/gps/philippinesBounds.js for what this box does and doesn't catch.
+  if (!isWithinPhilippines(latVal, lngVal)) {
+    console.warn(`[GPS] Dropped out-of-bounds ping from ${device_id}: lat=${lat}, lng=${lng}`);
+    return res.status(200).json({ status: "ok", ignored: true });
+  }
+
   // speed: defaults to 0 if the tracker doesn't send it (older firmware, etc).
   // offline: the tracker itself flags this true on buffered/replayed pings
   // (queued while it had no signal, sent once it reconnects) — not inferred
@@ -523,13 +540,28 @@ export const getCarTraceback = async (req, res) => {
     // the frontend. null when no session covers this date.
     let session = null;
     try {
-      const sessions = await getSessionsByCar(carId);
-      const match = sessions.find((s) => {
+      const findMatch = (sessions) => sessions.find((s) => {
         const pickup = s.data.pickupTime?.toDate?.() || (s.data.pickupTime ? new Date(s.data.pickupTime) : null);
         if (!pickup) return false;
         const end = s.data.returnTime?.toDate?.() || (s.data.returnTime ? new Date(s.data.returnTime) : new Date());
         return datesBetweenPHT(pickup, end).includes(date);
       });
+
+      const sessions = await getSessionsByCar(carId);
+      let match = findMatch(sessions);
+      let isArchived = false;
+
+      // Live bookingSessions doc is deleted once its booking gets archived
+      // (see bookingDelete.service.js's cascade) — without this fallback,
+      // an archived trip's dots would still show on the map (Sheets rows
+      // are never touched by archiving) but all context around them would
+      // silently vanish. Check the preserved archive copy instead.
+      if (!match) {
+        const archivedSessions = await getSessionArchivesByCar(carId);
+        match = findMatch(archivedSessions);
+        isArchived = !!match;
+      }
+
       if (match) {
         geofenceZones  = match.data.geofenceZones  || [];
         geofenceAlerts = match.data.geofenceAlerts || [];
@@ -540,6 +572,7 @@ export const getCarTraceback = async (req, res) => {
           status:           match.data.status || null,
           pickupTime:       match.data.pickupTime || null,
           returnTime:       match.data.returnTime || null,
+          isArchived,
         };
       }
     } catch (lookupErr) {

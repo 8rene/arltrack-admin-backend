@@ -6,11 +6,13 @@ import {
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// Archives visible to: Owner only
+// View + restore: Owner and Admin. Permanent delete: Owner only
+// (irreversible, so kept out of Admin's reach even if that account is compromised).
 const allowed = [roles.OWNER, roles.ADMIN];
+const deleteAllowed = [roles.OWNER];
 
 export const registerUserLogArchiveRoutes = (app) => {
   app.get("/api/archives/user-log",                                      verifyToken, requireRole(allowed), listUserLogArchives);
   app.post("/api/archives/user-log/:userLogArchivesId/restore",          verifyToken, requireRole(allowed), restoreUserLogArchiveHandler);
-  app.delete("/api/archives/user-log/:userLogArchivesId",                verifyToken, requireRole(allowed), deleteUserLogArchiveHandler);
+  app.delete("/api/archives/user-log/:userLogArchivesId",                verifyToken, requireRole(deleteAllowed), deleteUserLogArchiveHandler);
 };
