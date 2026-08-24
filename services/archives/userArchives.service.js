@@ -6,7 +6,7 @@ const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 // ── GET ALL ──────────────────────────────────────────────────────────────────
 export const getAllUserArchives = async () => {
   const snapshot = await db
-    .collection("userArchive")
+    .collection("userArchives")
     .orderBy("archivedAt", "desc")
     .get();
 
@@ -22,40 +22,46 @@ export const getAllUserArchives = async () => {
   });
 };
 
-// ── HELPERS: find linked archive docs by originalId (the deleted user's uid) ──
-const findLinkedDetailsArchives = async (originalId) => {
-  if (!originalId) return [];
-  const snap = await db.collection("userDetailsArchive").where("originalId", "==", originalId).get();
+// ── HELPERS: find LIVE docs by userID (the deleted user's uid) ──────────────
+// userDetails/userAddress/userDocument are no longer archived into their own
+// collections at soft-delete time (see deleteUser() in
+// controllers/user/user.controller.js) — they stay live and untouched while
+// a user sits in userArchives. These helpers find them by userID so
+// deleteUserArchive() can permanently purge them when that time comes.
+const findLiveUserDetails = async (userID) => {
+  if (!userID) return [];
+  const snap = await db.collection("userDetails").where("userID", "==", userID).get();
   return snap.docs;
 };
 
-const findLinkedAddressArchives = async (originalId) => {
-  if (!originalId) return [];
-  const snap = await db.collection("userAddressArchive").where("originalId", "==", originalId).get();
+const findLiveUserAddress = async (userID) => {
+  if (!userID) return [];
+  const snap = await db.collection("userAddress").where("userID", "==", userID).get();
   return snap.docs;
 };
 
-const findLinkedDocumentArchives = async (originalId) => {
-  if (!originalId) return [];
-  const snap = await db.collection("userDocumentArchive").where("originalId", "==", originalId).get();
+const findLiveUserDocument = async (userID) => {
+  if (!userID) return [];
+  const snap = await db.collection("userDocument").where("userID", "==", userID).get();
   return snap.docs;
 };
 
-// ── RESTORE (cascade) ─────────────────────────────────────────────────────────
+// ── RESTORE ───────────────────────────────────────────────────────────────
 // 1. Restore user → user collection
-// 2. Restore linked userDetailsArchive entries → userDetails collection
-// 3. Restore linked userAddressArchive entries → userAddress collection
-// 4. Restore linked userDocumentArchive entries → userDocument collection
-// 5. Delete all four archive records
+// 2. Delete the userArchives record
+//
+// userDetails/userAddress/userDocument need no restore step — they were
+// never removed in the first place (see deleteUser()), so there's nothing
+// to bring back for them.
 //
 // NOTE — Firebase Auth: deleteUser() permanently deletes the Auth account
 // (admin.auth().deleteUser), which cannot be undone via the Admin SDK the
 // same way Firestore docs can. Restoring here brings back the Firestore
-// profile/details/address/documents, but the customer will need to sign up
-// again (or an admin recreates the Auth account with the same uid) before
-// they can log in. authRestoreRequired flags this so the UI can warn about it.
+// user profile, but the customer will need to sign up again (or an admin
+// recreates the Auth account with the same uid) before they can log in.
+// authRestoreRequired flags this so the UI can warn about it.
 export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") => {
-  const archiveRef = db.collection("userArchive").doc(userArchivesId);
+  const archiveRef = db.collection("userArchives").doc(userArchivesId);
   const archiveDoc = await archiveRef.get();
   if (!archiveDoc.exists) throw new Error("Archived user not found.");
 
@@ -79,77 +85,42 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
     restoredAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // ── 2. Restore linked userDetails ──
-  const detailsArchiveDocs = await findLinkedDetailsArchives(originalId);
-  for (const d of detailsArchiveDocs) {
-    const { originalId: _o, archivedAt: _a, ...detailsData } = d.data();
-    await db.collection("userDetails").add({
-      ...detailsData,
-      restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  }
-
-  // ── 3. Restore linked userAddress ──
-  const addressArchiveDocs = await findLinkedAddressArchives(originalId);
-  for (const d of addressArchiveDocs) {
-    const { originalId: _o, archivedAt: _a, ...addressData } = d.data();
-    await db.collection("userAddress").add({
-      ...addressData,
-      restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  }
-
-  // ── 4. Restore linked userDocument ──
-  const documentArchiveDocs = await findLinkedDocumentArchives(originalId);
-  for (const d of documentArchiveDocs) {
-    const { originalId: _o, archivedAt: _a, ...documentData } = d.data();
-    await db.collection("userDocument").add({
-      ...documentData,
-      restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  }
-
-  // ── 5. Delete all archive records (batch) ──
-  const batch = db.batch();
-  batch.delete(archiveRef);
-  for (const d of detailsArchiveDocs)  batch.delete(d.ref);
-  for (const d of addressArchiveDocs)  batch.delete(d.ref);
-  for (const d of documentArchiveDocs) batch.delete(d.ref);
-  await batch.commit();
+  // ── 2. Delete the archive record ──
+  await archiveRef.delete();
 
   return {
-    restoredDetails:  detailsArchiveDocs.length,
-    restoredAddress:  addressArchiveDocs.length,
-    restoredDocument: documentArchiveDocs.length,
     authRestoreRequired: true,
   };
 };
 
-// ── PERMANENT DELETE (cascade) ────────────────────────────────────────────────
-// Deletes the userArchive + its linked userDetailsArchive + userAddressArchive
-// + userDocumentArchive entries.
+// ── PERMANENT DELETE ─────────────────────────────────────────────────────
+// This is the point of no return for a deleted account: deletes the
+// userArchives record itself, plus the live userDetails/userAddress/
+// userDocument docs that were deliberately left untouched at soft-delete
+// time (see deleteUser()). Nothing archives them first — once this runs,
+// that data is genuinely gone.
 export const deleteUserArchive = async (userArchivesId) => {
-  const archiveRef = db.collection("userArchive").doc(userArchivesId);
+  const archiveRef = db.collection("userArchives").doc(userArchivesId);
   const archiveDoc = await archiveRef.get();
   if (!archiveDoc.exists) throw new Error("Archived user not found.");
 
   const data = archiveDoc.data();
   const originalId = data.originalId;
 
-  const detailsArchiveDocs  = await findLinkedDetailsArchives(originalId);
-  const addressArchiveDocs  = await findLinkedAddressArchives(originalId);
-  const documentArchiveDocs = await findLinkedDocumentArchives(originalId);
+  const detailsDocs  = await findLiveUserDetails(originalId);
+  const addressDocs  = await findLiveUserAddress(originalId);
+  const documentDocs = await findLiveUserDocument(originalId);
 
   const batch = db.batch();
   batch.delete(archiveRef);
-  for (const d of detailsArchiveDocs)  batch.delete(d.ref);
-  for (const d of addressArchiveDocs)  batch.delete(d.ref);
-  for (const d of documentArchiveDocs) batch.delete(d.ref);
+  for (const d of detailsDocs)  batch.delete(d.ref);
+  for (const d of addressDocs)  batch.delete(d.ref);
+  for (const d of documentDocs) batch.delete(d.ref);
   await batch.commit();
 
   return {
-    deletedDetails:  detailsArchiveDocs.length,
-    deletedAddress:  addressArchiveDocs.length,
-    deletedDocument: documentArchiveDocs.length,
+    deletedDetails:  detailsDocs.length,
+    deletedAddress:  addressDocs.length,
+    deletedDocument: documentDocs.length,
   };
 };

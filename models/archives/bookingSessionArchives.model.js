@@ -26,6 +26,10 @@ export const BookingSessionArchive = {
   archiveDate: null,
   archivedAt: null,
   archivedBy: "",
+  // See bookingArchives.model.js — same story: restore deletes this doc
+  // rather than marking it, so restoredAt only ever arrives here inherited
+  // from the live session doc if it's archived again after being restored.
+  // restoredBy is fully dead (no code path writes it anymore) and has been
+  // removed from this model.
   restoredAt: null,
-  restoredBy: null,
 };

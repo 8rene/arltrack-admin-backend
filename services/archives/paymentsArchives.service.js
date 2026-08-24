@@ -98,10 +98,9 @@ export const restorePaymentsArchive = async (paymentsArchivesId, restoredBy = "a
 
   const restoredBooking = await restoreLinkedBooking(originalData.bookingID);
 
-  await archiveRef.update({
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    restoredBy,
-  });
+  // Archive doc's job is done once the payment is back in the live
+  // collection — delete it instead of keeping a "Restored" marker around.
+  await archiveRef.delete();
 
   return { restoredBooking };
 };

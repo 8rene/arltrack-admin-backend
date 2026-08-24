@@ -123,32 +123,21 @@ export const deleteUser = async (req, res) => {
       deletedUserName = userData.username || userData.email || uid;
 
       // Archive user
-      await db.collection("userArchive").add({
+      await db.collection("userArchives").add({
         ...userData,
         originalId: uid,
         archivedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // Archive + delete userDetails
-      const detailsSnap = await db.collection("userDetails").where("userID", "==", uid).get();
-      for (const d of detailsSnap.docs) {
-        await db.collection("userDetailsArchive").add({ ...d.data(), originalId: uid, archivedAt: admin.firestore.FieldValue.serverTimestamp() });
-        await d.ref.delete();
-      }
-
-      // Archive + delete userAddress
-      const addressSnap = await db.collection("userAddress").where("userID", "==", uid).get();
-      for (const d of addressSnap.docs) {
-        await db.collection("userAddressArchive").add({ ...d.data(), originalId: uid, archivedAt: admin.firestore.FieldValue.serverTimestamp() });
-        await d.ref.delete();
-      }
-
-      // Archive + delete userDocument
-      const docSnap = await db.collection("userDocument").where("userID", "==", uid).get();
-      for (const d of docSnap.docs) {
-        await db.collection("userDocumentArchive").add({ ...d.data(), originalId: uid, archivedAt: admin.firestore.FieldValue.serverTimestamp() });
-        await d.ref.delete();
-      }
+      // NOTE: userDetails, userAddress, and userDocument are deliberately
+      // left untouched here. They're not read anywhere the app exposes
+      // without either a legitimate userID already in hand (from a
+      // booking/payment/refund) or a scoped/authenticated lookup, and
+      // profileRequests.service.js now checks the parent user still
+      // exists before writing to them. The actual purge happens later,
+      // in deleteUserArchive() (services/archives/userArchives.service.js),
+      // when this archived record is permanently deleted — that's the
+      // point of no return, not this soft-delete step.
 
       // Delete user Firestore doc
       await userDocRef.delete();

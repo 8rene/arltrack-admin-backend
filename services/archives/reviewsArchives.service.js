@@ -73,10 +73,11 @@ export const restoreReviewsArchive = async (reviewsArchivesID, restoredBy = "adm
     restoredAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  await archiveRef.update({
-    restoredAt : admin.firestore.FieldValue.serverTimestamp(),
-    restoredBy,
-  });
+  // Archive doc's job is done once the review is back in the live
+  // collection — delete it instead of keeping a "Restored" marker around,
+  // so restored records don't linger in the archive list (and can't pick
+  // up a stale restoredAt if this review is archived again later).
+  await archiveRef.delete();
 };
 
 // ── PERMANENT DELETE ─────────────────────────────────────────

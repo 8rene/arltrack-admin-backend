@@ -55,10 +55,9 @@ export const restoreAuditLogsArchive = async (auditLogsArchivesId, restoredBy = 
     restoredAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  await archiveRef.update({
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    restoredBy,
-  });
+  // Archive doc's job is done once the audit log is back in the live
+  // collection — delete it instead of keeping a "Restored" marker around.
+  await archiveRef.delete();
 };
 
 // ── PERMANENT DELETE ─────────────────────────────────────────────────────────

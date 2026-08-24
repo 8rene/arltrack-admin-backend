@@ -51,11 +51,11 @@ export const restoreUserLogArchive = async (userLogArchivesId, restoredBy = "adm
     restoredAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Mark archive as restored (keep for audit trail)
-  await archiveRef.update({
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    restoredBy,
-  });
+  // Archive doc's job is done once the user log is back in the live
+  // collection — delete it instead of keeping a "Restored" marker around.
+  // (Audit trail of the restore action itself is written separately via
+  // createAuditLog in the controller, so we're not losing that history.)
+  await archiveRef.delete();
 };
 
 // ── PERMANENT DELETE ─────────────────────────────────────────────────────────

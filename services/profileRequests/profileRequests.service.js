@@ -9,6 +9,21 @@ const notFound = (message) => {
   throw err;
 };
 
+// Guards approveProfileRequest/approveIdResubmitRequest against a request
+// that's gone stale because the user's account was deleted after they
+// submitted it (see deleteUser() in controllers/user/user.controller.js).
+// Without this, applyProfileChanges()/upsertUserDocument()'s find-or-create
+// logic would silently recreate a fresh userDetails/userAddress/userDocument
+// doc for an account that no longer exists.
+const requireLiveUser = async (userID) => {
+  const userSnap = await db.collection("user").doc(userID).get();
+  if (!userSnap.exists) {
+    const err = new Error("This user's account has been deleted — the request can no longer be approved.");
+    err.statusCode = 409;
+    throw err;
+  }
+};
+
 // ─────────────────────────────────────────────
 // userDocument — one doc per userID. Used directly by ExpiryField
 // (driverLicenseExpiry) and by the ID-resubmit approval flow below
@@ -70,6 +85,7 @@ export const approveProfileRequest = async (reqID) => {
   if (!snap.exists) notFound("Edit request not found.");
   const req = snap.data();
 
+  await requireLiveUser(req.userID);
   await applyProfileChanges(req.userID, req.changes || []);
   await ref.update({ status: "approved", reviewedAt: timestamp(), updatedAt: timestamp() });
 
@@ -88,6 +104,7 @@ export const approveIdResubmitRequest = async (reqID) => {
   if (!snap.exists) notFound("ID resubmit request not found.");
   const req = snap.data();
 
+  await requireLiveUser(req.userID);
   await upsertUserDocument(req.userID, { driverLicenseUrl: req.newLicenseUrl });
   await ref.update({ status: "approved", reviewedAt: timestamp(), updatedAt: timestamp() });
 
