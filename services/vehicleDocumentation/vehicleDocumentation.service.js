@@ -1,6 +1,63 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { partNameToFieldKey } from "../../models/vehicleDocumentation/vehicleDocumentation.model.js";
+import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+
+const DOC_COLLECTIONS = {
+  before: "vehicleDocumentationBeforeTrip",
+  after:  "vehicleDocumentationAfterTrip",
+};
+
+/**
+ * Admin-only: replace (or add) a single photo on a past trip's
+ * documentation record. `fieldKey` is either an exterior slot
+ * ("frontViewUrl"/"sideViewUrl"/"backViewUrl") or a per-part field key
+ * from getPartFieldKey (frontend) / resolvePartFieldKeys (backend).
+ *
+ * Upserts by bookingID, same reasoning as adminUpdateHistoryPartStatus —
+ * covers both "replace an existing photo" and "no documentation record
+ * exists yet for this trip" in one path. The actual file upload happens
+ * client-side straight to Firebase Storage (same as the driver-flow
+ * upload); this just points the record's field at the new URL and logs
+ * the change with the previous URL for anyone tracing it back later.
+ */
+export const adminReplaceHistoryPhoto = async ({ tripPhase, bookingID, carID, fieldKey, newUrl, editedBy }) => {
+  const collectionName = DOC_COLLECTIONS[tripPhase];
+  if (!collectionName) throw new Error('tripPhase must be "before" or "after".');
+  if (!bookingID || !fieldKey || !newUrl) {
+    throw new Error("bookingID, fieldKey, and newUrl are required.");
+  }
+
+  const existingSnap = await db.collection(collectionName).where("bookingID", "==", bookingID).limit(1).get();
+  const isNewRecord = existingSnap.empty;
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  let ref, previousUrl;
+
+  if (isNewRecord) {
+    if (!carID) throw new Error("carID is required to create a new documentation record.");
+    ref = db.collection(collectionName).doc();
+    previousUrl = null;
+    await ref.set({
+      bookingID, carID, [fieldKey]: newUrl,
+      recordedAt: now, lastEditedAt: now, lastEditedBy: editedBy || null,
+      createdByAdmin: true,
+    });
+  } else {
+    ref = existingSnap.docs[0].ref;
+    previousUrl = existingSnap.docs[0].data()[fieldKey] || null;
+    await ref.update({ [fieldKey]: newUrl, lastEditedAt: now, lastEditedBy: editedBy || null });
+  }
+
+  await createAuditLog({
+    action: "update",
+    description: isNewRecord
+      ? `Vehicle inspection photo added by admin (${tripPhase} trip, booking ${bookingID} — no documentation record existed): "${fieldKey}" set.`
+      : `Vehicle inspection photo replaced (${tripPhase} trip, booking ${bookingID}): "${fieldKey}" changed.${previousUrl ? ` Previous photo: ${previousUrl}` : " (no previous photo)"}`,
+    userID: editedBy || null,
+  });
+
+  return { previousUrl, newUrl, recordID: ref.id, isNewRecord };
+};
 
 // ─────────────────────────────────────────────
 // Helpers

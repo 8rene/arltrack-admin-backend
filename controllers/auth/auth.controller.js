@@ -1,9 +1,18 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { generateToken } from "../../utils/jwt/jwt.util.js";
 import { roleIDToName } from "../../utils/roles/role.util.js";
-import { createUserLog, closeUserLog } from "../../services/userLogs/userLogs.service.js";
-import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+import {
+  createSessionLog,
+  closeSessionLog,
+  recordBlockedAttempt,
+  expireStaleSessionsForUser,
+} from "../../services/sessionLogs/sessionLogs.service.js";
 import admin from "firebase-admin";
+
+// Hardcoded per-app — this is the admin backend, so every session it opens
+// is "admin_web". Never inferred from role, since a Driver account can log
+// into this same panel as well as (potentially) a separate mobile app.
+const PLATFORM = "admin_web";
 
 export const login = async (req, res) => {
   try {
@@ -67,11 +76,12 @@ export const login = async (req, res) => {
     // carries its own status; this is the only status check in login now.
     if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
       const blockedStatus = userData.status.toLowerCase();
-      createAuditLog({
-        action: "auth",
-        description: `Blocked login attempt: ${userData.username || email} (status: ${blockedStatus}).`,
-        userID: firebaseUID,
-      }).catch((err) => console.error("[AUTH] Failed to write audit log:", err));
+      recordBlockedAttempt({
+        uID: firebaseUID,
+        username: userData.username || email,
+        platform: PLATFORM,
+        blockedReason: blockedStatus,
+      }).catch((err) => console.error("[AUTH] Failed to write blocked session log:", err));
       return res.status(403).json({
         message:
           blockedStatus === "locked"
@@ -109,28 +119,32 @@ export const login = async (req, res) => {
       roleID,
     });
 
-    // 8. LOG THE SESSION START. Never let a logging failure block a real
-    // login — both of these are fire-and-forget from the response's point
-    // of view, but we still await createUserLog specifically because we
-    // need its ID back to give to the frontend (so logout can close the
-    // right session).
+    // 8. LAZY EXPIRY CHECK — before opening a new session, sweep any of
+    // this account's own sessions that are still marked "active" but
+    // whose token would already have expired (e.g. they closed the tab
+    // last time instead of logging out). Fire-and-forget: this is
+    // housekeeping, never worth delaying or failing a real login over.
+    expireStaleSessionsForUser(firebaseUID).catch((err) =>
+      console.error("[AUTH] Failed to sweep stale sessions:", err)
+    );
+
+    // 9. LOG THE SESSION START. Login/logout no longer get a separate
+    // Audit Log entry — Session Logs is the single source for this now,
+    // so we're not writing the same event to two collections. We still
+    // await this specifically because we need its ID back to give to the
+    // frontend (so logout can close the right session).
     let sessionLogID = null;
     try {
-      sessionLogID = await createUserLog({
+      sessionLogID = await createSessionLog({
         uID: firebaseUID,
         username: userData.username || email,
+        platform: PLATFORM,
       });
     } catch (err) {
-      console.error("[AUTH] Failed to write user log:", err);
+      console.error("[AUTH] Failed to write session log:", err);
     }
 
-    createAuditLog({
-      action: "auth",
-      description: `${userData.username || email} logged in.`,
-      userID: firebaseUID,
-    }).catch((err) => console.error("[AUTH] Failed to write audit log:", err));
-
-    // 9. RESPOND
+    // 10. RESPOND
     return res.status(200).json({
       message: "Login successful. Welcome back.",
       token,
@@ -153,25 +167,25 @@ export const login = async (req, res) => {
   }
 };
 
-// Closes out the userLogs entry created at login and writes a matching
-// audit log entry. req.user is set by verifyToken, so the identity here
-// can't be spoofed by the client — only the sessionLogID (which session to
-// close) comes from the request body.
+// Closes out the sessionLogs entry created at login. req.user is set by
+// verifyToken, so the identity here can't be spoofed by the client — only
+// sessionLogID (which session to close) and reason come from the request
+// body. reason distinguishes a normal logout from one the frontend forced
+// because an admin locked/deleted/changed the role of this account while
+// they were still logged in (see AuthContext.jsx's real-time listener) —
+// that's a security-relevant event, not routine activity, so it's worth
+// telling apart in the data. No separate Audit Log entry is written here
+// anymore — Session Logs is the single source for login/logout now.
 export const logout = async (req, res) => {
   try {
-    const { sessionLogID } = req.body;
+    const { sessionLogID, reason } = req.body;
+    const closedReason = reason === "revoked" ? "revoked" : "manual";
 
     if (sessionLogID) {
-      await closeUserLog(sessionLogID).catch((err) =>
-        console.error("[AUTH] Failed to close user log:", err)
+      await closeSessionLog(sessionLogID, closedReason).catch((err) =>
+        console.error("[AUTH] Failed to close session log:", err)
       );
     }
-
-    createAuditLog({
-      action: "auth",
-      description: `${req.user?.email || req.user?.uid || "A user"} logged out.`,
-      userID: req.user?.uid || null,
-    }).catch((err) => console.error("[AUTH] Failed to write audit log:", err));
 
     return res.status(200).json({ message: "Logged out." });
   } catch (error) {

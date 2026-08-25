@@ -3,9 +3,32 @@ import {
   saveVehicleDocBefore,
   saveVehicleDocAfter,
   saveInventoryStatus,
+  adminReplaceHistoryPhoto,
 } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+
+// PATCH /api/vehicle-docs/history/:tripPhase/:bookingID — Admin-only,
+// points a photo field at a freshly-uploaded URL. The upload itself
+// happens client-side straight to Storage (same as the driver flow) —
+// this just records where it landed. See adminReplaceHistoryPhoto.
+export const editHistoryPhoto = async (req, res) => {
+  try {
+    const { tripPhase, bookingID } = req.params;
+    const { carID, fieldKey, newUrl } = req.body;
+    if (!fieldKey || !newUrl) {
+      return res.status(400).json({ success: false, message: "fieldKey and newUrl are required." });
+    }
+    const result = await adminReplaceHistoryPhoto({
+      tripPhase, bookingID, carID, fieldKey, newUrl,
+      editedBy: req.user?.uid || req.user?.userID || null,
+    });
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[VEHICLE DOCS] editHistoryPhoto error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
 
 // Drivers get their own routes below (vehicleDocumentation.routes.js), but
 // unlike Owner/Admin/Supervisor — who manage every car's documentation —

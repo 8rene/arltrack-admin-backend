@@ -3,7 +3,7 @@
 export const TransactionLogArchive = {
   transactionLogArchivesId: "", // Firestore doc ID — same as collection name + "Id"
   originalId: "",               // doc ID from original 'transactionLogs' collection
-  transactionID: "",
+  transactionLogsID: "",
   bookingID: "",
   paymentID: "",                // FK -> payments (new — lets an archived entry still be traced back)
   refundRequestID: null,        // FK -> refundRequests, only set when type === "Refund" via that flow

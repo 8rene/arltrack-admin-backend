@@ -3,7 +3,31 @@ import {
   saveBeforeTrip,
   saveAfterTrip,
   getNearestBookingForCar,
+  adminUpdateHistoryPartStatus,
 } from "../../services/inventory/inventory.service.js";
+
+// PATCH /api/inventory/history/:tripPhase/:bookingID  — Admin-only direct
+// edit of a past trip's part status. Upserts: creates the record if the
+// driver never submitted one for this booking. See
+// adminUpdateHistoryPartStatus for why this doesn't go through
+// saveBeforeTrip/saveAfterTrip.
+export const editHistoryPartStatus = async (req, res) => {
+  try {
+    const { tripPhase, bookingID } = req.params;
+    const { carID, carPartID, newStatus } = req.body;
+    if (!carPartID || !newStatus) {
+      return res.status(400).json({ success: false, message: "carPartID and newStatus are required." });
+    }
+    const result = await adminUpdateHistoryPartStatus({
+      tripPhase, bookingID, carID, carPartID, newStatus,
+      editedBy: req.user?.uid || req.user?.userID || null,
+    });
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[INVENTORY] editHistoryPartStatus error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
 
 // GET /api/inventory/booking/:bookingID
 // Returns { before, after } inventory records for the given booking

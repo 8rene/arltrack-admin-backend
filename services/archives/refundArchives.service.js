@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -10,11 +11,14 @@ export const getAllRefundArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
+  const nameMap = await resolveUserNames(snapshot.docs.map((doc) => doc.data().userID));
+
   return snapshot.docs.map((doc) => {
     const data = doc.data();
     return {
       refundArchivesId: doc.id,
       ...data,
+      customerName: data.userID ? (nameMap[data.userID] || "—") : "—",
       createdAt:   toISO(data.createdAt),
       updatedAt:   toISO(data.updatedAt),
       processedAt: toISO(data.processedAt),

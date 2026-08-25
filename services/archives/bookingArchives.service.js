@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { findLinkedBookingSessionArchive } from "./bookingSessionArchives.service.js";
+import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -10,6 +11,11 @@ export const getAllBookingArchives = async () => {
     .collection("bookingArchives")
     .orderBy("archivedAt", "desc")
     .get();
+
+  // Resolve customerName once for the whole page, same pattern as the
+  // other archive list endpoints — bookingArchives stores userID directly
+  // so no booking lookup is needed here (unlike paymentsArchives).
+  const nameMap = await resolveUserNames(snapshot.docs.map((doc) => doc.data().userID));
 
   // For each booking archive, fetch the linked payment archive amount
   const results = await Promise.all(
@@ -34,6 +40,7 @@ export const getAllBookingArchives = async () => {
       return {
         bookingArchivesId: doc.id,
         ...data,
+        customerName: data.userID ? (nameMap[data.userID] || "—") : "—",
         amount: paymentAmount,
         startDateTime: toISO(data.startDateTime),
         endDateTime:   toISO(data.endDateTime),

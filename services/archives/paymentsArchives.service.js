@@ -1,7 +1,34 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
+
+// Archived payments only store bookingID, not userID directly — same as the
+// live payments.service.js, the customer has to be resolved by looking up
+// the booking first. The booking itself may be live or already archived
+// (a payment can be restored independently, see restoreLinkedBooking below),
+// so check both collections.
+const resolveBookingUserIDs = async (bookingIDs) => {
+  const uniqueIDs = [...new Set(bookingIDs.filter(Boolean))];
+  const userIDByBooking = {};
+
+  await Promise.all(uniqueIDs.map(async (bookingID) => {
+    const liveSnap = await db.collection("bookings")
+      .where("bookingID", "==", bookingID).limit(1).get();
+    if (!liveSnap.empty) {
+      userIDByBooking[bookingID] = liveSnap.docs[0].data().userID;
+      return;
+    }
+    const archivedSnap = await db.collection("bookingArchives")
+      .where("bookingID", "==", bookingID).limit(1).get();
+    if (!archivedSnap.empty) {
+      userIDByBooking[bookingID] = archivedSnap.docs[0].data().userID;
+    }
+  }));
+
+  return userIDByBooking;
+};
 
 // ── GET ALL ──────────────────────────────────────────────────────────────────
 export const getAllPaymentsArchives = async () => {
@@ -10,7 +37,7 @@ export const getAllPaymentsArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
-  return snapshot.docs.map((doc) => {
+  const rows = snapshot.docs.map((doc) => {
     const data = doc.data();
     return {
       paymentsArchivesId: doc.id,
@@ -21,6 +48,14 @@ export const getAllPaymentsArchives = async () => {
       restoredAt: toISO(data.restoredAt),
     };
   });
+
+  const userIDByBooking = await resolveBookingUserIDs(rows.map((r) => r.bookingID));
+  const nameMap = await resolveUserNames(Object.values(userIDByBooking));
+
+  return rows.map((r) => ({
+    ...r,
+    customerName: nameMap[userIDByBooking[r.bookingID]] || "—",
+  }));
 };
 
 // ── HELPER: bring the linked booking back too, if it's still archived ─────────

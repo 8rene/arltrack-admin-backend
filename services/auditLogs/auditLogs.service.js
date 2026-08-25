@@ -16,14 +16,16 @@ export const createAuditLog = async ({ action, description, userID = null }) => 
   }
   if (!description) throw new Error("description is required.");
 
-  const ref = await db.collection("auditLogs").add({
+  const ref = db.collection("auditLogs").doc();
+  await ref.set({
+    auditLogsID: ref.id, // explicit stored primary key, matches transactionLogs' pattern
     action,
     description,
     userID, // uid of the staff member who performed the action (nullable)
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  return { id: ref.id, action, description, userID };
+  return { id: ref.id, auditLogsID: ref.id, action, description, userID };
 };
 
 export const getAllAuditLogs = async () => {

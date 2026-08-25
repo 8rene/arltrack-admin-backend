@@ -7,7 +7,7 @@ import { registerAnalyticsRoutes }          from "./routes/analytics/analytics.r
 import { registerBookingRoutes }             from "./routes/booking/booking.routes.js";
 import { registerUserRoutes }                from "./routes/user/user.routes.js";
 import { registerAuditLogsRoutes }           from "./routes/auditLogs/auditLogs.routes.js";
-import { registerUserLogsRoutes }            from "./routes/userLogs/userLogs.routes.js";
+import { registerSessionLogsRoutes }         from "./routes/sessionLogs/sessionLogs.routes.js";
 import { registerGpsRoutes }                 from "./routes/gps/gps.routes.js";
 import { registerReportsRoutes }             from "./routes/reports/reports.routes.js"; //
 import { registerPaymentsRoutes }          from "./routes/payments/payments.routes.js";//
@@ -19,7 +19,7 @@ import { registerRefundRequestRoutes }       from "./routes/refundRequest/refund
 import { registerLocationRoutes }            from "./routes/location/location.routes.js"; // ← NEW
 import { startBookingWatcher }               from "./watchers/bookingWatcher.js";
 import { startUserWatcher }                  from "./watchers/userWatcher.js";
-import { registerUserLogArchiveRoutes }        from "./routes/archives/userLogArchiveRoutes.js";
+import { registerSessionLogArchiveRoutes }     from "./routes/archives/sessionLogArchiveRoutes.js";
 import { registerPaymentsArchiveRoutes }       from "./routes/archives/paymentsArchiveRoutes.js";
 import { registerBookingArchiveRoutes }        from "./routes/archives/bookingArchiveRoutes.js";
 import { registerTransactionLogArchiveRoutes } from "./routes/archives/transactionLogArchiveRoutes.js";
@@ -56,7 +56,7 @@ registerAnalyticsRoutes(app);
 registerBookingRoutes(app);
 registerUserRoutes(app);
 registerAuditLogsRoutes(app);
-registerUserLogsRoutes(app);
+registerSessionLogsRoutes(app);
 registerTransactionLogsRoutes(app);
 registerPaymentsRoutes(app);
 registerReportsRoutes(app);
@@ -66,7 +66,7 @@ registerInventoryRoutes(app);
 registerVehicleDocsRoutes(app);
 registerFleetRoutes(app);              // ← NEW
 registerRefundRequestRoutes(app);      // ← NEW
-registerUserLogArchiveRoutes(app);
+registerSessionLogArchiveRoutes(app);
 registerPaymentsArchiveRoutes(app);
 registerBookingArchiveRoutes(app);
 registerTransactionLogArchiveRoutes(app);

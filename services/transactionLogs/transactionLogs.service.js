@@ -40,7 +40,7 @@ export const createTransactionLog = async ({
 
     const ref = db.collection("transactionLogs").doc();
     await ref.set({
-      transactionID: ref.id,
+      transactionLogsID: ref.id,
       bookingID: bookingID || null,
       paymentID: paymentID || null,
       refundRequestID,

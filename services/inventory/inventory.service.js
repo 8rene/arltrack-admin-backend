@@ -1,5 +1,86 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+
+const HISTORY_COLLECTIONS = {
+  before: "inventoryBeforeTrip",
+  after:  "inventoryAfterTrip",
+};
+
+/**
+ * Admin-only direct edit of a single part's status on a before/after-trip
+ * inspection record — upserts by bookingID, mirroring how
+ * saveBeforeTrip/saveAfterTrip already look records up (not by doc ID).
+ * This means it also covers the "driver never filled this out" case: if
+ * no record exists yet for this booking, one gets created here instead of
+ * erroring — Admin can set a trip's history from scratch, not just edit
+ * an existing one.
+ *
+ * Deliberately bypasses saveBeforeTrip/saveAfterTrip's own logic — those
+ * carry driver-flow side effects (RULE 1/2 damage notifications, the
+ * after-trip "booking must be Completed" guard) that shouldn't fire when
+ * an admin is correcting/backfilling closed-trip history after the fact.
+ * This just writes the field and logs what changed — no notification, no
+ * status guard, no dual-value "correction" UI, by design.
+ */
+export const adminUpdateHistoryPartStatus = async ({ tripPhase, bookingID, carID, carPartID, newStatus, editedBy }) => {
+  const collectionName = HISTORY_COLLECTIONS[tripPhase];
+  if (!collectionName) throw new Error('tripPhase must be "before" or "after".');
+  if (!bookingID || !carPartID || !newStatus) {
+    throw new Error("bookingID, carPartID, and newStatus are required.");
+  }
+
+  const existingSnap = await db.collection(collectionName).where("bookingID", "==", bookingID).limit(1).get();
+  const isNewRecord = existingSnap.empty;
+
+  let ref, damageParts, previousStatus;
+  if (isNewRecord) {
+    if (!carID) throw new Error("carID is required to create a new inspection record.");
+    ref = db.collection(collectionName).doc();
+    damageParts = [];
+    previousStatus = "Good"; // nothing recorded before — every part defaults to Good
+  } else {
+    ref = existingSnap.docs[0].ref;
+    const data = existingSnap.docs[0].data();
+    damageParts = Array.isArray(data.damageParts) ? [...data.damageParts] : [];
+    const idx = damageParts.findIndex((p) => p.carPartID === carPartID);
+    previousStatus = idx >= 0 ? damageParts[idx].status : "Good";
+  }
+
+  const idx = damageParts.findIndex((p) => p.carPartID === carPartID);
+  // Good/New parts simply aren't listed in damageParts — mirrors how
+  // saveBeforeTrip/saveAfterTrip already filter these out on write.
+  if (newStatus === "Good" || newStatus === "New") {
+    if (idx >= 0) damageParts.splice(idx, 1);
+  } else if (idx >= 0) {
+    damageParts[idx] = { ...damageParts[idx], status: newStatus };
+  } else {
+    damageParts.push({ carPartID, status: newStatus });
+  }
+
+  const inventoryOverallStatus = damageParts.length > 0 ? "has damage" : "good";
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  if (isNewRecord) {
+    await ref.set({
+      bookingID, carID, damageParts, inventoryOverallStatus,
+      recordedAt: now, lastEditedAt: now, lastEditedBy: editedBy || null,
+      createdByAdmin: true, // this record didn't come from the driver app — flags where it came from
+    });
+  } else {
+    await ref.update({ damageParts, inventoryOverallStatus, lastEditedAt: now, lastEditedBy: editedBy || null });
+  }
+
+  await createAuditLog({
+    action: "update",
+    description: isNewRecord
+      ? `Vehicle inspection record created by admin (${tripPhase} trip, booking ${bookingID} — no driver-submitted record existed): part ${carPartID} set to "${newStatus}".`
+      : `Vehicle inspection record edited (${tripPhase} trip, booking ${bookingID}): part ${carPartID} changed from "${previousStatus}" to "${newStatus}".`,
+    userID: editedBy || null,
+  });
+
+  return { previousStatus, newStatus, inventoryOverallStatus, recordID: ref.id, isNewRecord };
+};
 
 // ─────────────────────────────────────────────
 // Helpers

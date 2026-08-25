@@ -1,5 +1,5 @@
 // Matches the 'transactionLogs' collection in Firestore.
-// Primary key: transactionID (Firestore document ID)
+// Primary key: transactionLogsID (Firestore document ID)
 //
 // Written by createTransactionLog() in services/transactionLogs/transactionLogs.service.js.
 // One entry per completed money event — NOT per state change. A refund
@@ -7,7 +7,7 @@
 // resolves (Refunded / Failed / Rejected) does the outcome land in this
 // ledger. See refundRequests for the in-progress workflow state.
 export const TransactionLog = {
-  transactionID: "",     // Firestore doc ID
+  transactionLogsID: "",     // Firestore doc ID
   bookingID: "",          // FK -> bookings
   paymentID: "",          // FK -> payments
   refundRequestID: null,  // FK -> refundRequests, only set when type === "Refund" via that flow

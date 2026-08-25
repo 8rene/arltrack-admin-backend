@@ -1,4 +1,5 @@
 import { runMidnightFlush } from "../../jobs/midinghtFlush.job.js";
+import { runExpireSessions } from "../../jobs/expireSessions.job.js";
 
 // Vercel Cron hits this over HTTP on schedule (see vercel.json) — it can't
 // call runMidnightFlush() directly, since jobs/ files aren't routes. If
@@ -25,6 +26,16 @@ export const registerCronRoutes = (app) => {
       return res.status(200).json({ success: true, result: result || null });
     } catch (err) {
       console.error("[CRON] midnight-flush route error:", err.message);
+      return res.status(200).json({ success: false, message: err.message });
+    }
+  });
+
+  app.get("/api/cron/expire-sessions", verifyCronRequest, async (req, res) => {
+    try {
+      const result = await runExpireSessions();
+      return res.status(200).json({ success: true, result: result || null });
+    } catch (err) {
+      console.error("[CRON] expire-sessions route error:", err.message);
       return res.status(200).json({ success: false, message: err.message });
     }
   });
