@@ -19,6 +19,7 @@ import { registerRefundRequestRoutes }       from "./routes/refundRequest/refund
 import { registerLocationRoutes }            from "./routes/location/location.routes.js"; // ← NEW
 import { startBookingWatcher }               from "./watchers/bookingWatcher.js";
 import { startUserWatcher }                  from "./watchers/userWatcher.js";
+import { startRefundRequestWatcher }         from "./watchers/refundRequestWatcher.js";
 import { registerSessionLogArchiveRoutes }     from "./routes/archives/sessionLogArchiveRoutes.js";
 import { registerPaymentsArchiveRoutes }       from "./routes/archives/paymentsArchiveRoutes.js";
 import { registerBookingArchiveRoutes }        from "./routes/archives/bookingArchiveRoutes.js";
@@ -91,6 +92,7 @@ app.listen(PORT, async () => {
   await seedCacheFromFirestore();
   startBookingWatcher();
   startUserWatcher();
+  startRefundRequestWatcher();
 });
 
 export default app;
