@@ -3,6 +3,7 @@ import admin from "firebase-admin";
 import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
 import { consumeOtp } from "../otp/otp.controller.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+import { resolveNotification } from "../../services/notification/notification.service.js";
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
 
@@ -329,11 +330,21 @@ export const updateUserStatus = async (req, res) => {
     const userDoc = await userDocRef.get();
     if (!userDoc.exists) return res.status(404).json({ success: false, message: "User not found." });
 
+    const wasLocked = String(userDoc.data().status).toLowerCase() === "locked";
     const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
     if (status !== undefined) update.status = status;
     if (isFlagged !== undefined) update.isFlagged = isFlagged;
 
     await userDocRef.update(update);
+
+    // Resolved here directly rather than left to userWatcher.js to notice
+    // via a Firestore onSnapshot() listener — same reasoning as the
+    // refund-request fix: this admin backend runs as a Vercel serverless
+    // function, so a background watcher isn't a reliable way to catch this.
+    if (wasLocked && status !== undefined && String(status).toLowerCase() !== "locked") {
+      resolveNotification("new_user", uid)
+        .catch((err) => console.error("[USER] Failed to resolve notification:", err.message));
+    }
 
     const name = userDoc.data().username || userDoc.data().email || uid;
     createAuditLog({

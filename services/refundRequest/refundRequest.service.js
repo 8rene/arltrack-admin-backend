@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
+import { resolveNotification } from "../notification/notification.service.js";
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -148,6 +149,14 @@ export const approveRefundRequest = async (refundRequestID, adminUserID) => {
     updatedAt: now,
   });
 
+  // Resolved here directly rather than left to a Firestore watcher to
+  // eventually notice — same reasoning as the customer backend now
+  // writing the notification directly on creation: this admin backend
+  // also runs as a Vercel serverless function, so a background
+  // onSnapshot() listener isn't a reliable way to catch this reliably.
+  resolveNotification("refund_request", refundRequestID)
+    .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));
+
   return { ...refundRequest, status: "Approved", paymongoRefundID };
 };
 
@@ -194,6 +203,9 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
       : `Refund request rejected.`,
     performedBy: adminUserID,
   });
+
+  resolveNotification("refund_request", refundRequestID)
+    .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));
 
   return { ...refundRequest, status: "Rejected", rejectReason: rejectReason || null };
 };

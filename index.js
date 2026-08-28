@@ -17,9 +17,12 @@ import { registerVehicleDocsRoutes }         from "./routes/vehicleDocumentation
 import { registerFleetRoutes }               from "./routes/fleet/fleet.routes.js"; // ← NEW
 import { registerRefundRequestRoutes }       from "./routes/refundRequest/refundRequest.routes.js"; // ← NEW
 import { registerLocationRoutes }            from "./routes/location/location.routes.js"; // ← NEW
-import { startBookingWatcher }               from "./watchers/bookingWatcher.js";
-import { startUserWatcher }                  from "./watchers/userWatcher.js";
-import { startRefundRequestWatcher }         from "./watchers/refundRequestWatcher.js";
+// bookingWatcher.js removed — nothing in either backend or frontend
+// currently sets a booking to "cancellation_request", so this watcher
+// was doing nothing. If that feature gets built later, it should be
+// direct-write (same pattern as new_user / refund_request), not a
+// revived watcher — watchers aren't reliable on this Vercel serverless
+// deployment (see conversation notes / commit history for why).
 import { registerSessionLogArchiveRoutes }     from "./routes/archives/sessionLogArchiveRoutes.js";
 import { registerPaymentsArchiveRoutes }       from "./routes/archives/paymentsArchiveRoutes.js";
 import { registerBookingArchiveRoutes }        from "./routes/archives/bookingArchiveRoutes.js";
@@ -90,9 +93,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   await seedCacheFromFirestore();
-  startBookingWatcher();
-  startUserWatcher();
-  startRefundRequestWatcher();
+  // both watchers removed — see comment above the imports
 });
 
 export default app;
