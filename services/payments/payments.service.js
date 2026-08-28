@@ -84,13 +84,22 @@ export const computeAmounts = (payment) => {
     if (payType === "Full") {
       amountPaid = amount;
       balance    = 0;
-    } else if (payType === "Downpayment") {
-      amountPaid = Math.round(amount / 2);
+    } else if (payType === "Downpayment" || payType === "Partial") {
+      // "Partial" is what computePaymentSplit() (customer backend) actually
+      // produces for a half-now booking, and it charges 50% of the grand
+      // total via PayMongo (payNow = Math.floor(total * 0.5)) — NOT the
+      // flat depositFee. This branch used to only catch "Downpayment"
+      // (a type computePaymentSplit never actually sets) and let "Partial"
+      // fall through to the flat-₱1,000 branch below, understating
+      // amountPaid (and overstating balance) for every real partial
+      // booking. Math.floor here matches computePaymentSplit exactly —
+      // Math.round would still disagree by ₱1 on odd totals.
+      amountPaid = Math.floor(amount / 2);
       balance    = amount - amountPaid;
     } else {
-      // Deposit / Partial / legacy-unrecognized — upfront portion is the
-      // flat deposit fee (see bookings.controller.js: depositFee is
-      // always ₱1,000, regardless of the total).
+      // Deposit / legacy-unrecognized — upfront portion is the flat
+      // deposit fee (see bookings.controller.js: depositFee is always
+      // ₱1,000, regardless of the total).
       amountPaid = depositFee || 0;
       balance    = amount - amountPaid;
     }
