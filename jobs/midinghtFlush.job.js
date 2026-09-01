@@ -16,7 +16,7 @@
 import { getAllActiveSessions } from "../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../services/storage/bookingHistory.service.js";
 import { db } from "../config/firebaseConnection/firebase.js";
-import { createNotification, resolveNotification } from "../services/notification/notification.service.js";
+import { createNotification, notifyStaff, resolveNotification } from "../services/notification/notification.service.js";
 import { sendLicenseExpiryEmail } from "../services/email/email.service.js";
 import { ROLE_IDS } from "../utils/roles/role.util.js";
 
@@ -79,13 +79,27 @@ const checkLicenseExpiry = async () => {
         .limit(1).get();
       const isNewNotif = existing.empty;
 
-      await createNotification({
-        type: "license_expired",
-        refID,
-        refCollection: "user",
-        title: "Driver's license expired",
-        message: `${toName}'s driver's license expired on ${expiryDateLabel}. Account auto-locked.`,
-      }).catch((err) => console.error("[NOTIF] license_expired create failed:", err.message));
+      // Staff fan-out (Owner/Admin/Supervisor) so they know an account got
+      // auto-locked, plus a personal copy to the driver themselves — they
+      // should hear it from their own bell too, not just find out when
+      // their locked account stops them at pickup.
+      await Promise.all([
+        notifyStaff({
+          type: "license_expired",
+          refID,
+          refCollection: "user",
+          title: "Driver's license expired",
+          message: `${toName}'s driver's license expired on ${expiryDateLabel}. Account auto-locked.`,
+        }).catch((err) => console.error("[NOTIF] license_expired staff notify failed:", err.message)),
+        createNotification({
+          type: "license_expired",
+          refID,
+          refCollection: "user",
+          title: "Your driver's license expired",
+          message: `Your driver's license expired on ${expiryDateLabel}. Your account has been locked — contact your admin.`,
+          userID: refID,
+        }).catch((err) => console.error("[NOTIF] license_expired personal notify failed:", err.message)),
+      ]);
 
       if (isNewNotif && userData.email) {
         await sendLicenseExpiryEmail({ toEmail: userData.email, toName, isExpired: true, expiryDate: expiryDateLabel })
@@ -104,13 +118,23 @@ const checkLicenseExpiry = async () => {
         .limit(1).get();
       const isNewNotif = existing.empty;
 
-      await createNotification({
-        type: "license_expiring",
-        refID,
-        refCollection: "user",
-        title: "Driver's license expiring soon",
-        message: `${toName}'s driver's license expires in ${daysLeft} day(s) (${expiryDateLabel}).`,
-      }).catch((err) => console.error("[NOTIF] license_expiring create failed:", err.message));
+      await Promise.all([
+        notifyStaff({
+          type: "license_expiring",
+          refID,
+          refCollection: "user",
+          title: "Driver's license expiring soon",
+          message: `${toName}'s driver's license expires in ${daysLeft} day(s) (${expiryDateLabel}).`,
+        }).catch((err) => console.error("[NOTIF] license_expiring staff notify failed:", err.message)),
+        createNotification({
+          type: "license_expiring",
+          refID,
+          refCollection: "user",
+          title: "Your driver's license is expiring soon",
+          message: `Your driver's license expires in ${daysLeft} day(s) (${expiryDateLabel}). Renew it to avoid your account being auto-locked.`,
+          userID: refID,
+        }).catch((err) => console.error("[NOTIF] license_expiring personal notify failed:", err.message)),
+      ]);
 
       if (isNewNotif && userData.email) {
         await sendLicenseExpiryEmail({ toEmail: userData.email, toName, isExpired: false, daysLeft, expiryDate: expiryDateLabel })
@@ -140,7 +164,7 @@ const checkOverdueBookings = async () => {
 
     // Pickup overdue: still "upcoming" (never picked up) past its startDateTime
     if (booking.status === "upcoming" && booking.startDateTime?.toDate?.() < now) {
-      await createNotification({
+      await notifyStaff({
         type: "pickup_overdue",
         refID: docID,
         refCollection: "bookings",
@@ -153,7 +177,7 @@ const checkOverdueBookings = async () => {
 
     // Return overdue: still "ongoing" past its endDateTime
     if (booking.status === "ongoing" && booking.endDateTime?.toDate?.() < now) {
-      await createNotification({
+      await notifyStaff({
         type: "return_overdue",
         refID: docID,
         refCollection: "bookings",

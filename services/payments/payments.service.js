@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { createNotification, resolveNotification } from "../notification/notification.service.js";
+import { notifyStaff, resolveNotification } from "../notification/notification.service.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 
 // resolve customer name: firstName+lastName (priority), fallback to username
@@ -316,10 +316,14 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   });
 
   if (refundDue > 0) {
-    // Visible to everyone logged into the admin panel (the notification
-    // bell isn't role-filtered) — the driver holding the cash needs to
-    // see this, and staff should be able to track it got handled.
-    await createNotification({
+    // Fanned out to Owner/Admin/Supervisor only — no longer a global
+    // userID:null doc. NOTE: this changes prior behavior — the driver
+    // holding the cash used to see this via the old global doc; now they
+    // don't, since notifications are staff-only across the board per the
+    // decision to exclude drivers from the (former) global alert types.
+    // If a driver still needs to be told a refund is owed, that has to
+    // happen outside the bell (staff messaging them directly) for now.
+    await notifyStaff({
       type: "refund_due",
       refID: bookingID,
       refCollection: "bookings",

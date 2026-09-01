@@ -4,6 +4,7 @@ import { getSessionByBookingID, markSessionActive, markSessionEnded, markSession
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
 import { hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { computeAmounts } from "../../services/payments/payments.service.js";
+import { resolveNotification } from "../../services/notification/notification.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -459,4 +460,85 @@ export const markBookingDroppedOff = async (docID) => {
 
   await markCustomerDroppedOff(session.ref.id);
   return { id: docID };
+};
+
+// ─────────────────────────────────────────────
+// Approve / reject a pending cancellation_request — the customer-side
+// counterpart of this lives in customer-backend's requestCancellation()
+// (bookings.controller.js), which is the only thing that ever sets a
+// booking to "cancellation_request" in the first place. bookingWatcher.js
+// used to auto-resolve the notification when status left that state;
+// now that the watcher is gone, these two actions resolve it directly,
+// same pattern as every other direct-write notification in this codebase.
+// ─────────────────────────────────────────────
+
+export const approveCancellationRequest = async (docID) => {
+  const bookingRef = db.collection("bookings").doc(docID);
+  const bookingDoc = await bookingRef.get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+
+  if (booking.status?.toLowerCase() !== "cancellation_request") {
+    throw new Error(`Cannot approve: booking status is "${booking.status}", not "cancellation_request".`);
+  }
+
+  const now = new Date();
+  await bookingRef.update({
+    status: "cancelled",
+    statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
+    updatedAt: now,
+  });
+
+  // Mirror onto the session doc, same as the customer's own instant-cancel
+  // path already does for "upcoming" bookings — this one is "ongoing", so
+  // there's a real active session to close out here.
+  try {
+    const bID = booking.bookingID || docID;
+    const session = await getSessionByBookingID(bID);
+    if (session) {
+      await markSessionCancelled(session.ref.id);
+    }
+  } catch (err) {
+    console.error("[BOOKINGS] approveCancellationRequest: failed to sync bookingSession:", err.message);
+  }
+
+  // Resolves every Owner/Admin/Supervisor's own copy of this notification
+  // at once — see notification.service.js's resolveNotification() header
+  // comment for why no userID filter is needed here.
+  await resolveNotification("cancellation_request", docID).catch((err) =>
+    console.error("[BOOKINGS] approveCancellationRequest: failed to resolve notification:", err.message)
+  );
+
+  return { id: docID, status: "cancelled" };
+};
+
+export const rejectCancellationRequest = async (docID, rejectReason) => {
+  const bookingRef = db.collection("bookings").doc(docID);
+  const bookingDoc = await bookingRef.get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+
+  if (booking.status?.toLowerCase() !== "cancellation_request") {
+    throw new Error(`Cannot reject: booking status is "${booking.status}", not "cancellation_request".`);
+  }
+
+  // Revert to whatever the booking was before the request came in — set
+  // by requestCancellation() on the customer-backend side. Falls back to
+  // "ongoing" if that field is somehow missing, since that's the only
+  // status this request path is ever entered from today.
+  const revertTo = booking.statusBeforeCancellationRequest || "ongoing";
+
+  const now = new Date();
+  await bookingRef.update({
+    status: revertTo,
+    statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
+    cancellationRejectReason: rejectReason || "",
+    updatedAt: now,
+  });
+
+  await resolveNotification("cancellation_request", docID).catch((err) =>
+    console.error("[BOOKINGS] rejectCancellationRequest: failed to resolve notification:", err.message)
+  );
+
+  return { id: docID, status: revertTo };
 };

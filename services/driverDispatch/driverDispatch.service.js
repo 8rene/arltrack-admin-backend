@@ -4,6 +4,7 @@ import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
 import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
+import { createNotification } from "../../services/notification/notification.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -237,6 +238,19 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
     driverAssignedBy: assignedBy || "admin",
     updatedAt: timestamp(),
   });
+
+  // Personal notification to the driver themselves — didn't exist before
+  // this; assignDriver() used to only update the booking doc with no
+  // notification at all, so a driver had no way to find out except
+  // checking their trip list manually.
+  createNotification({
+    type: "driver_assigned",
+    refID: bookingDocID,
+    refCollection: "bookings",
+    title: "New trip assigned",
+    message: `You've been assigned to booking ${booking.bookingID || bookingDocID}.`,
+    userID: driverID,
+  }).catch((err) => console.error("[NOTIF] driver_assigned create failed:", err.message));
 
   return { id: bookingDocID, driverID };
 };

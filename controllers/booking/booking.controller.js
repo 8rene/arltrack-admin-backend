@@ -1,4 +1,4 @@
-import { getAllBookings, updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
+import { getAllBookings, updateBooking, markBookingDroppedOff, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
 import { deleteBookingWithCascade } from "../../services/booking/bookingDelete.service.js";
 
 export const listBookings = async (req, res) => {
@@ -19,6 +19,30 @@ export const editBooking = async (req, res) => {
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("[BOOKINGS] edit error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// ── Cancellation request review (ongoing bookings only) ──
+export const approveCancellation = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await approveCancellationRequest(id);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[BOOKINGS] approveCancellation error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const rejectCancellation = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const result = await rejectCancellationRequest(id, reason);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[BOOKINGS] rejectCancellation error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

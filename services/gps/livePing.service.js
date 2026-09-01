@@ -10,7 +10,7 @@ import { getActiveSessionByCar } from "../../services/booking/bookingSession.ser
 import { checkGeofence } from "./geofence.service.js";
 import { resolveCodingRestriction } from "./coding.service.js";
 import { appendCarPing } from "../sheets/sheets.service.js";
-import { createNotification, resolveNotification } from "../notification/notification.service.js";
+import { notifyStaff, resolveNotification } from "../notification/notification.service.js";
 
 /** Small in-memory cache for plateNumber lookups — rarely changes, cheap to cache per car. */
 const plateCache = {};
@@ -60,7 +60,10 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
     // as the log entry above — one active bell entry per car per breach
     // episode, not one per ping, so normal GPS jitter near a zone edge
     // can't spam the bell even though the underlying log can still flicker.
-    createNotification({
+    // Fanned out to Owner/Admin/Supervisor (notifyStaff), not the driver —
+    // drivers don't have access to the tracker/device or a UI to act on
+    // this, so notifying them would just be noise.
+    notifyStaff({
       type: "geofence_alert",
       refID: carID,
       refCollection: "cars",
@@ -96,7 +99,8 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       city: codingResult.city || null,
       at: now.toISOString(),
     });
-    createNotification({
+    // Same reasoning as geofence_alert above — staff-only, driver can't act on it.
+    notifyStaff({
       type: "coding_alert",
       refID: carID,
       refCollection: "cars",

@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
-import { resolveNotification } from "../notification/notification.service.js";
+import { resolveNotification, createNotification } from "../notification/notification.service.js";
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -206,6 +206,29 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
 
   resolveNotification("refund_request", refundRequestID)
     .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));
+
+  // If this booking has a driver assigned, let them know the refund tied
+  // to it was rejected — they may be mid-handling something related
+  // (e.g. holding cash, coordinating with the customer) and shouldn't
+  // find out secondhand.
+  if (refundRequest.bookingID) {
+    db.collection("bookings").doc(refundRequest.bookingID).get()
+      .then((bookingSnap) => {
+        const driverID = bookingSnap.exists ? bookingSnap.data().driverID : null;
+        if (!driverID) return;
+        return createNotification({
+          type: "refund_request",
+          refID: refundRequestID,
+          refCollection: "refundRequests",
+          title: "Refund request rejected",
+          message: rejectReason
+            ? `The refund request for your booking was rejected: ${rejectReason}`
+            : `The refund request for your booking was rejected.`,
+          userID: driverID,
+        });
+      })
+      .catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
+  }
 
   return { ...refundRequest, status: "Rejected", rejectReason: rejectReason || null };
 };

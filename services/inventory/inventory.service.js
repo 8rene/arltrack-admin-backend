@@ -87,25 +87,6 @@ export const adminUpdateHistoryPartStatus = async ({ tripPhase, bookingID, carID
 // ─────────────────────────────────────────────
 
 /**
- * Resolve car brand + model name from carID
- */
-const resolveCarName = async (carID) => {
-  if (!carID) return "—";
-  try {
-    const carDoc = await db.collection("cars").doc(carID).get();
-    if (!carDoc.exists) return "—";
-    const { modelID } = carDoc.data();
-    if (!modelID) return "—";
-    const modelDoc = await db.collection("model").doc(modelID).get();
-    if (!modelDoc.exists) return "—";
-    const { brandID, modelName } = modelDoc.data();
-    const brandDoc = await db.collection("brand").doc(brandID).get();
-    const brandName = brandDoc.exists ? brandDoc.data().brandName : "";
-    return [brandName, modelName].filter(Boolean).join(" ") || "—";
-  } catch { return "—"; }
-};
-
-/**
  * Resolve user full name from userID
  * Priority: userDetails.firstName + lastName → user.username → user.email
  */
@@ -122,58 +103,6 @@ const resolveUserName = async (userID) => {
     const { username = "", email = "" } = userDoc.exists ? userDoc.data() : {};
     return username || email || "—";
   } catch { return "—"; }
-};
-
-/**
- * Write a notification to the `notifications` collection.
- * RULE 1 (before trip): type = "before_trip_damage"
- * RULE 2 (after trip):  type = "after_trip_damage"
- *
- * Idempotent for before_trip_damage (one per bookingID).
- * Idempotent for after_trip_damage  (one per bookingID + partName combo).
- */
-const writeNotification = async (payload) => {
-  try {
-    // Idempotency check
-    let existingQuery = db.collection("notifications")
-      .where("type",      "==", payload.type)
-      .where("bookingID", "==", payload.bookingID);
-    if (payload.type === "after_trip_damage" && payload.partName) {
-      existingQuery = existingQuery.where("partName", "==", payload.partName);
-    }
-    const existing = await existingQuery.limit(1).get();
-    if (!existing.empty) {
-      console.log(`[NOTIF] Skipped duplicate: ${payload.type} — ${payload.bookingID}`);
-      return;
-    }
-    await db.collection("notifications").add({
-      ...payload,
-      isRead: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    console.log(`[NOTIF] Written: ${payload.type} — ${payload.message?.slice(0, 60)}`);
-  } catch (err) {
-    console.error("[NOTIF] Failed to write notification:", err.message);
-  }
-};
-
-/**
- * Delete all notifications of a given type for a bookingID (auto-dismiss when status is good).
- */
-const dismissNotifications = async (type, bookingID) => {
-  try {
-    const snap = await db.collection("notifications")
-      .where("type",      "==", type)
-      .where("bookingID", "==", bookingID)
-      .get();
-    if (snap.empty) return;
-    const batch = db.batch();
-    snap.docs.forEach(d => batch.delete(d.ref));
-    await batch.commit();
-    console.log(`[NOTIF] Auto-dismissed ${snap.size} "${type}" notif(s) for booking: ${bookingID}`);
-  } catch (err) {
-    console.error("[NOTIF] Failed to dismiss notifications:", err.message);
-  }
 };
 
 // ─────────────────────────────────────────────
@@ -234,19 +163,13 @@ export const saveBeforeTrip = async ({ bookingID, carID, parts }) => {
     });
   }
 
-  // ── RULE 1: Notify if damage before trip; dismiss if now clean ──
-  if (damageParts.length > 0) {
-    const carName = await resolveCarName(carID);
-    await writeNotification({
-      type:      "before_trip_damage",
-      title:     "Pre-Trip Damage Detected",
-      message:   `The car ${carName} has damage before trip. Please schedule a repair.`,
-      carID,
-      bookingID,
-    });
-  } else {
-    await dismissNotifications("before_trip_damage", bookingID);
-  }
+  // Damage notifications for this flow (before_trip_damage) were removed —
+  // the old writeNotification() path here never set a `status` field, so
+  // Header.jsx's `where("status","=="."active")` queries could never match
+  // it; these docs were being written to Firestore but were structurally
+  // invisible in the bell for every staff member, always. Not worth
+  // reviving as-is; damageParts is still recorded on the inventory doc
+  // above regardless, so the data itself isn't lost.
 
   return { success: true, inventoryOverallStatus, damageParts };
 };
@@ -299,31 +222,9 @@ export const saveAfterTrip = async ({ bookingID, carID, parts, userID }) => {
     });
   }
 
-  // ── RULE 2: Notify per damaged/stolen part; dismiss if now clean ──
-  if (damageParts.length > 0 && userID) {
-    const [carName, userName] = await Promise.all([
-      resolveCarName(carID),
-      resolveUserName(userID),
-    ]);
-
-    await Promise.all(
-      damageParts.map(part => {
-        const condition = part.status === "Stolen" ? "stolen" : "damaged";
-        return writeNotification({
-          type:       "after_trip_damage",
-          title:      "Post-Trip Damage Reported",
-          message:    `The part ${part.carPartName} on ${carName} was ${condition} by ${userName}. Please contact him/her and arrange payment.`,
-          carID,
-          bookingID,
-          userID,
-          partName:   part.carPartName,
-          partStatus: part.status,
-        });
-      })
-    );
-  } else if (damageParts.length === 0) {
-    await dismissNotifications("after_trip_damage", bookingID);
-  }
+  // Same as saveBeforeTrip above — after_trip_damage notifications removed,
+  // same "status" field bug made them invisible in the bell regardless.
+  // damageParts is still recorded on the inventory doc above.
 
   return { success: true, inventoryOverallStatus, damageParts };
 };
