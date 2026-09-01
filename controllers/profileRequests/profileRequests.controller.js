@@ -1,216 +1,197 @@
-import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
-import { resolveNotification } from "../notification/notification.service.js";
+import {
+  upsertUserDocument,
+  applyProfileChanges,
+  approveProfileRequest,
+  approveIdResubmitRequest,
+  rejectRequest,
+  createEditRequest,
+  cancelEditRequest,
+  createIdResubmitRequest,
+} from "../../services/profileRequests/profileRequests.service.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
-const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
-
-const notFound = (message) => {
-  const err = new Error(message);
-  err.statusCode = 404;
-  throw err;
-};
-
-// Guards approveProfileRequest/approveIdResubmitRequest against a request
-// that's gone stale because the user's account was deleted after they
-// submitted it (see deleteUser() in controllers/user/user.controller.js).
-// Without this, applyProfileChanges()/upsertUserDocument()'s find-or-create
-// logic would silently recreate a fresh userDetails/userAddress/userDocument
-// doc for an account that no longer exists.
-const requireLiveUser = async (userID) => {
-  const userSnap = await db.collection("user").doc(userID).get();
-  if (!userSnap.exists) {
-    const err = new Error("This user's account has been deleted — the request can no longer be approved.");
-    err.statusCode = 409;
-    throw err;
-  }
-};
-
-// ─────────────────────────────────────────────
-// userDocument — one doc per userID. Used directly by ExpiryField
-// (driverLicenseExpiry) and by the ID-resubmit approval flow below
-// (driverLicenseUrl).
-// ─────────────────────────────────────────────
-export const upsertUserDocument = async (userID, fields) => {
-  const existing = await db.collection("userDocument").where("userID", "==", userID).limit(1).get();
-
-  if (!existing.empty) {
-    await existing.docs[0].ref.update({ ...fields, updatedAt: timestamp() });
-    return { id: existing.docs[0].id, userID, ...fields };
-  }
-
-  const ref = await db.collection("userDocument").add({
-    userID,
-    ...fields,
-    createdAt: timestamp(),
-  });
-  return { id: ref.id, userID, ...fields };
-};
-
-// ─────────────────────────────────────────────
-// Applies each changed field to the collection it actually lives in
-// (user / userDetails / userAddress) — mirrors Profile.jsx's own
-// "canEditDirectly" branch and Users.jsx's old client-side
-// applyProfileChanges(), just running server-side now. Exported so both
-// the admin-review approve path (below) and the self-service
-// canEditDirectly path (Profile.jsx/Account.jsx, via the controller) can
-// call the same logic.
-// ─────────────────────────────────────────────
-export const applyProfileChanges = async (userID, changes = []) => {
-  const byCollection = { user: {}, userDetails: {}, userAddress: {} };
-  changes.forEach((c) => {
-    if (byCollection[c.collection]) byCollection[c.collection][c.field] = c.newValue;
-  });
-
-  if (Object.keys(byCollection.user).length) {
-    await db.collection("user").doc(userID).update({ ...byCollection.user, updatedAt: timestamp() });
-  }
-
-  for (const col of ["userDetails", "userAddress"]) {
-    if (!Object.keys(byCollection[col]).length) continue;
-    const existing = await db.collection(col).where("userID", "==", userID).limit(1).get();
-    if (!existing.empty) {
-      await existing.docs[0].ref.update({ ...byCollection[col], updatedAt: timestamp() });
-    } else {
-      await db.collection(col).add({ userID, ...byCollection[col], createdAt: timestamp() });
+// PUT /api/users/:uid/document
+// Body: any subset of userDocument fields, e.g. { driverLicenseExpiry }.
+// Used by ExpiryField (Users.jsx Documents tab) — was a direct
+// updateDoc/addDoc pair with no role check or audit trail.
+export const updateUserDocument = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const fields = req.body || {};
+    if (Object.keys(fields).length === 0) {
+      return res.status(400).json({ success: false, message: "No fields provided." });
     }
+
+    const data = await upsertUserDocument(uid, fields);
+
+    createAuditLog({
+      action: "update",
+      description: `Updated document info for user ${uid} (${Object.keys(fields).join(", ")}).`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] updateUserDocument error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/edit-requests/:id/approve
+export const approveProfile = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = await approveProfileRequest(id);
+
+    createAuditLog({
+      action: "update",
+      description: `Approved profile edit request for user ${data.userID}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] approveProfile error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/id-resubmit-requests/:id/approve
+export const approveIdResubmit = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = await approveIdResubmitRequest(id);
+
+    createAuditLog({
+      action: "update",
+      description: `Approved ID resubmission for user ${data.userID}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] approveIdResubmit error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+// PATCH /api/review-requests/:kind/:id/reject
+// kind: "profile" | "id"
+// Body: { note }
+export const rejectReviewRequest = async (req, res) => {
+  try {
+    const { kind, id } = req.params;
+    const { note } = req.body || {};
+    if (!["profile", "id"].includes(kind)) {
+      return res.status(400).json({ success: false, message: "kind must be 'profile' or 'id'." });
+    }
+
+    const data = await rejectRequest(kind, id, note);
+
+    createAuditLog({
+      action: "update",
+      description: `Rejected ${kind === "profile" ? "profile edit" : "ID resubmission"} request for user ${data.userID}${note ? `: ${note}` : "."}`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] rejectReviewRequest error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
 
 // ─────────────────────────────────────────────
-// editRequests — profile field-change requests (Profile.jsx / Account.jsx's
-// EditProfileModal creates these; this approves one).
+// Self-service (Profile.jsx / Account.jsx) — the logged-in user acting on
+// their OWN profile. Identity always comes from req.user (set by
+// verifyToken), never from the request body, so nobody can edit or
+// request changes for someone else's account by tampering the payload.
 // ─────────────────────────────────────────────
-export const approveProfileRequest = async (reqID) => {
-  const ref = db.collection("editRequests").doc(reqID);
-  const snap = await ref.get();
-  if (!snap.exists) notFound("Edit request not found.");
-  const req = snap.data();
 
-  await requireLiveUser(req.userID);
-  await applyProfileChanges(req.userID, req.changes || []);
-  await ref.update({ status: "approved", reviewedAt: timestamp(), updatedAt: timestamp() });
+// PUT /api/profile/fields
+// Body: { changes: [{ field, collection, newValue }, ...] }
+// Owner/Admin-only path (canEditDirectly on the frontend) — applies
+// straight to the underlying docs, no approval step.
+export const updateOwnProfileFields = async (req, res) => {
+  try {
+    const { changes } = req.body || {};
+    if (!Array.isArray(changes) || changes.length === 0) {
+      return res.status(400).json({ success: false, message: "changes must be a non-empty array." });
+    }
 
-  resolveNotification("edit_request", reqID)
-    .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
+    await applyProfileChanges(req.user.uid, changes);
 
-  return { id: reqID, userID: req.userID };
+    createAuditLog({
+      action: "update",
+      description: `Updated own profile (${changes.map(c => c.field).join(", ")}).`,
+      userID: req.user.uid,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] updateOwnProfileFields error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
 };
 
-// ─────────────────────────────────────────────
-// idResubmitRequests — new driver's-license-photo submissions. Approving
-// makes the new photo the license of record; deliberately does NOT touch
-// driverLicenseExpiry (admin re-confirms that separately via ExpiryField,
-// same "human looks at the actual card" principle as the original review).
-// ─────────────────────────────────────────────
-export const approveIdResubmitRequest = async (reqID) => {
-  const ref = db.collection("idResubmitRequests").doc(reqID);
-  const snap = await ref.get();
-  if (!snap.exists) notFound("ID resubmit request not found.");
-  const req = snap.data();
+// POST /api/profile/edit-requests
+// Body: { role, changes: [...] } — role is passed through as-is (it's
+// display metadata for the reviewer, e.g. "Driver"), not used for any
+// permission check here.
+export const submitEditRequest = async (req, res) => {
+  try {
+    const { role, changes } = req.body || {};
+    const data = await createEditRequest(req.user.uid, role || req.user.role || "", changes);
 
-  await requireLiveUser(req.userID);
-  await upsertUserDocument(req.userID, { driverLicenseUrl: req.newLicenseUrl });
-  await ref.update({ status: "approved", reviewedAt: timestamp(), updatedAt: timestamp() });
+    createAuditLog({
+      action: "update",
+      description: `Submitted a profile edit request (${(changes || []).map(c => c.field).join(", ")}).`,
+      userID: req.user.uid,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
 
-  return { id: reqID, userID: req.userID };
+    return res.status(201).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] submitEditRequest error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
 };
 
-// ─────────────────────────────────────────────
-// Shared reject path for both request kinds.
-// ─────────────────────────────────────────────
-export const rejectRequest = async (kind, reqID, note) => {
-  const col = kind === "profile" ? "editRequests" : "idResubmitRequests";
-  const ref = db.collection(col).doc(reqID);
-  const snap = await ref.get();
-  if (!snap.exists) notFound("Request not found.");
-  const req = snap.data();
-
-  await ref.update({
-    status: "rejected",
-    reviewNote: note || null,
-    reviewedAt: timestamp(),
-    updatedAt: timestamp(),
-  });
-
-  if (kind === "profile") {
-    resolveNotification("edit_request", reqID)
-      .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
+// PATCH /api/profile/edit-requests/:id/cancel
+export const cancelOwnEditRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = await cancelEditRequest(id, req.user.uid);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] cancelOwnEditRequest error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
-
-  return { id: reqID, userID: req.userID };
 };
 
-// ─────────────────────────────────────────────
-// Self-service: a user submitting a request about their OWN profile.
-// userID always comes from the verified token (req.user.uid) in the
-// controller, never from the request body — otherwise anyone could
-// submit an edit request that claims to be from a different user.
-// ─────────────────────────────────────────────
-export const createEditRequest = async (userID, role, changes) => {
-  if (!Array.isArray(changes) || changes.length === 0) {
-    const err = new Error("changes must be a non-empty array.");
-    err.statusCode = 400;
-    throw err;
+// POST /api/profile/id-resubmit-requests
+// Body: { role, currentLicenseUrl, newLicenseUrl } — newLicenseUrl is the
+// downloadURL from a Storage upload the frontend already did; this
+// endpoint only handles the Firestore doc, same pattern as the fleet
+// image endpoint.
+export const submitIdResubmitRequest = async (req, res) => {
+  try {
+    const { role, currentLicenseUrl, newLicenseUrl } = req.body || {};
+    const data = await createIdResubmitRequest(
+      req.user.uid,
+      role || req.user.role || "",
+      currentLicenseUrl,
+      newLicenseUrl
+    );
+
+    createAuditLog({
+      action: "update",
+      description: `Submitted a driver's license resubmission for review.`,
+      userID: req.user.uid,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(201).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] submitIdResubmitRequest error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
-
-  const ref = await db.collection("editRequests").add({
-    userID,
-    role,
-    status: "pending",
-    changes,
-    requestedBy: userID,
-    reviewedBy: null,
-    reviewedAt: null,
-    reviewNote: null,
-    createdAt: timestamp(),
-    updatedAt: timestamp(),
-  });
-  return { id: ref.id, userID };
-};
-
-// Only the person who submitted the request can cancel it, and only
-// while it's still pending — mirrors the old client-side behavior, just
-// enforced server-side now instead of just being a UI convention.
-export const cancelEditRequest = async (reqID, requesterUID) => {
-  const ref = db.collection("editRequests").doc(reqID);
-  const snap = await ref.get();
-  if (!snap.exists) notFound("Edit request not found.");
-  const req = snap.data();
-
-  if (req.requestedBy !== requesterUID) {
-    const err = new Error("You can only cancel your own request.");
-    err.statusCode = 403;
-    throw err;
-  }
-  if (req.status !== "pending") {
-    const err = new Error("Only a pending request can be cancelled.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  await ref.update({ status: "cancelled", updatedAt: timestamp() });
-  return { id: reqID, userID: req.userID };
-};
-
-export const createIdResubmitRequest = async (userID, role, currentLicenseUrl, newLicenseUrl) => {
-  if (!newLicenseUrl) {
-    const err = new Error("newLicenseUrl is required.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const ref = await db.collection("idResubmitRequests").add({
-    userID,
-    role,
-    currentLicenseUrl: currentLicenseUrl || "",
-    newLicenseUrl,
-    status: "pending",
-    requestedBy: userID,
-    reviewedBy: null,
-    reviewedAt: null,
-    reviewNote: null,
-    createdAt: timestamp(),
-    updatedAt: timestamp(),
-  });
-  return { id: ref.id, userID };
 };

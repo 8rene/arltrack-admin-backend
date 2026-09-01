@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { resolveNotification } from "../notification/notification.service.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
@@ -89,6 +90,9 @@ export const approveProfileRequest = async (reqID) => {
   await applyProfileChanges(req.userID, req.changes || []);
   await ref.update({ status: "approved", reviewedAt: timestamp(), updatedAt: timestamp() });
 
+  resolveNotification("edit_request", reqID)
+    .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
+
   return { id: reqID, userID: req.userID };
 };
 
@@ -127,6 +131,11 @@ export const rejectRequest = async (kind, reqID, note) => {
     reviewedAt: timestamp(),
     updatedAt: timestamp(),
   });
+
+  if (kind === "profile") {
+    resolveNotification("edit_request", reqID)
+      .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
+  }
 
   return { id: reqID, userID: req.userID };
 };
