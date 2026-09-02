@@ -4,6 +4,7 @@ import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/role
 import { consumeOtp } from "../otp/otp.controller.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
+import { upsertUserDocument } from "../../services/profileRequests/profileRequests.service.js";
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
 
@@ -279,7 +280,7 @@ export const updateUserRole = async (req, res) => {
 export const verifyUserDocument = async (req, res) => {
   try {
     const { uid } = req.params;
-    const { isVerified } = req.body;
+    const { isVerified, driverLicenseExpiry } = req.body;
     if (typeof isVerified !== "boolean") {
       return res.status(400).json({ success: false, message: "isVerified (boolean) is required." });
     }
@@ -287,6 +288,25 @@ export const verifyUserDocument = async (req, res) => {
     const userDocRef = db.collection("user").doc(uid);
     const userDoc = await userDocRef.get();
     if (!userDoc.exists) return res.status(404).json({ success: false, message: "User not found." });
+
+    // If this signup submitted a license and it's being approved, require
+    // the expiry date as part of the same action — admin is already
+    // looking at the physical card to approve it, so this is the one
+    // moment to capture the date correctly rather than relying on a
+    // separate, easy-to-forget follow-up via ExpiryField later.
+    if (isVerified) {
+      const docSnap = await db.collection("userDocument").where("userID", "==", uid).limit(1).get();
+      const hasLicense = !docSnap.empty && !!docSnap.docs[0].data().driverLicenseUrl;
+      if (hasLicense) {
+        if (!driverLicenseExpiry) {
+          return res.status(400).json({
+            success: false,
+            message: "driverLicenseExpiry is required when approving a document that includes a driver's license.",
+          });
+        }
+        await upsertUserDocument(uid, { driverLicenseExpiry });
+      }
+    }
 
     await userDocRef.update({ isVerified });
 

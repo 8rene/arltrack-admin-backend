@@ -80,7 +80,7 @@ export const applyProfileChanges = async (userID, changes = []) => {
 // editRequests — profile field-change requests (Profile.jsx / Account.jsx's
 // EditProfileModal creates these; this approves one).
 // ─────────────────────────────────────────────
-export const approveProfileRequest = async (reqID) => {
+export const approveProfileRequest = async (reqID, adminUid) => {
   const ref = db.collection("editRequests").doc(reqID);
   const snap = await ref.get();
   if (!snap.exists) notFound("Edit request not found.");
@@ -88,7 +88,7 @@ export const approveProfileRequest = async (reqID) => {
 
   await requireLiveUser(req.userID);
   await applyProfileChanges(req.userID, req.changes || []);
-  await ref.update({ status: "approved", reviewedAt: timestamp(), updatedAt: timestamp() });
+  await ref.update({ status: "approved", reviewedBy: adminUid || null, reviewedAt: timestamp(), updatedAt: timestamp() });
 
   resolveNotification("edit_request", reqID)
     .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
@@ -97,28 +97,55 @@ export const approveProfileRequest = async (reqID) => {
 };
 
 // ─────────────────────────────────────────────
-// idResubmitRequests — new driver's-license-photo submissions. Approving
-// makes the new photo the license of record; deliberately does NOT touch
-// driverLicenseExpiry (admin re-confirms that separately via ExpiryField,
-// same "human looks at the actual card" principle as the original review).
+// idResubmitRequests — new license or document photo submissions.
+// License approval requires the reviewer to enter the expiry date shown
+// on the new card in the same action — a resubmitted license can easily
+// have a different expiry than the one on file, so leaving the old date
+// in place (the old behavior) risked it silently going stale/wrong.
+// Document (government ID etc.) has no expiry concept, so that branch
+// just swaps the photo.
 // ─────────────────────────────────────────────
-export const approveIdResubmitRequest = async (reqID) => {
+export const approveIdResubmitRequest = async (reqID, driverLicenseExpiry, adminUid) => {
   const ref = db.collection("idResubmitRequests").doc(reqID);
   const snap = await ref.get();
   if (!snap.exists) notFound("ID resubmit request not found.");
   const req = snap.data();
 
-  await requireLiveUser(req.userID);
-  await upsertUserDocument(req.userID, { driverLicenseUrl: req.newLicenseUrl });
-  await ref.update({ status: "approved", reviewedAt: timestamp(), updatedAt: timestamp() });
+  // Existing requests created before documentKind existed were always
+  // license — treat a missing field as "license", not an error.
+  const kind = req.documentKind || "license";
 
-  return { id: reqID, userID: req.userID };
+  await requireLiveUser(req.userID);
+
+  if (kind === "license") {
+    if (!driverLicenseExpiry) {
+      const err = new Error("driverLicenseExpiry is required when approving a license resubmission.");
+      err.statusCode = 400;
+      throw err;
+    }
+    await upsertUserDocument(req.userID, { driverLicenseUrl: req.newLicenseUrl, driverLicenseExpiry });
+  } else {
+    // documentType/documentNumber were captured at submission time (the
+    // requester typed them alongside the photo, same as the original
+    // signup flow) — carried over here rather than re-entered by the
+    // reviewer, since there's no per-card verification concept for these
+    // two fields the way there is for a license's expiry date.
+    await upsertUserDocument(req.userID, {
+      documentImageUrl: req.newDocumentUrl,
+      ...(req.documentType   !== undefined ? { documentType: req.documentType } : {}),
+      ...(req.documentNumber !== undefined ? { documentNumber: req.documentNumber } : {}),
+    });
+  }
+
+  await ref.update({ status: "approved", reviewedBy: adminUid || null, reviewedAt: timestamp(), updatedAt: timestamp() });
+
+  return { id: reqID, userID: req.userID, documentKind: kind };
 };
 
 // ─────────────────────────────────────────────
 // Shared reject path for both request kinds.
 // ─────────────────────────────────────────────
-export const rejectRequest = async (kind, reqID, note) => {
+export const rejectRequest = async (kind, reqID, note, adminUid) => {
   const col = kind === "profile" ? "editRequests" : "idResubmitRequests";
   const ref = db.collection(col).doc(reqID);
   const snap = await ref.get();
@@ -128,6 +155,7 @@ export const rejectRequest = async (kind, reqID, note) => {
   await ref.update({
     status: "rejected",
     reviewNote: note || null,
+    reviewedBy: adminUid || null,
     reviewedAt: timestamp(),
     updatedAt: timestamp(),
   });
@@ -135,6 +163,9 @@ export const rejectRequest = async (kind, reqID, note) => {
   if (kind === "profile") {
     resolveNotification("edit_request", reqID)
       .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
+  } else {
+    resolveNotification("id_resubmit_request", reqID)
+      .catch((err) => console.error("[NOTIF] Failed to resolve id_resubmit_request:", err.message));
   }
 
   return { id: reqID, userID: req.userID };
@@ -192,18 +223,41 @@ export const cancelEditRequest = async (reqID, requesterUID) => {
   return { id: reqID, userID: req.userID };
 };
 
-export const createIdResubmitRequest = async (userID, role, currentLicenseUrl, newLicenseUrl) => {
-  if (!newLicenseUrl) {
-    const err = new Error("newLicenseUrl is required.");
+// documentKind: "license" | "document". Field names stay split by kind
+// (currentLicenseUrl/newLicenseUrl vs currentDocumentUrl/newDocumentUrl)
+// rather than one generic pair — keeps any already-pending "license"
+// requests readable under their original field names with no migration
+// needed, since documentKind didn't exist before this.
+// documentType/documentNumber are only meaningful for documentKind ===
+// "document" — the requester types these alongside the new photo (same
+// as the original signup flow), and they're carried straight through to
+// userDocument on approval; see approveIdResubmitRequest.
+export const createIdResubmitRequest = async (userID, role, documentKind, currentUrl, newUrl, documentType, documentNumber) => {
+  if (!["license", "document"].includes(documentKind)) {
+    const err = new Error("documentKind must be 'license' or 'document'.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!newUrl) {
+    const err = new Error("newUrl is required.");
     err.statusCode = 400;
     throw err;
   }
 
+  const urlFields = documentKind === "license"
+    ? { currentLicenseUrl: currentUrl || "", newLicenseUrl: newUrl }
+    : {
+        currentDocumentUrl: currentUrl || "",
+        newDocumentUrl: newUrl,
+        documentType: documentType || "",
+        documentNumber: documentNumber || "",
+      };
+
   const ref = await db.collection("idResubmitRequests").add({
     userID,
     role,
-    currentLicenseUrl: currentLicenseUrl || "",
-    newLicenseUrl,
+    documentKind,
+    ...urlFields,
     status: "pending",
     requestedBy: userID,
     reviewedBy: null,
@@ -212,5 +266,43 @@ export const createIdResubmitRequest = async (userID, role, currentLicenseUrl, n
     createdAt: timestamp(),
     updatedAt: timestamp(),
   });
-  return { id: ref.id, userID };
+  return { id: ref.id, userID, documentKind };
+};
+
+// ─────────────────────────────────────────────
+// Self-service, Owner/Admin only: applies a license or document update
+// directly, no approval step — same trust boundary as
+// applyProfileChanges()'s canEditDirectly path. Role is enforced at the
+// route level (requireRole), not here, matching the rest of this file.
+// One audit entry gets logged by the controller for this, since there's
+// no separate submit+approve pair to log for a direct apply.
+// ─────────────────────────────────────────────
+export const applyOwnDocumentUpdate = async (userID, documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber) => {
+  if (!["license", "document"].includes(documentKind)) {
+    const err = new Error("documentKind must be 'license' or 'document'.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!newUrl) {
+    const err = new Error("newUrl is required.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (documentKind === "license") {
+    if (!driverLicenseExpiry) {
+      const err = new Error("driverLicenseExpiry is required when updating a license.");
+      err.statusCode = 400;
+      throw err;
+    }
+    await upsertUserDocument(userID, { driverLicenseUrl: newUrl, driverLicenseExpiry });
+  } else {
+    await upsertUserDocument(userID, {
+      documentImageUrl: newUrl,
+      ...(documentType   !== undefined ? { documentType } : {}),
+      ...(documentNumber !== undefined ? { documentNumber } : {}),
+    });
+  }
+
+  return { userID, documentKind };
 };

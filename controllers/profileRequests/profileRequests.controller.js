@@ -3,12 +3,14 @@ import {
   applyProfileChanges,
   approveProfileRequest,
   approveIdResubmitRequest,
+  applyOwnDocumentUpdate,
   rejectRequest,
   createEditRequest,
   cancelEditRequest,
   createIdResubmitRequest,
 } from "../../services/profileRequests/profileRequests.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+import { notifyStaff, resolveNotification } from "../../services/notification/notification.service.js";
 
 // PUT /api/users/:uid/document
 // Body: any subset of userDocument fields, e.g. { driverLicenseExpiry }.
@@ -41,7 +43,7 @@ export const updateUserDocument = async (req, res) => {
 export const approveProfile = async (req, res) => {
   try {
     const { id } = req.params;
-    const data = await approveProfileRequest(id);
+    const data = await approveProfileRequest(id, req.user?.uid || null);
 
     createAuditLog({
       action: "update",
@@ -57,16 +59,26 @@ export const approveProfile = async (req, res) => {
 };
 
 // POST /api/id-resubmit-requests/:id/approve
+// Body: { driverLicenseExpiry } — required; the date on the new card,
+// entered by the reviewer in the same action as approving the photo.
+// entered by the reviewer in the same action as approving the photo
+// (license only — document has no expiry concept).
 export const approveIdResubmit = async (req, res) => {
   try {
     const { id } = req.params;
-    const data = await approveIdResubmitRequest(id);
+    const { driverLicenseExpiry } = req.body || {};
+    const data = await approveIdResubmitRequest(id, driverLicenseExpiry, req.user?.uid || null);
 
+    const kindLabel = data.documentKind === "license" ? "license" : "document";
     createAuditLog({
       action: "update",
-      description: `Approved ID resubmission for user ${data.userID}.`,
+      description: `Approved ${kindLabel} resubmission for user ${data.userID}`
+        + (data.documentKind === "license" ? ` — expiry set to ${driverLicenseExpiry}.` : "."),
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    resolveNotification("id_resubmit_request", id)
+      .catch((err) => console.error("[NOTIF] Failed to resolve id_resubmit_request:", err.message));
 
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -86,7 +98,7 @@ export const rejectReviewRequest = async (req, res) => {
       return res.status(400).json({ success: false, message: "kind must be 'profile' or 'id'." });
     }
 
-    const data = await rejectRequest(kind, id, note);
+    const data = await rejectRequest(kind, id, note, req.user?.uid || null);
 
     createAuditLog({
       action: "update",
@@ -169,29 +181,69 @@ export const cancelOwnEditRequest = async (req, res) => {
 };
 
 // POST /api/profile/id-resubmit-requests
-// Body: { role, currentLicenseUrl, newLicenseUrl } — newLicenseUrl is the
-// downloadURL from a Storage upload the frontend already did; this
-// endpoint only handles the Firestore doc, same pattern as the fleet
-// image endpoint.
+// Body: { documentKind, currentUrl, newUrl, documentType?, documentNumber? }
+// documentType/documentNumber only apply when documentKind === "document"
+// — newUrl is the downloadURL from a Storage upload the frontend already
+// did; this endpoint only handles the Firestore doc, same pattern as the
+// fleet image endpoint.
 export const submitIdResubmitRequest = async (req, res) => {
   try {
-    const { role, currentLicenseUrl, newLicenseUrl } = req.body || {};
+    const { documentKind, currentUrl, newUrl, documentType, documentNumber } = req.body || {};
     const data = await createIdResubmitRequest(
       req.user.uid,
-      role || req.user.role || "",
-      currentLicenseUrl,
-      newLicenseUrl
+      req.user.role || "",
+      documentKind,
+      currentUrl,
+      newUrl,
+      documentType,
+      documentNumber
     );
 
+    const kindLabel = documentKind === "license" ? "driver's license" : "document";
     createAuditLog({
       action: "update",
-      description: `Submitted a driver's license resubmission for review.`,
+      description: `Submitted a ${kindLabel} resubmission for review.`,
       userID: req.user.uid,
     }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    notifyStaff({
+      type: "id_resubmit_request",
+      refID: data.id,
+      refCollection: "idResubmitRequests",
+      title: "ID resubmission submitted",
+      message: `A ${kindLabel} resubmission was submitted for review.`,
+    }).catch((err) => console.error("[NOTIF] Failed to notify staff of id_resubmit_request:", err.message));
 
     return res.status(201).json({ success: true, data });
   } catch (error) {
     console.error("[PROFILE_REQUESTS] submitIdResubmitRequest error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/profile/document
+// Body: { documentKind, newUrl, driverLicenseExpiry?, documentType?,
+// documentNumber? } — Owner/Admin only (enforced by requireRole at the
+// route level, see profileRequests.routes.js). Applies directly, no
+// approval step, same trust boundary as updateOwnProfileFields'
+// canEditDirectly path. Logs its own single audit entry since there's no
+// separate submit+approve pair for this path — just one action happened.
+export const updateOwnDocument = async (req, res) => {
+  try {
+    const { documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber } = req.body || {};
+    await applyOwnDocumentUpdate(req.user.uid, documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber);
+
+    const kindLabel = documentKind === "license" ? "driver's license" : "document";
+    createAuditLog({
+      action: "update",
+      description: `Updated own ${kindLabel}`
+        + (documentKind === "license" ? ` — expiry set to ${driverLicenseExpiry}.` : "."),
+      userID: req.user.uid,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] updateOwnDocument error:", error);
     return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
