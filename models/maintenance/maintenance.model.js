@@ -17,11 +17,18 @@ export const BASIS_OPTIONS = [
 
 export const STATUS_OPTIONS = [
   "Scheduled",
-  "In Progress",
   "Completed",
   "Cancelled",
-  "Overdue",
 ];
+// "In Progress" and "Overdue" were removed — neither was ever set by any
+// automated process (both were purely manual picks), nothing downstream
+// depended on "In Progress" being accurate (car availability is tracked
+// entirely separately, on the car's own record via Fleet.jsx), and
+// "Overdue" was actively counterproductive: picking it manually removed
+// the record from the Dashboard's date-based Warning query instead of
+// escalating it. Overdue detection is now purely computed from
+// maintenanceDate vs. now on a still-"Scheduled" record (see Dashboard.jsx
+// and the maintenance_overdue cron check) — no status flag required.
 
 // PLACEHOLDER catalog — services/prices here are starter values, not real
 // pricing. Adjust freely; maintenance.service.js only needs each service's

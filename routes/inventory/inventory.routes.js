@@ -11,10 +11,12 @@ import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 // Visible to: Owner, Supervisor, Admin
 const allowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN];
 
-// Editing past trip history — Admin only (see conversation this was built
-// from: a direct edit, not a dual-value correction overlay, restricted to
-// Admin rather than Owner/Supervisor too).
-const editAllowed = [roles.ADMIN];
+// Editing past trip history — was Admin-only. Opened up to Owner/Supervisor
+// too so it matches Maintenance.jsx's own access level: since that page's
+// "Mark Replaced" button now calls this endpoint to persist a resolved
+// damaged/stolen/missing part, restricting it to Admin would silently 403
+// for 2 of the 3 roles that can see that button.
+const editAllowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN];
 
 export const registerInventoryRoutes = (app) => {
   app.get("/api/inventory/booking/:bookingID",          verifyToken, requireRole(allowed), getInventory);
