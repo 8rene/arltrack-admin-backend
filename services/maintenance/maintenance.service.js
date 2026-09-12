@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { BASIS_OPTIONS, STATUS_OPTIONS, SERVICE_CATALOG } from "../../models/maintenance/maintenance.model.js";
+import { adminUpdateHistoryPartStatus } from "../inventory/inventory.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -188,7 +189,7 @@ export const getMaintenanceByCar = async (carID) => {
 // CREATE maintenance record
 // ─────────────────────────────────────────────
 export const createMaintenance = async (payload) => {
-  const { carID, basis, services = [], overrideTotal, description = "", maintenanceDate = null, nextMaintenanceDate = null, status } = payload;
+  const { carID, basis, services = [], overrideTotal, description = "", maintenanceDate = null, nextMaintenanceDate = null, status, partsAddressed = [] } = payload;
 
   if (!carID) throw new Error("carID is required.");
   if (!BASIS_OPTIONS.includes(basis)) throw new Error(`Invalid basis. Must be one of: ${BASIS_OPTIONS.join(", ")}`);
@@ -214,6 +215,14 @@ export const createMaintenance = async (payload) => {
     maintenanceDate: toFirestoreDate(maintenanceDate),
     nextMaintenanceDate: toFirestoreDate(nextMaintenanceDate),
     status: finalStatus,
+    // Which damaged/stolen/missing parts (from inventoryBeforeTrip/
+    // inventoryAfterTrip's damageParts) this job is meant to fix. Not
+    // resolved yet at creation — only actually applied to those trip
+    // records once this maintenance record's status becomes "Completed"
+    // (see updateMaintenanceStatus). Checking a box here just records
+    // intent; a job that gets Cancelled instead should never mark a part
+    // fixed that was never actually worked on.
+    partsAddressed,
     createdAt: timestamp(),
     updatedAt: timestamp(),
   });
@@ -221,18 +230,54 @@ export const createMaintenance = async (payload) => {
   // Mirror the doc's own ID onto itself, matching this app's existing convention
   await ref.update({ maintenanceID: ref.id });
 
+  // Edge case: a record created already Completed (backdating a repair
+  // that already happened) — resolve immediately rather than requiring a
+  // separate edit afterward to trigger it.
+  if (finalStatus === "Completed") {
+    await resolveAddressedParts(ref.id, carID, partsAddressed);
+  }
+
   return { id: ref.id };
 };
 
 // ─────────────────────────────────────────────
 // UPDATE maintenance record
 // ─────────────────────────────────────────────
+// Resolves whichever damaged/stolen/missing parts a maintenance record's
+// partsAddressed checklist named, by flipping each one's status to "Good"
+// on its actual trip record (same write Maintenance.jsx's own "Mark
+// Replaced" button uses). Called from both updateMaintenance (the real
+// path the edit form's status picker actually uses) and
+// updateMaintenanceStatus (the dedicated PATCH endpoint, kept in sync in
+// case anything else calls it directly) — only ever on a genuine
+// transition into "Completed", never on every re-save of an already-
+// completed record, and never for Cancelled.
+const resolveAddressedParts = async (maintenanceID, carID, partsAddressed) => {
+  if (!Array.isArray(partsAddressed) || partsAddressed.length === 0) return;
+  for (const p of partsAddressed) {
+    try {
+      await adminUpdateHistoryPartStatus({
+        tripPhase: p.tripPhase,
+        bookingID: p.bookingID,
+        carID,
+        carPartID: p.carPartID,
+        newStatus: "Good",
+        editedBy: null, // resolved via maintenance completion, not a direct admin edit
+      });
+    } catch (err) {
+      // One part failing (e.g. its trip record was since deleted) shouldn't
+      // block the others or the status update that already succeeded.
+      console.error(`[MAINTENANCE] Failed to resolve part ${p.carPartID} on completion of ${maintenanceID}:`, err.message);
+    }
+  }
+};
+
 export const updateMaintenance = async (maintenanceID, payload) => {
   const ref = db.collection("carMaintenance").doc(maintenanceID);
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
 
-  const { carID, basis, services, overrideTotal, description, maintenanceDate, nextMaintenanceDate, status } = payload;
+  const { carID, basis, services, overrideTotal, description, maintenanceDate, nextMaintenanceDate, status, partsAddressed } = payload;
   const existing = doc.data();
 
   const effectiveCarID   = carID !== undefined ? carID : existing.carID;
@@ -259,6 +304,7 @@ export const updateMaintenance = async (maintenanceID, payload) => {
   if (description !== undefined) update.description = description;
   if (maintenanceDate !== undefined) update.maintenanceDate = toFirestoreDate(maintenanceDate);
   if (nextMaintenanceDate !== undefined) update.nextMaintenanceDate = toFirestoreDate(nextMaintenanceDate);
+  if (partsAddressed !== undefined) update.partsAddressed = partsAddressed;
 
   // Recompute total whenever services or overrideTotal change
   if (services !== undefined || overrideTotal !== undefined) {
@@ -271,6 +317,16 @@ export const updateMaintenance = async (maintenanceID, payload) => {
   }
 
   await ref.update(update);
+
+  // Fires only on a genuine transition into Completed (existing status
+  // wasn't already Completed) — this is the endpoint the real edit form's
+  // status picker actually calls, so this is where completion needs to be
+  // caught, not just the unused dedicated PATCH endpoint below.
+  if (update.status === "Completed" && existing.status !== "Completed") {
+    const effectiveParts = partsAddressed !== undefined ? partsAddressed : existing.partsAddressed;
+    await resolveAddressedParts(maintenanceID, effectiveCarID, effectiveParts);
+  }
+
   return { id: maintenanceID };
 };
 
@@ -283,8 +339,14 @@ export const updateMaintenanceStatus = async (maintenanceID, status) => {
   const ref = db.collection("carMaintenance").doc(maintenanceID);
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
+  const record = doc.data();
 
   await ref.update({ status, updatedAt: timestamp() });
+
+  if (status === "Completed" && record.status !== "Completed") {
+    await resolveAddressedParts(maintenanceID, record.carID, record.partsAddressed);
+  }
+
   return { id: maintenanceID, status };
 };
 
