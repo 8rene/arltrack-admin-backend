@@ -56,7 +56,8 @@ export const listMaintenanceByCar = async (req, res) => {
 // POST /api/maintenance
 export const addMaintenance = async (req, res) => {
   try {
-    const data = await createMaintenance(req.body);
+    const editedBy = req.user?.uid || req.user?.userID || null;
+    const data = await createMaintenance(req.body, editedBy);
     return res.status(201).json({ success: true, data });
   } catch (error) {
     console.error("[MAINTENANCE] addMaintenance error:", error);
@@ -67,7 +68,8 @@ export const addMaintenance = async (req, res) => {
 // PUT /api/maintenance/:id
 export const editMaintenance = async (req, res) => {
   try {
-    const data = await updateMaintenance(req.params.id, req.body);
+    const editedBy = req.user?.uid || req.user?.userID || null;
+    const data = await updateMaintenance(req.params.id, req.body, editedBy);
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[MAINTENANCE] editMaintenance error:", error);
@@ -79,7 +81,8 @@ export const editMaintenance = async (req, res) => {
 export const setMaintenanceStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    const data = await updateMaintenanceStatus(req.params.id, status);
+    const editedBy = req.user?.uid || req.user?.userID || null;
+    const data = await updateMaintenanceStatus(req.params.id, status, editedBy);
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[MAINTENANCE] setMaintenanceStatus error:", error);
@@ -90,7 +93,8 @@ export const setMaintenanceStatus = async (req, res) => {
 // DELETE /api/maintenance/:id
 export const removeMaintenance = async (req, res) => {
   try {
-    const data = await deleteMaintenance(req.params.id);
+    const editedBy = req.user?.uid || req.user?.userID || null;
+    const data = await deleteMaintenance(req.params.id, editedBy);
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[MAINTENANCE] removeMaintenance error:", error);

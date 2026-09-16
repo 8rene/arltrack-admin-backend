@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { BASIS_OPTIONS, STATUS_OPTIONS, SERVICE_CATALOG } from "../../models/maintenance/maintenance.model.js";
 import { adminUpdateHistoryPartStatus } from "../inventory/inventory.service.js";
+import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -67,6 +68,15 @@ const toJSDate = (val) => {
 };
 
 const fmtDate = (d) => d.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" });
+
+// Looks up a car's plate number for audit-log descriptions, so entries read
+// "Maintenance for ABC-1234" instead of a bare carID. Falls back to the raw
+// carID if the car doc is somehow gone by the time this runs.
+const getPlateNumber = async (carID) => {
+  if (!carID) return "unknown car";
+  const snap = await db.collection("cars").doc(carID).get();
+  return snap.exists ? snap.data().plateNumber || carID : carID;
+};
 
 // Checks whether `carID` has an active booking (pending/approved — i.e. the
 // car will actually be out) whose date range overlaps the given day.
@@ -188,7 +198,7 @@ export const getMaintenanceByCar = async (carID) => {
 // ─────────────────────────────────────────────
 // CREATE maintenance record
 // ─────────────────────────────────────────────
-export const createMaintenance = async (payload) => {
+export const createMaintenance = async (payload, editedBy = null) => {
   const { carID, basis, services = [], overrideTotal, description = "", maintenanceDate = null, nextMaintenanceDate = null, status, partsAddressed = [] } = payload;
 
   if (!carID) throw new Error("carID is required.");
@@ -237,6 +247,13 @@ export const createMaintenance = async (payload) => {
     await resolveAddressedParts(ref.id, carID, partsAddressed);
   }
 
+  await createAuditLog({
+    action: "create",
+    description: `Maintenance scheduled for ${carDoc.data().plateNumber || carID} (${basis}, ${finalStatus}): ` +
+      `${description || "no description"} — total ₱${totalCost.toFixed(2)}.`,
+    userID: editedBy,
+  });
+
   return { id: ref.id };
 };
 
@@ -272,7 +289,7 @@ const resolveAddressedParts = async (maintenanceID, carID, partsAddressed) => {
   }
 };
 
-export const updateMaintenance = async (maintenanceID, payload) => {
+export const updateMaintenance = async (maintenanceID, payload, editedBy = null) => {
   const ref = db.collection("carMaintenance").doc(maintenanceID);
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
@@ -327,13 +344,23 @@ export const updateMaintenance = async (maintenanceID, payload) => {
     await resolveAddressedParts(maintenanceID, effectiveCarID, effectiveParts);
   }
 
+  const plate = await getPlateNumber(effectiveCarID);
+  const statusNote = status !== undefined && status !== existing.status
+    ? ` — status changed from ${existing.status} to ${status}`
+    : "";
+  await createAuditLog({
+    action: "update",
+    description: `Maintenance record for ${plate} updated${statusNote}.`,
+    userID: editedBy,
+  });
+
   return { id: maintenanceID };
 };
 
 // ─────────────────────────────────────────────
 // UPDATE status only
 // ─────────────────────────────────────────────
-export const updateMaintenanceStatus = async (maintenanceID, status) => {
+export const updateMaintenanceStatus = async (maintenanceID, status, editedBy = null) => {
   if (!STATUS_OPTIONS.includes(status)) throw new Error(`Invalid status. Must be one of: ${STATUS_OPTIONS.join(", ")}`);
 
   const ref = db.collection("carMaintenance").doc(maintenanceID);
@@ -347,17 +374,34 @@ export const updateMaintenanceStatus = async (maintenanceID, status) => {
     await resolveAddressedParts(maintenanceID, record.carID, record.partsAddressed);
   }
 
+  const plate = await getPlateNumber(record.carID);
+  await createAuditLog({
+    action: "update",
+    description: `Maintenance status for ${plate} changed from ${record.status} to ${status}.`,
+    userID: editedBy,
+  });
+
   return { id: maintenanceID, status };
 };
 
 // ─────────────────────────────────────────────
 // DELETE maintenance record
 // ─────────────────────────────────────────────
-export const deleteMaintenance = async (maintenanceID) => {
+export const deleteMaintenance = async (maintenanceID, editedBy = null) => {
   const ref = db.collection("carMaintenance").doc(maintenanceID);
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
+  const record = doc.data();
 
   await ref.delete();
+
+  const plate = await getPlateNumber(record.carID);
+  await createAuditLog({
+    action: "delete",
+    description: `Maintenance record for ${plate} deleted (was ${record.status}, ${record.basis}, ` +
+      `${record.description || "no description"}).`,
+    userID: editedBy,
+  });
+
   return { id: maintenanceID };
 };

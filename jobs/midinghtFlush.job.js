@@ -193,24 +193,24 @@ const checkOverdueBookings = async () => {
 // ── Maintenance overdue check ──────────────────────────────────────
 // Same shape as the pickup/return overdue check above: no separate
 // "Overdue" status to remember to set on the record — just a date
-// that's slipped by while the record is still open (Scheduled or
-// In Progress, i.e. not yet Completed/Cancelled). Runs on the same
-// daily cadence since maintenance dates don't need finer granularity.
+// that's slipped by while the record is still open (Scheduled, i.e.
+// not yet Completed/Cancelled). Runs on the same daily cadence since
+// maintenance dates don't need finer granularity.
 const checkOverdueMaintenance = async () => {
   const now = new Date();
-  // Queries every record, not just Scheduled/In Progress ones — a record
-  // that just got marked Completed/Cancelled still needs this loop to see
-  // it so its notification can be resolved. Filtering the query itself
-  // to Scheduled/In Progress (like the booking check above does) would
-  // mean a record that flips to Completed silently drops out of the
-  // snapshot and never gets its notification resolved.
+  // Queries every record, not just Scheduled ones — a record that just
+  // got marked Completed/Cancelled still needs this loop to see it so
+  // its notification can be resolved. Filtering the query itself to
+  // Scheduled (like the booking check above does) would mean a record
+  // that flips to Completed silently drops out of the snapshot and
+  // never gets its notification resolved.
   const snap = await db.collection("carMaintenance").get();
 
   for (const doc of snap.docs) {
     const record = doc.data();
     const docID = doc.id;
     const dueDate = record.maintenanceDate?.toDate?.();
-    const stillOpen = ["Scheduled", "In Progress"].includes(record.status);
+    const stillOpen = record.status === "Scheduled";
 
     if (stillOpen && dueDate && dueDate < now) {
       await notifyStaff({
