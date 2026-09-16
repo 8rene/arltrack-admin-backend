@@ -44,11 +44,24 @@ import { seedCacheFromFirestore }            from "./services/gps/gps.service.js
 
 const app = express();
 
+// Fixed production origin + any localhost port — the second part matters
+// because `flutter run -d chrome` (no --web-port flag) picks a random
+// free port each time, so a fixed array like ['http://localhost:3000']
+// only works if that exact port happens to be free. Still safe: this
+// only widens things for localhost, nothing else gets in past the
+// explicit whitelist below.
+const PROD_ORIGINS = ['https://arltrack-admin-frontend.vercel.app'];
+const LOCALHOST_ORIGIN = /^http:\/\/localhost:\d+$/;
+
 app.use(cors({
-  origin: [
-    'https://arltrack-admin-frontend.vercel.app',
-    'http://localhost:3000'
-  ],
+  origin: (origin, callback) => {
+    // No Origin header at all (curl, server-to-server, Postman) — allow.
+    if (!origin) return callback(null, true);
+    if (PROD_ORIGINS.includes(origin) || LOCALHOST_ORIGIN.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
   credentials: true
 }));
 app.use(express.json());
