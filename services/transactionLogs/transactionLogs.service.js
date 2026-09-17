@@ -1,7 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 
-const VALID_TYPES   = ["Payment", "Refund", "Deposit", "Discount"];
+const VALID_TYPES   = ["Payment", "Refund", "Deposit", "Discount", "Expense"];
 const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 
 // Writes one entry to the transactionLogs collection. This is the single
@@ -10,6 +10,13 @@ const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 // finally resolved (Refunded/Failed/Rejected), not at every intermediate
 // state change (e.g. a refund sitting at "Pending" does NOT get an entry
 // here — see refundRequests for that in-progress state).
+//
+// "Expense" is the one type that isn't customer-facing — a company cost
+// (e.g. a maintenance bill) with no booking/payment/customer attached, so
+// bookingID/paymentID/userID are left null for those entries. Every type
+// here, Expense included, logs one final settled amount — never a delta —
+// so a later correction/reversal is its own separate entry with its own
+// full amount, not a diff against a previous one.
 //
 // Never throws — a logging failure should never block the real action
 // (a payment settling, a discount being applied) from completing. Callers
@@ -27,6 +34,8 @@ export const createTransactionLog = async ({
   referenceNumber = "",
   description = "",
   performedBy = null,
+  refID = null,           // generic FK for non-booking types (e.g. "Expense" -> a carMaintenance doc ID)
+  refCollection = null,   // which collection refID points into, e.g. "carMaintenance"
 }) => {
   try {
     if (!VALID_TYPES.includes(type)) {
@@ -45,6 +54,8 @@ export const createTransactionLog = async ({
       paymentID: paymentID || null,
       refundRequestID,
       userID: userID || null,
+      refID,
+      refCollection,
       type,
       amount: Number(amount) || 0,
       status,
@@ -58,6 +69,31 @@ export const createTransactionLog = async ({
   } catch (err) {
     console.error("createTransactionLog error:", err.message);
     return null;
+  }
+};
+
+// Marks every still-"Success" entry tied to a given source record as
+// "Rejected" instead of deleting or writing a negative-amount reversal —
+// same status vocabulary refund requests already use for "this no longer
+// counts". Used when the record that caused an Expense entry (e.g. a
+// maintenance record) gets deleted, so it stops counting toward any
+// Success-based total while the original entry stays in the ledger as
+// history instead of disappearing.
+export const rejectTransactionLogsByRef = async (refID, refCollection) => {
+  try {
+    const snap = await db.collection("transactionLogs")
+      .where("refID", "==", refID)
+      .where("refCollection", "==", refCollection)
+      .where("status", "==", "Success")
+      .get();
+    if (snap.empty) return 0;
+    const batch = db.batch();
+    snap.docs.forEach((doc) => batch.update(doc.ref, { status: "Rejected" }));
+    await batch.commit();
+    return snap.size;
+  } catch (err) {
+    console.error("rejectTransactionLogsByRef error:", err.message);
+    return 0;
   }
 };
 

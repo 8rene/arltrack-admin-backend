@@ -5,6 +5,7 @@ import { updateBooking, markBookingDroppedOff } from "../../services/booking/boo
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
+import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -197,7 +198,7 @@ const findDriverConflict = async (driverID, startDateTime, endDateTime, excludeB
 // the frontend is expected to show that as a warning and let the caller
 // re-submit with force to override, rather than silently blocking.
 // ─────────────────────────────────────────────
-export const assignDriver = async (bookingDocID, driverID, assignedBy, force = false) => {
+export const assignDriver = async (bookingDocID, driverID, assignedBy, force = false, editedBy = null) => {
   if (!bookingDocID) throw new Error("bookingDocID is required.");
   if (!driverID) throw new Error("driverID is required.");
 
@@ -252,6 +253,16 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
     userID: driverID,
   }).catch((err) => console.error("[NOTIF] driver_assigned create failed:", err.message));
 
+  const driverData = driverDoc.data();
+  const driverName = [driverData.firstName, driverData.lastName].filter(Boolean).join(" ").trim()
+    || driverData.username || driverID;
+  createAuditLog({
+    action: "update",
+    description: `Driver ${driverName} assigned to booking ${booking.bookingID || bookingDocID}` +
+      `${force ? " (override — scheduling conflict)" : ""}.`,
+    userID: editedBy,
+  }).catch((err) => console.error("[AUDIT] driver assign log failed:", err.message));
+
   return { id: bookingDocID, driverID };
 };
 
@@ -259,7 +270,7 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
 // UNASSIGN — clears the driver, returning the booking to the queue
 // (if it's still "upcoming") or just freeing the driver (if "ongoing").
 // ─────────────────────────────────────────────
-export const unassignDriver = async (bookingDocID) => {
+export const unassignDriver = async (bookingDocID, editedBy = null) => {
   if (!bookingDocID) throw new Error("bookingDocID is required.");
 
   const bookingRef = db.collection("bookings").doc(bookingDocID);
@@ -271,12 +282,44 @@ export const unassignDriver = async (bookingDocID) => {
     throw new Error(`Cannot unassign a driver from a booking with status "${booking.status}".`);
   }
 
+  const previousDriverID = booking.driverID;
+
   await bookingRef.update({
     driverID: null,
     driverAssignedAt: null,
     driverAssignedBy: null,
     updatedAt: timestamp(),
   });
+
+  // Same gap assignDriver's own notification fixed, just missed on this
+  // side: without this, a driver only finds out they were unassigned
+  // because the trip silently disappears from their list.
+  if (previousDriverID) {
+    createNotification({
+      type: "driver_unassigned",
+      refID: bookingDocID,
+      refCollection: "bookings",
+      title: "Trip unassigned",
+      message: `You've been removed from booking ${booking.bookingID || bookingDocID}.`,
+      userID: previousDriverID,
+    }).catch((err) => console.error("[NOTIF] driver_unassigned create failed:", err.message));
+  }
+
+  let driverName = previousDriverID || "a driver";
+  if (previousDriverID) {
+    try {
+      const driverDoc = await db.collection("user").doc(previousDriverID).get();
+      if (driverDoc.exists) {
+        const d = driverDoc.data();
+        driverName = [d.firstName, d.lastName].filter(Boolean).join(" ").trim() || d.username || previousDriverID;
+      }
+    } catch { /* fall back to the raw ID above */ }
+  }
+  createAuditLog({
+    action: "update",
+    description: `Driver ${driverName} unassigned from booking ${booking.bookingID || bookingDocID}.`,
+    userID: editedBy,
+  }).catch((err) => console.error("[AUDIT] driver unassign log failed:", err.message));
 
   return { id: bookingDocID };
 };

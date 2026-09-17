@@ -22,6 +22,13 @@ const roleAllowed = [roles.OWNER, roles.ADMIN];
 // that a single flat allowed[] here can't express.
 const listAllowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 
+// Read-only single-user lookups (by-uid, details) — used by the Bookings
+// page's customer-profile modal, which is visible to Owner/Admin/
+// Supervisor (see pagePermissions.js "/bookings"), so this needs to match
+// that access level rather than staying Admin-only like user management
+// itself (deleteAllowed/roleAllowed above).
+const viewAllowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
+
 // verify/status: matches the Customer tab's own visibleTo in Users.jsx /
 // pagePermissions.js ([Owner, Admin, Supervisor]) — these two actions are
 // used from both the Customers tab and the Users page's Driver tab, both
@@ -31,8 +38,8 @@ const editAllowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 export const registerUserRoutes = (app) => {
   app.get("/api/users",                  verifyToken, requireRole(listAllowed), getUsersByRole);
   app.delete("/api/users/:uid",          verifyToken, requireRole(deleteAllowed), deleteUser);
-  app.get("/api/users/by-uid/:uid",      verifyToken, requireRole(allowed), getUserByUid);
-  app.get("/api/users/details/:uid",     verifyToken, requireRole(allowed), getUserDetails);
+  app.get("/api/users/by-uid/:uid",      verifyToken, requireRole(viewAllowed), getUserByUid);
+  app.get("/api/users/details/:uid",     verifyToken, requireRole(viewAllowed), getUserDetails);
   app.patch("/api/users/:uid/role",      verifyToken, requireRole(roleAllowed), updateUserRole);
   app.patch("/api/users/:uid/verify",    verifyToken, requireRole(editAllowed), verifyUserDocument);
   app.patch("/api/users/:uid/status",    verifyToken, requireRole(editAllowed), updateUserStatus);

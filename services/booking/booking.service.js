@@ -182,12 +182,14 @@ export const getAllBookings = async (statusFilter) => {
   const userIDs        = [...new Set(rows.map((b) => b.userID).filter(Boolean))];
   const serviceTypeIDs = [...new Set(rows.map((b) => b.serviceTypeID).filter(Boolean))];
 
-  const [vehicleEntries, paymentEntries, userEntries, serviceTypeEntries, historyEntries] = await Promise.all([
+  const [vehicleEntries, paymentEntries, userEntries, serviceTypeEntries, historyEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(serviceTypeIDs.map((id) => resolveServiceType(id).then((s) => [id, s]))),
     Promise.all(bookingIDs.map((id) => resolveHistoryInfo(id).then((h) => [id, h]))),
+    Promise.all(bookingIDs.map((id) => hasCompleteBeforeTripDocs(id).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => hasCompleteAfterTripDocs(id).then((v) => [id, v]))),
   ]);
 
   const vehicleMap     = Object.fromEntries(vehicleEntries);
@@ -195,6 +197,8 @@ export const getAllBookings = async (statusFilter) => {
   const userMap        = Object.fromEntries(userEntries);
   const serviceTypeMap = Object.fromEntries(serviceTypeEntries);
   const historyMap     = Object.fromEntries(historyEntries);
+  const beforeDocsMap  = Object.fromEntries(beforeDocsEntries);
+  const afterDocsMap   = Object.fromEntries(afterDocsEntries);
 
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
@@ -226,6 +230,8 @@ export const getAllBookings = async (statusFilter) => {
       lastArchivedAt:   histInfo.lastArchivedAt,
       pickupTime:           histInfo.pickupTime,
       customerDroppedOffAt: histInfo.customerDroppedOffAt,
+      beforeDocsComplete: beforeDocsMap[bID] ?? false,
+      afterDocsComplete:  afterDocsMap[bID] ?? false,
     };
   });
 };
@@ -270,6 +276,19 @@ export const updateBooking = async (docID, updates) => {
       throw new Error(
         `Cannot approve booking: payment is still "${payStatus}". ` +
         `Please approve the payment first in the Payments page.`
+      );
+    }
+
+    // Balance must also be fully settled — this is a stricter rule than
+    // before. Previously an approved deposit with balance > 0 was enough
+    // to reach "ongoing"; now Pickup is blocked until the full balance is
+    // collected (discounts included — applying a discount lowers this
+    // balance the same way a payment does).
+    const { balance } = computeAmounts(paymentData);
+    if (balance > 0) {
+      throw new Error(
+        `Cannot approve booking: payment still requires action — ₱${balance.toLocaleString()} remaining. ` +
+        `Collect or apply a discount for the remaining balance first.`
       );
     }
   }

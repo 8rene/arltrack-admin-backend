@@ -17,7 +17,8 @@ export const assign = async (req, res) => {
   try {
     const { bookingID, driverID, force } = req.body;
     const assignedBy = req.user?.username || req.user?.uid || "admin";
-    const result = await assignDriver(bookingID, driverID, assignedBy, !!force);
+    const editedBy = req.user?.uid || req.user?.userID || null;
+    const result = await assignDriver(bookingID, driverID, assignedBy, !!force, editedBy);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[DRIVER DISPATCH] assign error:", error);
@@ -36,7 +37,8 @@ export const assign = async (req, res) => {
 export const unassign = async (req, res) => {
   try {
     const { bookingID } = req.body;
-    const result = await unassignDriver(bookingID);
+    const editedBy = req.user?.uid || req.user?.userID || null;
+    const result = await unassignDriver(bookingID, editedBy);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[DRIVER DISPATCH] unassign error:", error);

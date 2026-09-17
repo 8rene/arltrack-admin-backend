@@ -253,7 +253,14 @@ export const collectRemainingBalance = async (bookingID, collectedBy) => {
     type: "Payment",
     amount: balance,
     status: "Success",
-    paymentMethod: data.paymentMethod || "Cash",
+    // Unlike confirmInitialPayment() above, this flow never actually asks
+    // what method the balance came in (cash at pickup, GCash, etc.) — it's
+    // a one-tap "mark as received" action. Previously this line reused
+    // data.paymentMethod (the ORIGINAL deposit's method), which silently
+    // misreported mixed-method payments (e.g. GCash deposit + cash
+    // balance) as a single method. Stating plainly that it wasn't
+    // recorded is more honest than guessing.
+    paymentMethod: "Not recorded",
     referenceNumber: data.referenceNumber || "—",
     description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID}.`,
     performedBy: collectedBy || "—",
