@@ -290,3 +290,34 @@ export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallS
 
   return { success: true, id: docID };
 };
+
+// ─────────────────────────────────────────────
+// GET — read-only before/after inventory condition summary for one
+// booking. Same inventoryBeforeTrip/inventoryAfterTrip collections
+// saveInventoryStatus writes to; used by the driver-facing My Trips
+// history view, which only needs the overall status + any damaged parts,
+// not the full photo set (see getVehicleDocsByBooking for that).
+// ─────────────────────────────────────────────
+const pickLatestByRecordedAt = (snap) => {
+  if (snap.empty) return null;
+  const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  docs.sort((a, b) => (b.recordedAt?._seconds ?? 0) - (a.recordedAt?._seconds ?? 0));
+  return docs[0];
+};
+
+export const getInventorySummaryByBooking = async (bookingID) => {
+  if (!bookingID) return { before: null, after: null };
+  const [beforeSnap, afterSnap] = await Promise.all([
+    db.collection(INVENTORY_COLLECTION.before).where("bookingID", "==", bookingID).get(),
+    db.collection(INVENTORY_COLLECTION.after).where("bookingID", "==", bookingID).get(),
+  ]);
+  const shape = (doc) => doc && {
+    overallStatus: doc.inventoryOverallStatus || null,
+    damageParts:   doc.damageParts || [],
+    recordedAt:    doc.recordedAt || null,
+  };
+  return {
+    before: shape(pickLatestByRecordedAt(beforeSnap)),
+    after:  shape(pickLatestByRecordedAt(afterSnap)),
+  };
+};
