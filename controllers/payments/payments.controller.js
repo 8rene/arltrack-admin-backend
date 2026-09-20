@@ -101,8 +101,9 @@ export const refundIssued = async (req, res) => {
 export const confirmPayment = async (req, res) => {
   try {
     const { bookingID } = req.params;
+    const { paymentMethod } = req.body;
     const confirmedBy = req.user?.email || req.user?.uid || "staff";
-    await confirmInitialPayment(bookingID, confirmedBy);
+    await confirmInitialPayment(bookingID, confirmedBy, paymentMethod);
     return res.status(200).json({ success: true, message: "Payment marked as received." });
   } catch (error) {
     console.error("[PAYMENTS] confirm error:", error);
@@ -116,8 +117,9 @@ export const confirmPayment = async (req, res) => {
 export const collectBalance = async (req, res) => {
   try {
     const { bookingID } = req.params;
+    const { paymentMethod } = req.body;
     const collectedBy = req.user?.email || req.user?.uid || "staff";
-    await collectRemainingBalance(bookingID, collectedBy);
+    await collectRemainingBalance(bookingID, collectedBy, paymentMethod);
     return res.status(200).json({ success: true, message: "Balance marked as collected." });
   } catch (error) {
     console.error("[PAYMENTS] collect-balance error:", error);

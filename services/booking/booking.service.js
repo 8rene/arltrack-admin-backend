@@ -5,6 +5,7 @@ import { flushBookingHistory } from "../../services/storage/bookingHistory.servi
 import { hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { computeAmounts } from "../../services/payments/payments.service.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
+import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -236,7 +237,7 @@ export const getAllBookings = async (statusFilter) => {
   });
 };
 
-export const updateBooking = async (docID, updates) => {
+export const updateBooking = async (docID, updates, performedBy = null) => {
   const doc = await db.collection("bookings").doc(docID).get();
   if (!doc.exists) throw new Error("Booking not found");
 
@@ -334,6 +335,11 @@ export const updateBooking = async (docID, updates) => {
   // still need to be able to mark a car picked up/returned even if the
   // Firestore session link is temporarily unavailable.
   if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
+    const bID = bookingID || docID;
+    createAuditLog({
+      action: "update",
+      userID: performedBy,
+    }).catch((err) => console.error("[AuditLog] Pickup log failed:", err.message));
     try {
       const bID = bookingID || docID;
       const session = await getSessionByBookingID(bID);
@@ -359,6 +365,11 @@ export const updateBooking = async (docID, updates) => {
       console.error("[Booking] Failed to activate GPS session:", err.message);
     }
   } else if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+    const bID = bookingID || docID;
+    createAuditLog({
+      action: "update",
+      userID: performedBy,
+    }).catch((err) => console.error("[AuditLog] Return log failed:", err.message));
     try {
       const bID = bookingID || docID;
       const session = await getSessionByBookingID(bID);
@@ -457,7 +468,7 @@ export const updateBooking = async (docID, updates) => {
 // Session stays "active" — only the timestamp changes. See
 // bookingsession.model.js for why this is never auto-filled/backfilled.
 // ─────────────────────────────────────────────
-export const markBookingDroppedOff = async (docID) => {
+export const markBookingDroppedOff = async (docID, performedBy = null) => {
   const bookingRef = db.collection("bookings").doc(docID);
   const bookingDoc = await bookingRef.get();
   if (!bookingDoc.exists) throw new Error("Booking not found.");
@@ -478,6 +489,10 @@ export const markBookingDroppedOff = async (docID) => {
   }
 
   await markCustomerDroppedOff(session.ref.id);
+  createAuditLog({
+    action: "update",
+    userID: performedBy,
+  }).catch((err) => console.error("[AuditLog] Dropoff log failed:", err.message));
   return { id: docID };
 };
 

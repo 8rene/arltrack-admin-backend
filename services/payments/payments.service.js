@@ -41,6 +41,42 @@ const resolveVehicleName = async (carID) => {
   } catch { return "—"; }
 };
 
+// The customer app and the webhook write payment.status in lowercase
+// ("pending", "paid", "failed") while the admin side writes capitalized
+// values ("Approved", "Rejected", ...) and the Refunded status is set by
+// the PayMongo webhook. Everything the admin UI compares against
+// ("Pending", "Approved", "Refunded", ...) expects ONE canonical spelling,
+// so every payment returned by this service goes through this first.
+// "paid" (PayMongo auto-confirmed) is shown as "Approved".
+const CANONICAL_STATUS = {
+  pending:   "Pending",
+  paid:      "Approved",
+  approved:  "Approved",
+  rejected:  "Rejected",
+  cancelled: "Cancelled",
+  canceled:  "Cancelled",
+  failed:    "Failed",
+  refunded:  "Refunded",
+};
+export const normalizePaymentStatus = (raw) => {
+  const key = String(raw || "").trim().toLowerCase();
+  if (!key) return "Pending";
+  return CANONICAL_STATUS[key] || String(raw);
+};
+
+// The only modes staff/drivers can pick when confirming a cash/in-person
+// payment (initial or balance) — matches the dropdown in PaymentStatusModal.
+// Kept as an explicit whitelist rather than trusting whatever string the
+// frontend sends, since this ends up on the books (payment doc + transaction
+// log) and free text there invites "gcash"/"GCash"/"G-Cash" drift.
+export const PAYMENT_METHODS = ["Cash", "GCash", "Bank Transfer"];
+
+const assertValidPaymentMethod = (method) => {
+  if (!PAYMENT_METHODS.includes(method)) {
+    throw new Error(`paymentMethod must be one of: ${PAYMENT_METHODS.join(", ")}.`);
+  }
+};
+
 // Compute amountPaid and balance based on methodOfPayment (the payment type field)
 export const computeAmounts = (payment) => {
   const amount     = Number(payment.amount)     || 0;
@@ -75,6 +111,14 @@ export const computeAmounts = (payment) => {
     // Unrecognized/legacy methodOfPayment string — still treat as an
     // upfront-portion type rather than guessing "Full".
     payType = "Deposit";
+  }
+
+  // A refunded payment (PayMongo refund settled — status set by the customer
+  // side webhook) has nothing left to collect and nothing owed back: the
+  // money already went back to the customer. Without this it fell through
+  // as "unconfirmed" and showed ₱0 paid with the FULL amount as balance.
+  if (status === "refunded") {
+    return { amountPaid: 0, balance: 0, payType, refundDue: 0 };
   }
 
   let amountPaid = 0;
@@ -157,8 +201,9 @@ export const computeAmounts = (payment) => {
 // This lets Car Tracking / My Trips confirm cash on the spot instead of
 // requiring a trip to the Payments page just to click Approve.
 // ─────────────────────────────────────────────
-export const confirmInitialPayment = async (bookingID, confirmedBy) => {
+export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMethod) => {
   if (!bookingID) throw new Error("bookingID is required.");
+  assertValidPaymentMethod(paymentMethod);
 
   const snap = await db.collection("payments")
     .where("bookingID", "==", bookingID)
@@ -173,15 +218,22 @@ export const confirmInitialPayment = async (bookingID, confirmedBy) => {
   if (status === "approved" || status === "paid") {
     throw new Error("This payment is already confirmed.");
   }
-  if (status === "rejected" || status === "cancelled") {
+  if (status === "rejected" || status === "cancelled" || status === "refunded") {
     throw new Error(`Cannot confirm: payment is ${data.status}.`);
   }
 
   await doc.ref.update({
-    status:      "Approved",
-    confirmedBy: confirmedBy || "—",
-    confirmedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt:   admin.firestore.FieldValue.serverTimestamp(),
+    status:        "Approved",
+    // This is the first point the actual mode is ever captured for a
+    // cash/in-person initial payment — previously this field just held
+    // whatever default ("Cash") was set at booking creation, whether or
+    // not that was actually how the customer paid. Overwriting it here is
+    // safe (unlike the balance case below) since this IS the payment the
+    // method describes, not a second one layered on top of an earlier one.
+    paymentMethod,
+    confirmedBy:   confirmedBy || "—",
+    confirmedAt:   admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
   });
 
   createTransactionLog({
@@ -191,9 +243,9 @@ export const confirmInitialPayment = async (bookingID, confirmedBy) => {
     type: "Payment",
     amount: Number(data.amount) || 0,
     status: "Success",
-    paymentMethod: data.paymentMethod || "Cash",
+    paymentMethod,
     referenceNumber: data.referenceNumber || "—",
-    description: `Cash payment confirmed by staff for booking ${bookingID}.`,
+    description: `Cash payment confirmed by staff for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: confirmedBy || "—",
   });
 
@@ -211,8 +263,9 @@ export const confirmInitialPayment = async (bookingID, confirmedBy) => {
 // before a booking can move to "ongoing" — by the time anyone is at
 // pickup, the payment record is guaranteed to already be Approved).
 // ─────────────────────────────────────────────
-export const collectRemainingBalance = async (bookingID, collectedBy) => {
+export const collectRemainingBalance = async (bookingID, collectedBy, paymentMethod) => {
   if (!bookingID) throw new Error("bookingID is required.");
+  assertValidPaymentMethod(paymentMethod);
 
   const snap = await db.collection("payments")
     .where("bookingID", "==", bookingID)
@@ -253,16 +306,16 @@ export const collectRemainingBalance = async (bookingID, collectedBy) => {
     type: "Payment",
     amount: balance,
     status: "Success",
-    // Unlike confirmInitialPayment() above, this flow never actually asks
-    // what method the balance came in (cash at pickup, GCash, etc.) — it's
-    // a one-tap "mark as received" action. Previously this line reused
-    // data.paymentMethod (the ORIGINAL deposit's method), which silently
-    // misreported mixed-method payments (e.g. GCash deposit + cash
-    // balance) as a single method. Stating plainly that it wasn't
-    // recorded is more honest than guessing.
-    paymentMethod: "Not recorded",
+    // Now actually asked at the moment of collection instead of reused
+    // from data.paymentMethod (the ORIGINAL deposit's method) or hardcoded
+    // as "Not recorded" — both of those were wrong for mixed-method cases
+    // (e.g. a GCash deposit followed by a cash balance). This is scoped to
+    // the transaction log entry only; the payment doc's own paymentMethod
+    // field is deliberately left alone here since it still describes the
+    // original deposit, not this separate balance collection.
+    paymentMethod,
     referenceNumber: data.referenceNumber || "—",
-    description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID}.`,
+    description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: collectedBy || "—",
   });
 
@@ -508,8 +561,7 @@ export const getAllPayments = async () => {
     // PayMongo payments — GCash/PayMaya/QRPH — are saved as lowercase "paid"
     // while manual approvals from patchPaymentStatus save "Approved").
     // auto-cancel if booking cancelled
-    let status = payment.status || "Pending";
-    if (status.toLowerCase() === "paid") status = "Approved";
+    let status = normalizePaymentStatus(payment.status);
     if ((booking.status || "").toLowerCase() === "cancelled") {
       status = "Cancelled";
     }
@@ -547,7 +599,18 @@ export const getAllPayments = async () => {
 export const updatePaymentStatus = async (id, status) => {
   const allowed = ["Pending", "Approved", "Rejected", "Cancelled"];
   if (!allowed.includes(status)) throw new Error("Invalid status.");
-  await db.collection("payments").doc(id).update({
+
+  const ref  = db.collection("payments").doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Payment not found.");
+
+  // A refunded payment is final — approving/rejecting it would overwrite the
+  // "Refunded" status the PayMongo webhook set and lose the refund record.
+  if (String(snap.data().status || "").toLowerCase() === "refunded") {
+    throw new Error("This payment has already been refunded, so its status can't be changed.");
+  }
+
+  await ref.update({
     status,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
@@ -570,8 +633,7 @@ export const getPaymentById = async (id) => {
 
   const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
 
-  let status = payment.status || "Pending";
-  if (status.toLowerCase() === "paid") status = "Approved";
+  let status = normalizePaymentStatus(payment.status);
   if ((bookingData.status || "").toLowerCase() === "cancelled") status = "Cancelled";
 
   return {

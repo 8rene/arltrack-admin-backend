@@ -451,18 +451,18 @@ export const driverReturn = async (bookingDocID, driverID) => {
 };
 
 /** Driver receiving cash/in-person payment of the remaining balance — same collectRemainingBalance() staff use on the Payments page, just ownership-checked to the driver's own trip first. */
-export const driverCollectBalance = async (bookingDocID, driverID) => {
+export const driverCollectBalance = async (bookingDocID, driverID, paymentMethod) => {
   const booking = await assertOwnsBooking(bookingDocID, driverID);
   const bID = booking.bookingID || bookingDocID;
-  await collectRemainingBalance(bID, driverID);
+  await collectRemainingBalance(bID, driverID, paymentMethod);
   return { id: bookingDocID };
 };
 
 /** Driver confirming cash/in-person receipt of the initial payment — same confirmInitialPayment() staff use on the Payments page, just ownership-checked to the driver's own trip first. Lets a driver confirm cash right at pickup without needing Payments page access. */
-export const driverConfirmPayment = async (bookingDocID, driverID) => {
+export const driverConfirmPayment = async (bookingDocID, driverID, paymentMethod) => {
   const booking = await assertOwnsBooking(bookingDocID, driverID);
   const bID = booking.bookingID || bookingDocID;
-  await confirmInitialPayment(bID, driverID);
+  await confirmInitialPayment(bID, driverID, paymentMethod);
   return { id: bookingDocID };
 };
 

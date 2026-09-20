@@ -15,7 +15,7 @@ export const listBookings = async (req, res) => {
 export const editBooking = async (req, res) => {
   try {
     const { id } = req.params;
-    await updateBooking(id, req.body);
+    await updateBooking(id, req.body, req.user?.email || req.user?.uid || null);
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("[BOOKINGS] edit error:", error);
@@ -51,7 +51,7 @@ export const rejectCancellation = async (req, res) => {
 export const markDroppedOff = async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await markBookingDroppedOff(id);
+    const result = await markBookingDroppedOff(id, req.user?.email || req.user?.uid || null);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] markDroppedOff error:", error);

@@ -104,7 +104,8 @@ export const myReturn = async (req, res) => {
 
 export const myCollectBalance = async (req, res) => {
   try {
-    const result = await driverCollectBalance(req.params.id, req.user.uid);
+    const { paymentMethod } = req.body;
+    const result = await driverCollectBalance(req.params.id, req.user.uid, paymentMethod);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[DRIVER DISPATCH] my-collect-balance error:", error);
@@ -114,7 +115,8 @@ export const myCollectBalance = async (req, res) => {
 
 export const myConfirmPayment = async (req, res) => {
   try {
-    const result = await driverConfirmPayment(req.params.id, req.user.uid);
+    const { paymentMethod } = req.body;
+    const result = await driverConfirmPayment(req.params.id, req.user.uid, paymentMethod);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[DRIVER DISPATCH] my-confirm-payment error:", error);
