@@ -6,7 +6,6 @@ import { getSessionByBookingID } from "../../services/booking/bookingSession.ser
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
-import { getInventorySummaryByBooking, hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../vehicleDocumentation/vehicleDocumentation.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -49,7 +48,7 @@ const resolveVehicleName = async (carID) => {
 // use, so the driver's My Trips payment modal matches the admin side
 // exactly instead of being derived a third, different way (or not at all,
 // which is what was happening here before).
-const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentMethod: "—", discountAmount: 0, refundDue: 0, refundIssued: false };
+const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0, refundDue: 0, refundIssued: false };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT;
   try {
@@ -64,10 +63,6 @@ const resolvePaymentInfo = async (bookingID) => {
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
     return {
       totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus,
-      // The actual mode of payment — either what confirmInitialPayment()
-      // captured for a cash/in-person payment, or the original gateway
-      // for an online one. "—" only for a payment never confirmed yet.
-      paymentMethod: data.paymentMethod || "—",
       discountAmount: Number(data.discountAmount) || 0,
       refundDue, refundIssued: !!data.refundIssued,
     };
@@ -93,6 +88,44 @@ const resolveUserInfo = async (userID) => {
 // completed/cancelled/cancellation_request/stolen bookings are excluded
 // entirely: nothing to dispatch, nothing to keep assigned.
 const DISPATCHABLE_STATUSES = ["upcoming", "ongoing"];
+
+// ─────────────────────────────────────────────
+// Driver's-license status — used to WARN when assigning a driver, not to
+// block or lock anyone. (Auto-locking an expired driver also locked them out
+// of the very page they need to upload a renewed license, so expiry is now
+// surfaced here + on the dashboard + in the bell instead.)
+// ─────────────────────────────────────────────
+const LICENSE_WARNING_DAYS = 14; // same threshold as the dashboard + nightly job
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const fmtDay = (d) =>
+  d.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" });
+
+// Exact-moment rule (same as the nightly job): expired the instant it passes.
+const licenseStatusOf = (expiry, now = Date.now()) => {
+  if (!expiry) return { status: "none", daysLeft: null };
+  const msLeft = expiry.getTime() - now;
+  const daysLeft = Math.ceil(msLeft / DAY_MS);
+  if (msLeft < 0) return { status: "expired", daysLeft };
+  return { status: daysLeft <= LICENSE_WARNING_DAYS ? "expiring" : "ok", daysLeft };
+};
+
+// userID -> current license expiry (Date). A person can have more than one
+// userDocument record (old data, re-uploads), so the LATEST expiry wins.
+const resolveLicenseExpiries = async (userIDs) => {
+  const map = new Map();
+  for (let i = 0; i < userIDs.length; i += 30) { // Firestore "in" allows 30 values
+    const snap = await db.collection("userDocument").where("userID", "in", userIDs.slice(i, i + 30)).get();
+    snap.forEach((doc) => {
+      const data = doc.data();
+      const expiry = toJSDate(data.driverLicenseExpiry);
+      if (!expiry) return;
+      const prev = map.get(data.userID);
+      if (!prev || expiry > prev) map.set(data.userID, expiry);
+    });
+  }
+  return map;
+};
 
 // ─────────────────────────────────────────────
 // GET the full dispatch board: every active Driver, their current
@@ -149,8 +182,12 @@ export const getDispatchBoard = async () => {
   const unassigned = shapedBookings.filter((b) => !b.driverID && b.status === "upcoming");
   const missingWhileOngoing = shapedBookings.filter((b) => !b.driverID && b.status === "ongoing");
 
+  const licenseMap = await resolveLicenseExpiries(driverSnap.docs.map((d) => d.id));
+
   const drivers = driverSnap.docs.map((d) => {
     const data = d.data();
+    const licenseExpiry = licenseMap.get(d.id) || null;
+    const lic = licenseStatusOf(licenseExpiry);
     const assignments = shapedBookings
       .filter((b) => b.driverID === d.id)
       .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
@@ -159,6 +196,11 @@ export const getDispatchBoard = async () => {
       name:      [data.firstName, data.lastName].filter(Boolean).join(" ").trim() || data.username || data.email || "—",
       phone:     data.phone || "—",
       status:    data.status || "Active", // matches Users.jsx directory convention
+      license: {
+        status:   lic.status, // "expired" | "expiring" | "ok" | "none"
+        daysLeft: lic.daysLeft,
+        expiry:   licenseExpiry ? licenseExpiry.toISOString() : null,
+      },
       assignments,
     };
   });
@@ -224,18 +266,30 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
   const driverRoleID = await resolveRoleID(ROLES.DRIVER);
   if (driverDoc.data().roleID !== driverRoleID) throw new Error("Selected user is not a Driver.");
 
-  if (!force) {
-    const conflict = await findDriverConflict(driverID, booking.startDateTime, booking.endDateTime, bookingDocID);
+  // Warnings the caller can override with force=true — never a hard block:
+  //   • the driver's license is already expired
+  //   • the driver already has an overlapping trip
+  // Reported together so one "Assign Anyway" click is an informed decision
+  // about everything, not just the first thing that was found.
+  const licenseExpiry  = (await resolveLicenseExpiries([driverID])).get(driverID) || null;
+  const licenseExpired = licenseStatusOf(licenseExpiry).status === "expired";
+  const conflict = await findDriverConflict(driverID, booking.startDateTime, booking.endDateTime, bookingDocID);
+
+  if ((licenseExpired || conflict) && !force) {
+    const parts = [];
+    if (licenseExpired) parts.push(`This driver's license expired on ${fmtDay(licenseExpiry)}.`);
     if (conflict) {
-      const err = new Error(
+      parts.push(
         `This driver is already assigned to booking ${conflict.bookingID} ` +
         `from ${fmtDate(conflict.startDateTime)} to ${fmtDate(conflict.endDateTime)}, ` +
         `which overlaps this trip.`
       );
-      err.conflict = true;
-      err.conflictBooking = conflict;
-      throw err;
     }
+    const err = new Error(parts.join(" "));
+    err.conflict = true; // the frontend already turns this into a warning + "Assign Anyway"
+    err.conflictBooking = conflict || null;
+    err.licenseExpired = licenseExpired;
+    throw err;
   }
 
   await bookingRef.update({
@@ -264,7 +318,9 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
   createAuditLog({
     action: "update",
     description: `Driver ${driverName} assigned to booking ${booking.bookingID || bookingDocID}` +
-      `${force ? " (override — scheduling conflict)" : ""}.`,
+      `${force && (licenseExpired || conflict)
+        ? ` (override — ${[licenseExpired && "expired license", conflict && "scheduling conflict"].filter(Boolean).join(", ")})`
+        : ""}.`,
     userID: editedBy,
   }).catch((err) => console.error("[AUDIT] driver assign log failed:", err.message));
 
@@ -378,45 +434,27 @@ export const getMyTripHistory = async (driverID) => {
   let bookings = [];
   snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
 
-  const shaped = await shapeTripsForDriver(bookings, { includeInventory: true });
+  const shaped = await shapeTripsForDriver(bookings);
   return shaped.sort((a, b) => (b.startDateTime?.getTime() ?? 0) - (a.startDateTime?.getTime() ?? 0));
 };
 
 // Shared shaping for the two driver-facing lists above — same vehicle/
 // customer resolution as getDispatchBoard, plus each booking's session
 // (for pickupTime/customerDroppedOffAt/returnTime display).
-const shapeTripsForDriver = async (bookings, { includeInventory = false } = {}) => {
+const shapeTripsForDriver = async (bookings) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
   const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
 
-  const [vehicleEntries, userEntries, sessions, paymentEntries, inventoryEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
-    // Before/after condition summary — only fetched for History (My
-    // Trips' active tab has no before/after data worth showing yet on an
-    // upcoming/ongoing trip), keyed by bookingID same as paymentEntries.
-    includeInventory
-      ? Promise.all(bookingIDs.map((id) => getInventorySummaryByBooking(id).then((inv) => [id, inv])))
-      : Promise.resolve([]),
-    // Same beforeDocsComplete/afterDocsComplete readiness checks
-    // booking.service.js already runs for the staff-facing /api/bookings
-    // list — this file never called them at all, so handlePickup/
-    // handleReturn in MyTrips.jsx always read undefined (falsy) here and
-    // detoured to Vehicle Documentation even when the docs were already
-    // done. Needed for every trip, not just History — this is what gates
-    // Pickup/Return on the Active tab.
-    Promise.all(bookingIDs.map((id) => hasCompleteBeforeTripDocs(id).then((v) => [id, v]))),
-    Promise.all(bookingIDs.map((id) => hasCompleteAfterTripDocs(id).then((v) => [id, v]))),
   ]);
-  const vehicleMap    = Object.fromEntries(vehicleEntries);
-  const userMap       = Object.fromEntries(userEntries);
-  const paymentMap    = Object.fromEntries(paymentEntries);
-  const inventoryMap  = Object.fromEntries(inventoryEntries);
-  const beforeDocsMap = Object.fromEntries(beforeDocsEntries);
-  const afterDocsMap  = Object.fromEntries(afterDocsEntries);
+  const vehicleMap = Object.fromEntries(vehicleEntries);
+  const userMap    = Object.fromEntries(userEntries);
+  const paymentMap = Object.fromEntries(paymentEntries);
 
   return bookings
     .map((b, i) => {
@@ -430,10 +468,6 @@ const shapeTripsForDriver = async (bookings, { includeInventory = false } = {}) 
         bookingID:            bID,
         status:               b.status,
         modeOfDriving:        b.modeOfDriving,
-        // When this booking was actually made — distinct from
-        // startDateTime/endDateTime (the trip's own dates). Not shown
-        // anywhere before this addition.
-        bookingCreatedAt:     toJSDate(b.createdAt),
         startDateTime:        toJSDate(b.startDateTime),
         endDateTime:          toJSDate(b.endDateTime),
         location:             b.location || "—",
@@ -448,27 +482,9 @@ const shapeTripsForDriver = async (bookings, { includeInventory = false } = {}) 
         // Null when a session hasn't been created yet / doesn't have coords geocoded.
         pickupLocation:       sessions[i]?.data?.pickupLocation || null,
         dropoffLocation:      sessions[i]?.data?.dropoffLocation || null,
-        // Extra stops selected during booking (customer app), same data
-        // CarTracking's live map already draws for staff — each zone is
-        // { label, lat, lng, radius }. Was fetched into `sessions` already
-        // but never actually put on the trip object, so TripMapModal (the
-        // driver's "Show Map") only ever saw pickup/dropoff, never this.
-        geofenceZones:        sessions[i]?.data?.geofenceZones || [],
-        // Read by MyTrips.jsx's handlePickup/handleReturn to decide
-        // whether to detour to Vehicle Documentation or complete the
-        // action directly — previously always undefined here, so it
-        // always detoured even when the docs were already done.
-        beforeDocsComplete:   beforeDocsMap[bID] ?? false,
-        afterDocsComplete:    afterDocsMap[bID] ?? false,
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },
-        // Read-only before/after condition snapshot — { overallStatus,
-        // damageParts, recordedAt } each, or null. Only populated when
-        // this list was fetched with includeInventory (History tab); left
-        // undefined otherwise rather than doing the extra reads for
-        // active trips, which don't have after-trip data yet anyway.
-        inventory: includeInventory ? (inventoryMap[bID] || { before: null, after: null }) : undefined,
       };
     })
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));

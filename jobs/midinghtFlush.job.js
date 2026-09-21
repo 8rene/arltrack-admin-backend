@@ -26,13 +26,13 @@ import { ROLE_IDS } from "../utils/roles/role.util.js";
 // needed. Scoped to Driver/Supervisor accounts only — customer enforcement
 // is out of scope for now (customer app is owned by another dev).
 //
-// Auto-lock is intentionally one-directional here: an expired license locks
-// the account automatically (no grace period — this is a legal/compliance
-// requirement, not just a UX nicety), but a renewed date does NOT
-// auto-unlock. Un-flipping status back to "active" is left as a manual
-// admin action (Users.jsx's existing status dropdown) so a typo'd expiry
-// date can't both wrongly lock AND wrongly auto-unlock someone with zero
-// human involved either way.
+// NO auto-lock any more. Locking an expired driver also locked them out of
+// the very screen they need to upload a renewed license (a locked account
+// can't log in), so they could never fix it themselves. Instead, an expired
+// license now: (1) notifies staff + the driver in the bell (and email), (2)
+// shows as an Alert on the dashboard, and (3) warns whoever tries to assign
+// that driver to a trip (driverDispatch.service.js — "Assign Anyway" to
+// override). Nothing here changes the account's status.
 const LICENSE_WARNING_DAYS = 14;
 
 const parseExpiry = (val) => {
@@ -79,24 +79,24 @@ const checkLicenseExpiry = async () => {
         .limit(1).get();
       const isNewNotif = existing.empty;
 
-      // Staff fan-out (Owner/Admin/Supervisor) so they know an account got
-      // auto-locked, plus a personal copy to the driver themselves — they
-      // should hear it from their own bell too, not just find out when
-      // their locked account stops them at pickup.
+      // Staff fan-out (Owner/Admin/Supervisor) so they know a license
+      // expired, plus a personal copy to the driver themselves — they should
+      // hear it from their own bell too, not just find out when they're
+      // warned at assignment.
       await Promise.all([
         notifyStaff({
           type: "license_expired",
           refID,
           refCollection: "user",
           title: "Driver's license expired",
-          message: `${toName}'s driver's license expired on ${expiryDateLabel}. Account auto-locked.`,
+          message: `${toName}'s driver's license expired on ${expiryDateLabel}. A warning will show when assigning them to a trip.`,
         }).catch((err) => console.error("[NOTIF] license_expired staff notify failed:", err.message)),
         createNotification({
           type: "license_expired",
           refID,
           refCollection: "user",
           title: "Your driver's license expired",
-          message: `Your driver's license expired on ${expiryDateLabel}. Your account has been locked — contact your admin.`,
+          message: `Your driver's license expired on ${expiryDateLabel}. Please submit an updated license from your profile as soon as possible.`,
           userID: refID,
         }).catch((err) => console.error("[NOTIF] license_expired personal notify failed:", err.message)),
       ]);
@@ -104,11 +104,6 @@ const checkLicenseExpiry = async () => {
       if (isNewNotif && userData.email) {
         await sendLicenseExpiryEmail({ toEmail: userData.email, toName, isExpired: true, expiryDate: expiryDateLabel })
           .catch((err) => console.error("[EMAIL] license_expired send failed:", err.message));
-      }
-
-      if (userData.status !== "locked") {
-        await userRef.update({ status: "locked" })
-          .catch((err) => console.error("[CRON] auto-lock failed for", refID, err.message));
       }
     } else if (isWarning) {
       const existing = await db.collection("notifications")
@@ -131,7 +126,7 @@ const checkLicenseExpiry = async () => {
           refID,
           refCollection: "user",
           title: "Your driver's license is expiring soon",
-          message: `Your driver's license expires in ${daysLeft} day(s) (${expiryDateLabel}). Renew it to avoid your account being auto-locked.`,
+          message: `Your driver's license expires in ${daysLeft} day(s) (${expiryDateLabel}). Please submit an updated license from your profile before it expires.`,
           userID: refID,
         }).catch((err) => console.error("[NOTIF] license_expiring personal notify failed:", err.message)),
       ]);

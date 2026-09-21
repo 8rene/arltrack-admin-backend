@@ -45,8 +45,8 @@ export const sendLicenseExpiryEmail = async ({ toEmail, toName, isExpired, daysL
         ? "Your driver's license has expired"
         : `Your driver's license expires in ${daysLeft} day(s)`,
       message:      isExpired
-        ? `Your driver's license on file expired on ${expiryDate}. Your account has been locked until an updated license is submitted and reviewed.`
-        : `Your driver's license on file expires on ${expiryDate} (${daysLeft} day(s) from now). Please submit an updated license from your profile before it expires to avoid your account being locked.`,
+        ? `Your driver's license on file expired on ${expiryDate}. Please submit an updated license from your profile as soon as possible so an admin can review it.`
+        : `Your driver's license on file expires on ${expiryDate} (${daysLeft} day(s) from now). Please submit an updated license from your profile before it expires.`,
       portal_url:   process.env.APP_URL || "http://localhost:3000",
     },
   };
