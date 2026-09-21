@@ -6,6 +6,7 @@ import { getSessionByBookingID } from "../../services/booking/bookingSession.ser
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+import { getInventorySummaryByBooking } from "../vehicleDocumentation/vehicleDocumentation.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -48,7 +49,7 @@ const resolveVehicleName = async (carID) => {
 // use, so the driver's My Trips payment modal matches the admin side
 // exactly instead of being derived a third, different way (or not at all,
 // which is what was happening here before).
-const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0, refundDue: 0, refundIssued: false };
+const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentMethod: "—", discountAmount: 0, refundDue: 0, refundIssued: false };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT;
   try {
@@ -63,6 +64,10 @@ const resolvePaymentInfo = async (bookingID) => {
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
     return {
       totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus,
+      // The actual mode of payment — either what confirmInitialPayment()
+      // captured for a cash/in-person payment, or the original gateway
+      // for an online one. "—" only for a payment never confirmed yet.
+      paymentMethod: data.paymentMethod || "—",
       discountAmount: Number(data.discountAmount) || 0,
       refundDue, refundIssued: !!data.refundIssued,
     };
@@ -373,27 +378,34 @@ export const getMyTripHistory = async (driverID) => {
   let bookings = [];
   snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
 
-  const shaped = await shapeTripsForDriver(bookings);
+  const shaped = await shapeTripsForDriver(bookings, { includeInventory: true });
   return shaped.sort((a, b) => (b.startDateTime?.getTime() ?? 0) - (a.startDateTime?.getTime() ?? 0));
 };
 
 // Shared shaping for the two driver-facing lists above — same vehicle/
 // customer resolution as getDispatchBoard, plus each booking's session
 // (for pickupTime/customerDroppedOffAt/returnTime display).
-const shapeTripsForDriver = async (bookings) => {
+const shapeTripsForDriver = async (bookings, { includeInventory = false } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
   const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
 
-  const [vehicleEntries, userEntries, sessions, paymentEntries] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries, inventoryEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
+    // Before/after condition summary — only fetched for History (My
+    // Trips' active tab has no before/after data worth showing yet on an
+    // upcoming/ongoing trip), keyed by bookingID same as paymentEntries.
+    includeInventory
+      ? Promise.all(bookingIDs.map((id) => getInventorySummaryByBooking(id).then((inv) => [id, inv])))
+      : Promise.resolve([]),
   ]);
-  const vehicleMap = Object.fromEntries(vehicleEntries);
-  const userMap    = Object.fromEntries(userEntries);
-  const paymentMap = Object.fromEntries(paymentEntries);
+  const vehicleMap   = Object.fromEntries(vehicleEntries);
+  const userMap      = Object.fromEntries(userEntries);
+  const paymentMap   = Object.fromEntries(paymentEntries);
+  const inventoryMap = Object.fromEntries(inventoryEntries);
 
   return bookings
     .map((b, i) => {
@@ -407,6 +419,10 @@ const shapeTripsForDriver = async (bookings) => {
         bookingID:            bID,
         status:               b.status,
         modeOfDriving:        b.modeOfDriving,
+        // When this booking was actually made — distinct from
+        // startDateTime/endDateTime (the trip's own dates). Not shown
+        // anywhere before this addition.
+        bookingCreatedAt:     toJSDate(b.createdAt),
         startDateTime:        toJSDate(b.startDateTime),
         endDateTime:          toJSDate(b.endDateTime),
         location:             b.location || "—",
@@ -424,6 +440,12 @@ const shapeTripsForDriver = async (bookings) => {
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },
+        // Read-only before/after condition snapshot — { overallStatus,
+        // damageParts, recordedAt } each, or null. Only populated when
+        // this list was fetched with includeInventory (History tab); left
+        // undefined otherwise rather than doing the extra reads for
+        // active trips, which don't have after-trip data yet anyway.
+        inventory: includeInventory ? (inventoryMap[bID] || { before: null, after: null }) : undefined,
       };
     })
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
