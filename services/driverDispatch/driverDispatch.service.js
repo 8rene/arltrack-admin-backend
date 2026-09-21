@@ -6,7 +6,7 @@ import { getSessionByBookingID } from "../../services/booking/bookingSession.ser
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
-import { getInventorySummaryByBooking } from "../vehicleDocumentation/vehicleDocumentation.service.js";
+import { getInventorySummaryByBooking, hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../vehicleDocumentation/vehicleDocumentation.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -390,7 +390,7 @@ const shapeTripsForDriver = async (bookings, { includeInventory = false } = {}) 
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
   const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
 
-  const [vehicleEntries, userEntries, sessions, paymentEntries, inventoryEntries] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries, inventoryEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
@@ -401,11 +401,22 @@ const shapeTripsForDriver = async (bookings, { includeInventory = false } = {}) 
     includeInventory
       ? Promise.all(bookingIDs.map((id) => getInventorySummaryByBooking(id).then((inv) => [id, inv])))
       : Promise.resolve([]),
+    // Same beforeDocsComplete/afterDocsComplete readiness checks
+    // booking.service.js already runs for the staff-facing /api/bookings
+    // list — this file never called them at all, so handlePickup/
+    // handleReturn in MyTrips.jsx always read undefined (falsy) here and
+    // detoured to Vehicle Documentation even when the docs were already
+    // done. Needed for every trip, not just History — this is what gates
+    // Pickup/Return on the Active tab.
+    Promise.all(bookingIDs.map((id) => hasCompleteBeforeTripDocs(id).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => hasCompleteAfterTripDocs(id).then((v) => [id, v]))),
   ]);
-  const vehicleMap   = Object.fromEntries(vehicleEntries);
-  const userMap      = Object.fromEntries(userEntries);
-  const paymentMap   = Object.fromEntries(paymentEntries);
-  const inventoryMap = Object.fromEntries(inventoryEntries);
+  const vehicleMap    = Object.fromEntries(vehicleEntries);
+  const userMap       = Object.fromEntries(userEntries);
+  const paymentMap    = Object.fromEntries(paymentEntries);
+  const inventoryMap  = Object.fromEntries(inventoryEntries);
+  const beforeDocsMap = Object.fromEntries(beforeDocsEntries);
+  const afterDocsMap  = Object.fromEntries(afterDocsEntries);
 
   return bookings
     .map((b, i) => {
@@ -437,6 +448,18 @@ const shapeTripsForDriver = async (bookings, { includeInventory = false } = {}) 
         // Null when a session hasn't been created yet / doesn't have coords geocoded.
         pickupLocation:       sessions[i]?.data?.pickupLocation || null,
         dropoffLocation:      sessions[i]?.data?.dropoffLocation || null,
+        // Extra stops selected during booking (customer app), same data
+        // CarTracking's live map already draws for staff — each zone is
+        // { label, lat, lng, radius }. Was fetched into `sessions` already
+        // but never actually put on the trip object, so TripMapModal (the
+        // driver's "Show Map") only ever saw pickup/dropoff, never this.
+        geofenceZones:        sessions[i]?.data?.geofenceZones || [],
+        // Read by MyTrips.jsx's handlePickup/handleReturn to decide
+        // whether to detour to Vehicle Documentation or complete the
+        // action directly — previously always undefined here, so it
+        // always detoured even when the docs were already done.
+        beforeDocsComplete:   beforeDocsMap[bID] ?? false,
+        afterDocsComplete:    afterDocsMap[bID] ?? false,
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },
