@@ -3,6 +3,7 @@ import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
 import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
+import { hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
@@ -418,7 +419,10 @@ export const getMyTrips = async (driverID) => {
   let bookings = [];
   snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
 
-  return shapeTripsForDriver(bookings);
+  // withDocs: MyTrips needs to know whether before/after photos already exist
+  // so Start Pickup / Return doesn't bounce the driver back to Vehicle
+  // Documentation forever. History rows don't need it (skipped there).
+  return shapeTripsForDriver(bookings, { withDocs: true });
 };
 
 /** A driver's past trips — completed/cancelled/stolen — most recent first. Simple, no pagination (per-driver volume is small). */
@@ -441,20 +445,26 @@ export const getMyTripHistory = async (driverID) => {
 // Shared shaping for the two driver-facing lists above — same vehicle/
 // customer resolution as getDispatchBoard, plus each booking's session
 // (for pickupTime/customerDroppedOffAt/returnTime display).
-const shapeTripsForDriver = async (bookings) => {
+const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
   const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
 
-  const [vehicleEntries, userEntries, sessions, paymentEntries] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
+    // Same helpers + same key (bookingID || doc id) as booking.service.js's
+    // getAllBookings, so Car Tracking and My Trips agree on "photos done".
+    Promise.all(bookingIDs.map((id) => (withDocs ? hasCompleteBeforeTripDocs(id) : Promise.resolve(false)).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => (withDocs ? hasCompleteAfterTripDocs(id)  : Promise.resolve(false)).then((v) => [id, v]))),
   ]);
   const vehicleMap = Object.fromEntries(vehicleEntries);
   const userMap    = Object.fromEntries(userEntries);
   const paymentMap = Object.fromEntries(paymentEntries);
+  const beforeDocsMap = Object.fromEntries(beforeDocsEntries);
+  const afterDocsMap  = Object.fromEntries(afterDocsEntries);
 
   return bookings
     .map((b, i) => {
@@ -485,6 +495,9 @@ const shapeTripsForDriver = async (bookings) => {
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },
+        // Photo checklist state — consumed by MyTrips.jsx handlePickup/handleReturn.
+        beforeDocsComplete:   beforeDocsMap[bID] ?? false,
+        afterDocsComplete:    afterDocsMap[bID] ?? false,
       };
     })
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
