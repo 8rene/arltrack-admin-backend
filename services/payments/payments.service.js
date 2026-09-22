@@ -1,9 +1,19 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { notifyStaff, resolveNotification } from "../notification/notification.service.js";
+import { notifyStaff, resolveNotification, createNotification } from "../notification/notification.service.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs } from "./paymentBreakdown.js";
+
+// Customer-facing bell notification — mirrors the helper of the same name
+// in refundRequest.service.js. No-ops quietly if there's no userID on the
+// payment record (shouldn't happen, but this is a side-effect, not the
+// main flow, so it shouldn't be able to fail the discount itself).
+const notifyCustomer = (userID, bookingID, type, title, message) => {
+  if (!userID) return Promise.resolve();
+  return createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID })
+    .catch((err) => console.error(`[PAYMENTS] failed to notify customer (${type}):`, err.message));
+};
 
 // resolve customer name: firstName+lastName (priority), fallback to username
 const resolveCustomerName = async (userID) => {
@@ -475,6 +485,17 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     await resolveNotification("refund_due", bookingID);
   }
 
+  // Customer-facing bell — separate from the staff alert above. A discount
+  // is good news for the customer either way, so this fires regardless of
+  // whether it also created a refund; the wording just adds the refund
+  // line when there is one, without exposing the internal discountReason.
+  await notifyCustomer(
+    existing.userID, bookingID, "discount_applied", "Discount Applied",
+    refundDue > 0
+      ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Since you already paid, ₱${refundDue.toLocaleString()} will be returned to you.`
+      : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}.`
+  );
+
   createTransactionLog({
     bookingID,
     paymentID: existing.paymentID || doc.id,
@@ -591,6 +612,11 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
   });
 
   await resolveNotification("refund_due", bookingID);
+
+  await notifyCustomer(
+    data.userID, bookingID, "refund_completed", "Refund Completed",
+    `Your refund of ₱${refundDue.toLocaleString()} for booking ${bookingID} has been returned.`
+  );
 
   createTransactionLog({
     bookingID,
