@@ -2,6 +2,8 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { notifyStaff, resolveNotification } from "../notification/notification.service.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
+import { auditSafe } from "../auditLogs/auditLogs.service.js";
+import { getPaymentBreakdown, resolvePaymongoIDs } from "./paymentBreakdown.js";
 
 // resolve customer name: firstName+lastName (priority), fallback to username
 const resolveCustomerName = async (userID) => {
@@ -78,116 +80,150 @@ const assertValidPaymentMethod = (method) => {
 };
 
 // Compute amountPaid and balance based on methodOfPayment (the payment type field)
+//
+// The math now lives in ./paymentBreakdown.js — an identical copy of the customer
+// backend's utils/payments/paymentBreakdown.util.js, so BOTH apps always agree on
+// what has been paid. This keeps the exact same return shape and legacy
+// behaviour (status gating, Partial = floor(50%), balanceCollected, staff
+// discount + refundDue), and additionally understands the balance the
+// customer paid ONLINE (balanceStatus: "paid") — which the old version ignored,
+// so a Partial booking fully paid through PayMongo still showed a balance owed,
+// blocked pickup, and invited staff to collect the same money in cash twice.
 export const computeAmounts = (payment) => {
-  const amount     = Number(payment.amount)     || 0;
-  const depositFee = Number(payment.depositFee) || 0;
-  // methodOfPayment = "Full" | "Downpayment" | "Deposit" | "Partial" (the TYPE)
-  // paymentMethod   = "GCash" | "Cash" | "Maya" etc (the GATEWAY)
-  const methodOfPayment = (payment.methodOfPayment || "").toLowerCase();
-  const status = (payment.status || "").toLowerCase();
-  // Nothing counts as received until the gateway/staff actually confirm it —
-  // PayMongo's webhook flips status "pending" -> "paid" the moment its
-  // checkout session clears (see customer-side paymongo.controller.js),
-  // and manual cash goes "pending" -> "Approved" via confirmInitialPayment().
-  // Previously the branches below computed amountPaid off methodOfPayment
-  // alone, with no check on status at all — so e.g. a "Full" GCash payment
-  // still sitting at "pending" (customer hasn't finished checkout, or the
-  // webhook just hasn't landed yet) would show as fully paid with ₱0
-  // balance, and a "Partial" one fell through to a fallback branch that
-  // guessed amountPaid = depositFee regardless of confirmation. Both are
-  // now gated on isConfirmed below.
-  const isConfirmed = status === "paid" || status === "approved";
-
-  let payType = "—";
-  if (methodOfPayment.includes("full")) {
-    payType = "Full";
-  } else if (methodOfPayment.includes("down")) {
-    payType = "Downpayment";
-  } else if (methodOfPayment.includes("partial")) {
-    payType = "Partial";
-  } else if (methodOfPayment.includes("deposit")) {
-    payType = "Deposit";
-  } else {
-    // Unrecognized/legacy methodOfPayment string — still treat as an
-    // upfront-portion type rather than guessing "Full".
-    payType = "Deposit";
-  }
-
-  // A refunded payment (PayMongo refund settled — status set by the customer
-  // side webhook) has nothing left to collect and nothing owed back: the
-  // money already went back to the customer. Without this it fell through
-  // as "unconfirmed" and showed ₱0 paid with the FULL amount as balance.
-  if (status === "refunded") {
-    return { amountPaid: 0, balance: 0, payType, refundDue: 0 };
-  }
-
-  let amountPaid = 0;
-  let balance    = amount;
-
-  if (isConfirmed) {
-    if (payType === "Full") {
-      amountPaid = amount;
-      balance    = 0;
-    } else if (payType === "Downpayment" || payType === "Partial") {
-      // "Partial" is what computePaymentSplit() (customer backend) actually
-      // produces for a half-now booking, and it charges 50% of the grand
-      // total via PayMongo (payNow = Math.floor(total * 0.5)) — NOT the
-      // flat depositFee. This branch used to only catch "Downpayment"
-      // (a type computePaymentSplit never actually sets) and let "Partial"
-      // fall through to the flat-₱1,000 branch below, understating
-      // amountPaid (and overstating balance) for every real partial
-      // booking. Math.floor here matches computePaymentSplit exactly —
-      // Math.round would still disagree by ₱1 on odd totals.
-      amountPaid = Math.floor(amount / 2);
-      balance    = amount - amountPaid;
-    } else {
-      // Deposit / legacy-unrecognized — upfront portion is the flat
-      // deposit fee (see bookings.controller.js: depositFee is always
-      // ₱1,000, regardless of the total).
-      amountPaid = depositFee || 0;
-      balance    = amount - amountPaid;
-    }
-  }
-  // else: still pending — amountPaid stays 0, balance stays the full amount.
-
-  // Staff/driver manually collected the remaining balance in person (cash
-  // at pickup or return) via collectRemainingBalance() below — overrides
-  // whatever the Downpayment/Deposit split above computed. Deliberately
-  // doesn't touch methodOfPayment itself, so reporting still reflects how
-  // the *initial* portion actually came in.
-  if (payment.balanceCollected) {
-    amountPaid = amount;
-    balance    = 0;
-  }
-
-  // Flat-peso discount applied by staff via applyDiscount() below — comes
-  // off whatever's still owed first; if the balance can't absorb all of
-  // it (e.g. the booking's already fully paid, balance already 0), the
-  // rest spills onto amountPaid instead. This keeps amountPaid + balance
-  // always equal to (totalFee - discountAmount), regardless of whether
-  // the discount was applied before or after the customer finished
-  // paying. Drivers see this reflected here (read-only) but can't apply
-  // it themselves — only staff can, via Payments.jsx or Car Tracking.
-  //
-  // That spillover is cash now owed BACK to the customer — refundDue
-  // below surfaces it. Computed fresh here (not trusted from a stored
-  // field) so it can never drift from the actual amount/discount numbers
-  // on the doc; only whether it's been handed back (refundIssued) is
-  // persisted, by markRefundIssued().
-  const discountAmount = Number(payment.discountAmount) || 0;
-  let refundDue = 0;
-  if (discountAmount > 0) {
-    if (balance >= discountAmount) {
-      balance -= discountAmount;
-    } else {
-      const spillover = discountAmount - balance;
-      balance = 0;
-      amountPaid = Math.max(0, amountPaid - spillover);
-      refundDue = payment.refundIssued ? 0 : spillover;
-    }
-  }
-
+  const { amountPaid, balance, payType, refundDue } = getPaymentBreakdown(payment);
   return { amountPaid, balance, payType, refundDue };
+};
+
+// Same lookup the rest of the file needs in several places: is there a refund
+// request in flight for this payment? (Pending = awaiting review, Approved =
+// PayMongo/cash return still being completed.)
+const OPEN_REFUND_STATUSES = ["Pending", "Approved"];
+const findOpenRefundRequest = async (paymentID) => {
+  if (!paymentID) return null;
+  const snap = await db.collection("refundRequests")
+    .where("paymentID", "==", paymentID)
+    .where("status", "in", OPEN_REFUND_STATUSES)
+    .limit(1)
+    .get();
+  return snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+};
+
+// The label staff see. DERIVED at read time from what's on the doc — stored
+// values are untouched, so no data migration is needed and nothing that still
+// compares against the raw status strings breaks. "Approved" is gone from what
+// staff see: it just meant "paid" (PayMongo) or "confirmed by staff" (cash).
+//
+//   Pending    nothing received yet
+//   Partial    deposit received, balance still owed
+//   Completed  fully paid
+//   For Refund a refund request is Pending/Approved for this payment
+//   Refunded   the money went back (wins over Cancelled)
+//   Cancelled  booking/payment cancelled
+//   Failed     failed / rejected
+export const derivePaymentStage = (payment, { bookingStatus = "", hasOpenRefund = false } = {}) => {
+  const status = String(payment.status || "").toLowerCase();
+  if (status === "refunded") return "Refunded";
+  if (hasOpenRefund) return "For Refund";
+  if (String(bookingStatus).toLowerCase() === "cancelled" || status === "cancelled" || status === "canceled") return "Cancelled";
+  if (status === "failed" || status === "rejected") return "Failed";
+  const confirmed = status === "paid" || status === "approved" || !!payment.balanceCollected;
+  if (!confirmed) return "Pending";
+  const { balance } = getPaymentBreakdown(payment);
+  return balance > 0 ? "Partial" : "Completed";
+};
+
+const isoOf = (t) => (t?.toDate ? t.toDate().toISOString() : t instanceof Date ? t.toISOString() : null);
+
+// One place that shapes a payment for the admin UI (used by list + detail).
+const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund) => {
+  const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
+  const bookingStatus = (booking.status || "").toLowerCase();
+
+  // Raw-status field the older screens still compare against. A cancelled
+  // booking shows "Cancelled" — EXCEPT a payment that was actually refunded,
+  // which must stay "Refunded" (it used to be overwritten by "Cancelled",
+  // hiding the fact that the money had been returned).
+  let status = normalizePaymentStatus(payment.status);
+  if (bookingStatus === "cancelled" && status !== "Refunded") status = "Cancelled";
+
+  const paymongoIDs = resolvePaymongoIDs(payment);
+  const paymentStage = derivePaymentStage(payment, { bookingStatus, hasOpenRefund: !!openRefund });
+
+  return {
+    id: payment.id,
+    paymentID: payment.paymentID || payment.id,
+    bookingID: payment.bookingID || "—",
+    customerName,
+    vehicleName,
+    totalFee: Number(payment.amount) || 0,
+    amountPaid,
+    balance,
+    payType,
+    discountAmount: Number(payment.discountAmount) || 0,
+    discountReason: payment.discountReason || "",
+    refundDue: refundDue,
+    refundIssued: !!payment.refundIssued,
+    methodOfPayment: payment.methodOfPayment || "—",
+    paymentMethod: payment.paymentMethod || "—",
+    referenceNumber: payment.referenceNumber || "—",
+    paymongoPaymentID: payment.paymongoPaymentID || null,
+    status,
+    paymentStage,
+    // Cancelled but the customer's money is still held (e.g. auto-cancelled with
+    // a paid deposit and no refund opened): staff need to see that.
+    heldAfterCancel: bookingStatus === "cancelled" && amountPaid > 0 && String(payment.status || "").toLowerCase() !== "refunded" && !openRefund,
+    proofUrl: payment.proofUrl || "",
+    depositFee: Number(payment.depositFee) || 0,
+    rentalFee: Number(payment.rentalFee) || 0,
+    extraFee: Number(payment.extraFee) || 0,
+    serviceFee: Number(payment.serviceFee) || 0,
+
+    // ── how it was actually paid (previously stored but never shown) ──
+    paymongoChannel: payment.paymongoChannel || null,       // gcash | paymaya | qrph
+    depositPaymongoPaymentID: paymongoIDs.deposit,
+    balancePaymongoPaymentID: paymongoIDs.balance,
+    paidAt: isoOf(payment.paidAt),
+    confirmedBy: payment.confirmedBy || null,                // staff who confirmed a cash deposit
+    confirmedAt: isoOf(payment.confirmedAt),
+    balanceStatus: payment.balanceStatus || null,            // paid = settled online through PayMongo
+    balanceAmount: Number(payment.balanceAmount) || 0,
+    balanceCollected: !!payment.balanceCollected,            // staff collected it in person
+    balanceMethod: payment.balanceMethod || null,            // Cash | GCash | Bank Transfer
+    balanceCollectedBy: payment.balanceCollectedBy || null,
+    balanceCollectedAt: isoOf(payment.balanceCollectedAt),
+    balancePaidAt: isoOf(payment.balancePaidAt),
+
+    // ── refund in flight (if any) ──
+    refundRequestID: openRefund ? openRefund.id : null,
+    refundRequestStatus: openRefund ? openRefund.status : null,
+
+    createdAt: isoOf(payment.createdAt),
+    updatedAt: isoOf(payment.updatedAt),
+  };
+};
+
+// Moves a booking from "to pay" to "upcoming" (and mirrors it onto its
+// bookingSession). No-op for any other status. Returns true if it promoted.
+const promoteBookingIfToPay = async (bookingID) => {
+  try {
+    let bookingRef = db.collection("bookings").doc(bookingID);
+    let bookingSnap = await bookingRef.get();
+    if (!bookingSnap.exists) {
+      const q = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+      if (q.empty) return false;
+      bookingRef = q.docs[0].ref; bookingSnap = q.docs[0];
+    }
+    if (bookingSnap.data().status !== "to pay") return false;
+    await bookingRef.update({ status: "upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    const sessionSnap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
+    if (!sessionSnap.empty && sessionSnap.docs[0].data().status === "to pay") {
+      await sessionSnap.docs[0].ref.update({ status: "upcoming", updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    }
+    return true;
+  } catch (err) {
+    console.error("promoteBookingIfToPay failed:", err.message);
+    return false;
+  }
 };
 
 // ─────────────────────────────────────────────
@@ -222,6 +258,11 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     throw new Error(`Cannot confirm: payment is ${data.status}.`);
   }
 
+  // What staff actually received now — the deposit portion, NOT the grand total.
+  // (It used to log data.amount, so a Partial booking put ₱5,000 in the ledger
+  // for ₱2,500 received, and the later balance entry then counted the rest again.)
+  const depositReceived = getPaymentBreakdown({ ...data, status: "paid" }).depositCollected;
+
   await doc.ref.update({
     status:        "Approved",
     // This is the first point the actual mode is ever captured for a
@@ -241,12 +282,26 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     paymentID: data.paymentID || doc.id,
     userID: data.userID || null,
     type: "Payment",
-    amount: Number(data.amount) || 0,
+    amount: depositReceived,
     status: "Success",
     paymentMethod,
     referenceNumber: data.referenceNumber || "—",
-    description: `Cash payment confirmed by staff for booking ${bookingID} via ${paymentMethod}.`,
+    description: `Cash payment of ₱${depositReceived.toLocaleString()} confirmed by staff for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: confirmedBy || "—",
+    logID: `${data.paymentID || doc.id}_deposit`, // same key the customer app uses → never logged twice
+  });
+
+  // Bookings now start at "to pay". A staff-confirmed cash deposit is the other
+  // way (besides PayMongo) that a booking becomes real, so promote it here too —
+  // otherwise it would sit at "to pay" and be auto-cancelled with the money in hand.
+  const promoted = await promoteBookingIfToPay(bookingID);
+
+  auditSafe({
+    action: "update",
+    description: `Payment for booking ${bookingID} confirmed by staff as received (₱${depositReceived.toLocaleString()} via ${paymentMethod})${promoted ? "; booking moved from to pay to upcoming" : ""}.`,
+    userID: confirmedBy || null,
+    bookingID,
+    paymentID: data.paymentID || doc.id,
   });
 
   return { id: doc.id, bookingID };
@@ -286,6 +341,16 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
   if (data.balanceCollected) {
     throw new Error("This booking is already marked fully paid.");
   }
+  // The customer can also pay the balance online (Pay Balance). If they did,
+  // collecting it again in cash would take the same money twice.
+  if (String(data.balanceStatus || "").toLowerCase() === "paid") {
+    throw new Error("The customer already paid the balance online — there is nothing left to collect.");
+  }
+  // Don't take more money on a payment that's mid-refund.
+  const openRefund = await findOpenRefundRequest(data.paymentID || doc.id);
+  if (openRefund) {
+    throw new Error(`A refund request (${openRefund.status}) is open for this booking — resolve it before collecting the balance.`);
+  }
 
   const { balance } = computeAmounts(data);
   if (balance <= 0) {
@@ -294,6 +359,11 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
 
   await doc.ref.update({
     balanceCollected:   true,
+    // How it was paid + how much — previously only in the transaction log, so the
+    // Payments page couldn't show it and a later refund couldn't know which part
+    // was cash that PayMongo can't return.
+    balanceMethod:          paymentMethod,
+    balanceCollectedAmount: balance,
     balanceCollectedAt: admin.firestore.FieldValue.serverTimestamp(),
     balanceCollectedBy: collectedBy || "—",
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
@@ -317,6 +387,15 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     referenceNumber: data.referenceNumber || "—",
     description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: collectedBy || "—",
+    logID: `${data.paymentID || doc.id}_balance`,
+  });
+
+  auditSafe({
+    action: "update",
+    description: `Remaining balance of ₱${balance.toLocaleString()} collected in person via ${paymentMethod} for booking ${bookingID}.`,
+    userID: collectedBy || null,
+    bookingID,
+    paymentID: data.paymentID || doc.id,
   });
 
   return { id: doc.id, bookingID };
@@ -407,6 +486,14 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
       ? `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}: ${reason}`
       : `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}.`,
     performedBy: appliedBy || "—",
+  });
+
+  auditSafe({
+    action: "update",
+    description: `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}${reason ? ` (${reason})` : ""}${refundDue > 0 ? `; ₱${refundDue.toLocaleString()} now owed back to the customer` : ""}.`,
+    userID: appliedBy || null,
+    bookingID,
+    paymentID: existing.paymentID || doc.id,
   });
 
   return { id: doc.id, bookingID, discountAmount, refundDue };
@@ -516,6 +603,14 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
     performedBy: issuedBy || "—",
   });
 
+  auditSafe({
+    action: "update",
+    description: `Discount-spillover refund of ₱${refundDue.toLocaleString()} marked as handed back to the customer for booking ${bookingID}.`,
+    userID: issuedBy || null,
+    bookingID,
+    paymentID: data.paymentID || doc.id,
+  });
+
   return { id: doc.id, bookingID };
 };
 
@@ -551,68 +646,50 @@ export const getAllPayments = async () => {
     nameMap[id] = await resolveCustomerName(id);
   }));
 
+  // One query for every refund currently in flight → a Set-like map keyed by paymentID.
+  const openRefundSnap = await db.collection("refundRequests").where("status", "in", OPEN_REFUND_STATUSES).get();
+  const openRefundByPayment = {};
+  openRefundSnap.docs.forEach((d) => { openRefundByPayment[d.data().paymentID] = { id: d.id, ...d.data() }; });
+
   return docs.map((payment) => {
     const booking = bookingMap[payment.bookingID] || {};
     const vehicleName = vehicleMap[booking.carID] || "—";
     const customerName = nameMap[booking.userID] || "—";
-    const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
-
-    // Normalize status: Paid → Approved (case-insensitive, since automated
-    // PayMongo payments — GCash/PayMaya/QRPH — are saved as lowercase "paid"
-    // while manual approvals from patchPaymentStatus save "Approved").
-    // auto-cancel if booking cancelled
-    let status = normalizePaymentStatus(payment.status);
-    if ((booking.status || "").toLowerCase() === "cancelled") {
-      status = "Cancelled";
-    }
-
-    return {
-      id: payment.id,
-      paymentID: payment.paymentID || payment.id,
-      bookingID: payment.bookingID || "—",
-      customerName,
-      vehicleName,
-      totalFee: Number(payment.amount) || 0,
-      amountPaid,
-      balance,
-      payType,
-      discountAmount: Number(payment.discountAmount) || 0,
-      discountReason: payment.discountReason || "",
-      refundDue: refundDue,
-      refundIssued: !!payment.refundIssued,
-      methodOfPayment: payment.methodOfPayment || "—",
-      paymentMethod: payment.paymentMethod || "—",
-      referenceNumber: payment.referenceNumber || "—",
-      paymongoPaymentID: payment.paymongoPaymentID || null,
-      status,
-      proofUrl: payment.proofUrl || "",
-      depositFee: Number(payment.depositFee) || 0,
-      rentalFee: Number(payment.rentalFee) || 0,
-      extraFee: Number(payment.extraFee) || 0,
-      serviceFee: Number(payment.serviceFee) || 0,
-      createdAt: payment.createdAt?.toDate ? payment.createdAt.toDate().toISOString() : null,
-      updatedAt: payment.updatedAt?.toDate ? payment.updatedAt.toDate().toISOString() : null,
-    };
+    return buildPaymentRow(payment, booking, customerName, vehicleName, openRefundByPayment[payment.paymentID || payment.id] || null);
   });
 };
 
-export const updatePaymentStatus = async (id, status) => {
+export const updatePaymentStatus = async (id, status, performedBy = null) => {
   const allowed = ["Pending", "Approved", "Rejected", "Cancelled"];
   if (!allowed.includes(status)) throw new Error("Invalid status.");
 
   const ref  = db.collection("payments").doc(id);
   const snap = await ref.get();
   if (!snap.exists) throw new Error("Payment not found.");
+  const existing = snap.data();
 
   // A refunded payment is final — approving/rejecting it would overwrite the
   // "Refunded" status the PayMongo webhook set and lose the refund record.
-  if (String(snap.data().status || "").toLowerCase() === "refunded") {
+  if (String(existing.status || "").toLowerCase() === "refunded") {
     throw new Error("This payment has already been refunded, so its status can't be changed.");
   }
 
   await ref.update({
     status,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  // Manually approving a payment means staff have the money. Bookings now start at
+  // "to pay", so without this the booking would stay there and be auto-cancelled
+  // by the customer app's 12-hour sweep even though staff had approved the payment.
+  const promoted = status === "Approved" ? await promoteBookingIfToPay(existing.bookingID) : false;
+
+  auditSafe({
+    action: "update",
+    description: `Payment ${existing.paymentID || id} manually set from "${existing.status || "—"}" to "${status}"${promoted ? "; booking moved from to pay to upcoming" : ""}.`,
+    userID: performedBy,
+    bookingID: existing.bookingID || null,
+    paymentID: existing.paymentID || id,
   });
 };
 
@@ -631,37 +708,6 @@ export const getPaymentById = async (id) => {
     resolveVehicleName(bookingData.carID),
   ]);
 
-  const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
-
-  let status = normalizePaymentStatus(payment.status);
-  if ((bookingData.status || "").toLowerCase() === "cancelled") status = "Cancelled";
-
-  return {
-    id: payment.id,
-    paymentID: payment.paymentID || payment.id,
-    bookingID: payment.bookingID || "—",
-    customerName,
-    vehicleName,
-    totalFee: Number(payment.amount) || 0,
-    amountPaid,
-    balance,
-    payType,
-    discountAmount: Number(payment.discountAmount) || 0,
-    discountReason: payment.discountReason || "",
-    refundDue: refundDue,
-    refundIssued: !!payment.refundIssued,
-    methodOfPayment: payment.methodOfPayment || "—",
-    paymentMethod: payment.paymentMethod || "—",
-    referenceNumber: payment.referenceNumber || "—",
-    paymongoPaymentID: payment.paymongoPaymentID || null,
-    status,
-    proofUrl: payment.proofUrl || "",
-    depositFee: Number(payment.depositFee) || 0,
-    rentalFee: Number(payment.rentalFee) || 0,
-    extraFee: Number(payment.extraFee) || 0,
-    serviceFee: Number(payment.serviceFee) || 0,
-    createdAt: payment.createdAt?.toDate ? payment.createdAt.toDate().toISOString() : null,
-    updatedAt: payment.updatedAt?.toDate ? payment.updatedAt.toDate().toISOString() : null,
-
-  };
+  const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
+  return buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund);
 };

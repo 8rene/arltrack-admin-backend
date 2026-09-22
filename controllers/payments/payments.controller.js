@@ -34,7 +34,7 @@ export const patchPaymentStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-    await updatePaymentStatus(id, status);
+    await updatePaymentStatus(id, status, req.user?.email || req.user?.uid || null);
     return res.status(200).json({ success: true, message: "Status updated." });
   } catch (error) {
     console.error("[PAYMENTS] patch error:", error);

@@ -10,7 +10,7 @@ const VALID_ACTIONS = ["create", "update", "delete", "export", "auth", "system"]
 // anything in the backend should go through to log an action — previously
 // nothing in the codebase actually wrote here, so getAllAuditLogs() always
 // returned an empty list.
-export const createAuditLog = async ({ action, description, userID = null }) => {
+export const createAuditLog = async ({ action, description, userID = null, bookingID = null, paymentID = null, refundRequestID = null }) => {
   if (!VALID_ACTIONS.includes(action)) {
     throw new Error(`Invalid action. Must be one of: ${VALID_ACTIONS.join(", ")}`);
   }
@@ -22,11 +22,21 @@ export const createAuditLog = async ({ action, description, userID = null }) => 
     action,
     description,
     userID, // uid of the staff member who performed the action (nullable)
+    // Optional links to the thing the entry is about, so it can be filtered /
+    // followed instead of being free text only. The Audit Logs page ignores them.
+    ...(bookingID       ? { bookingID }       : {}),
+    ...(paymentID       ? { paymentID }       : {}),
+    ...(refundRequestID ? { refundRequestID } : {}),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
   return { id: ref.id, auditLogsID: ref.id, action, description, userID };
 };
+
+// Fire-and-forget version for call sites that must never fail (or be delayed by)
+// the real action they are describing. Same convention as createTransactionLog().
+export const auditSafe = (payload) =>
+  createAuditLog(payload).catch((err) => console.error("[AuditLog] write failed:", err.message));
 
 export const getAllAuditLogs = async () => {
   const snapshot = await db

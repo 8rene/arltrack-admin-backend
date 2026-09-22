@@ -36,6 +36,10 @@ export const createTransactionLog = async ({
   performedBy = null,
   refID = null,           // generic FK for non-booking types (e.g. "Expense" -> a carMaintenance doc ID)
   refCollection = null,   // which collection refID points into, e.g. "carMaintenance"
+  // Optional idempotency key: written with create() to a doc of exactly this id,
+  // so a repeat attempt to log the same event is a harmless no-op instead of a
+  // duplicate row. Omit for one-off entries.
+  logID = null,
 }) => {
   try {
     if (!VALID_TYPES.includes(type)) {
@@ -47,8 +51,8 @@ export const createTransactionLog = async ({
       return null;
     }
 
-    const ref = db.collection("transactionLogs").doc();
-    await ref.set({
+    const ref = logID ? db.collection("transactionLogs").doc(logID) : db.collection("transactionLogs").doc();
+    const payload = {
       transactionLogsID: ref.id,
       bookingID: bookingID || null,
       paymentID: paymentID || null,
@@ -64,7 +68,17 @@ export const createTransactionLog = async ({
       description,
       performedBy,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
+    if (logID) {
+      try {
+        await ref.create(payload); // ALREADY_EXISTS (code 6) → this event was already logged
+      } catch (e) {
+        if (e && (e.code === 6 || /already exists/i.test(e.message || ""))) return ref.id;
+        throw e;
+      }
+    } else {
+      await ref.set(payload);
+    }
     return ref.id;
   } catch (err) {
     console.error("createTransactionLog error:", err.message);

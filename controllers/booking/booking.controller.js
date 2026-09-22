@@ -27,7 +27,7 @@ export const editBooking = async (req, res) => {
 export const approveCancellation = async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await approveCancellationRequest(id);
+    const result = await approveCancellationRequest(id, req.user?.userID || req.user?.uid || null);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] approveCancellation error:", error);
@@ -39,7 +39,7 @@ export const rejectCancellation = async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
-    const result = await rejectCancellationRequest(id, reason);
+    const result = await rejectCancellationRequest(id, reason, req.user?.userID || req.user?.uid || null);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] rejectCancellation error:", error);

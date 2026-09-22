@@ -3,9 +3,9 @@ import admin from "firebase-admin";
 import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markCustomerDroppedOff } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
 import { hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
-import { computeAmounts } from "../../services/payments/payments.service.js";
+import { computeAmounts, derivePaymentStage } from "../../services/payments/payments.service.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
-import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -39,7 +39,7 @@ export const resolveVehicleName = async (carID) => {
 // which has b.status handy — see getAllBookings below).
 const EMPTY_PAYMENT_INFO = {
   paymentMethod: "—", totalFee: 0, rentalFee: 0, depositFee: 0, serviceFee: 0, extraFee: 0,
-  amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0,
+  amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentStage: "—", discountAmount: 0,
   refundDue: 0, refundIssued: false,
 };
 const resolvePaymentInfo = async (bookingID) => {
@@ -65,6 +65,10 @@ const resolvePaymentInfo = async (bookingID) => {
       balance,
       payType,
       paymentStatus,
+      // Pending / Partial / Completed / Failed / Refunded — the vocabulary staff
+      // see. getAllBookings layers "Cancelled" and "For Refund" on top (it knows
+      // the booking's status and any open refund request).
+      paymentStage: derivePaymentStage(data),
       discountAmount: Number(data.discountAmount) || 0,
       refundDue,
       refundIssued: !!data.refundIssued,
@@ -161,22 +165,55 @@ export const getAllBookings = async (statusFilter) => {
   const filter = statusFilter?.toLowerCase();
 
   let rows = [];
+  const seen = new Set();
+  const addSnap = (snap) => snap.forEach((doc) => {
+    if (seen.has(doc.id)) return;
+    seen.add(doc.id);
+    rows.push({ id: doc.id, ...doc.data() });
+  });
+
   if (!filter || filter === "all") {
-    const statuses = ["upcoming", "ongoing", "completed", "cancelled", "cancellation_request", "stolen"];
+    // "to pay" = created but the deposit hasn't cleared yet. Shown (read-only, badge
+    // in the UI) so staff can see what's pending and that the car is spoken for.
+    const statuses = ["to pay", "upcoming", "ongoing", "completed", "cancelled", "cancellation_request", "stolen"];
     const snaps = await Promise.all(
-      statuses.map((s) => db.collection("bookings").where("status", "==", s).get())
+      statuses.map((st) => db.collection("bookings").where("status", "==", st).get())
     );
-    snaps.forEach((s) => s.forEach((doc) => rows.push({ id: doc.id, ...doc.data() })));
+    snaps.forEach(addSnap);
+  } else if (filter === "cancellation_request") {
+    // Two shapes exist: the older one (status itself flipped to "cancellation_request")
+    // and the customer app's current one (status stays "ongoing", with
+    // cancellationRequestStatus: "pending" on the booking).
+    const [legacy, current] = await Promise.all([
+      db.collection("bookings").where("status", "==", "cancellation_request").get(),
+      db.collection("bookings").where("cancellationRequestStatus", "==", "pending").get(),
+    ]);
+    addSnap(legacy); addSnap(current);
   } else {
-    const s = await db.collection("bookings").where("status", "==", filter).get();
-    s.forEach((doc) => rows.push({ id: doc.id, ...doc.data() }));
+    addSnap(await db.collection("bookings").where("status", "==", filter).get());
   }
+
+  // A booking with a pending cancellation request is PRESENTED as
+  // "cancellation_request" (the value the Bookings page already knows how to
+  // show and act on) while its real status is kept as actualStatus. Without this
+  // the customer's requests were invisible: the page looked for a status the
+  // customer app no longer sets.
+  rows = rows.map((b) =>
+    b.cancellationRequestStatus === "pending" && (b.status || "").toLowerCase() !== "cancelled"
+      ? { ...b, actualStatus: b.status, status: "cancellation_request" }
+      : b
+  );
+  if (filter && filter !== "all") rows = rows.filter((b) => (b.status || "").toLowerCase() === filter);
 
   rows.sort((a, b) => {
     const ta = a.updatedAt?.toMillis?.() ?? 0;
     const tb = b.updatedAt?.toMillis?.() ?? 0;
     return tb - ta;
   });
+
+  // Bookings that have a refund request in flight → shown as "For Refund".
+  const openRefundSnap = await db.collection("refundRequests").where("status", "in", ["Pending", "Approved"]).get();
+  const bookingsWithOpenRefund = new Set(openRefundSnap.docs.map((d) => d.data().bookingID));
 
   const carIDs         = [...new Set(rows.map((b) => b.carID).filter(Boolean))];
   const bookingIDs     = [...new Set(rows.map((b) => b.bookingID || b.id).filter(Boolean))];
@@ -208,7 +245,15 @@ export const getAllBookings = async (statusFilter) => {
     // A cancelled booking always shows "Cancelled" payment status, matching
     // getAllPayments()'s override — the underlying payment doc's own status
     // (e.g. still "Pending") isn't what matters once the trip itself is off.
-    const paymentStatus = (b.status || "").toLowerCase() === "cancelled" ? "Cancelled" : payInfo.paymentStatus;
+    // …EXCEPT a payment that was actually refunded: that stays "Refunded" (it used
+    // to be hidden behind "Cancelled", losing the fact that the money went back).
+    const isCancelled = (b.status || "").toLowerCase() === "cancelled";
+    const paymentStatus = isCancelled && payInfo.paymentStatus !== "Refunded" ? "Cancelled" : payInfo.paymentStatus;
+    let paymentStage = payInfo.paymentStage;
+    if (paymentStage !== "Refunded") {
+      if (bookingsWithOpenRefund.has(bID)) paymentStage = "For Refund";
+      else if (isCancelled) paymentStage = "Cancelled";
+    }
     return {
       ...b,
       vehicleName:      vehicleMap[b.carID] || "—",
@@ -223,6 +268,7 @@ export const getAllBookings = async (statusFilter) => {
       payType:          payInfo.payType,
       discountAmount:   payInfo.discountAmount,
       paymentStatus,
+      paymentStage,
       customerName:     userMap[b.userID]?.customerName || "—",
       phone:            userMap[b.userID]?.phone || "—",
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
@@ -506,19 +552,24 @@ export const markBookingDroppedOff = async (docID, performedBy = null) => {
 // same pattern as every other direct-write notification in this codebase.
 // ─────────────────────────────────────────────
 
-export const approveCancellationRequest = async (docID) => {
+// True for either shape of a pending cancellation request — see getAllBookings.
+const hasPendingCancellationRequest = (booking) =>
+  booking.cancellationRequestStatus === "pending" || (booking.status || "").toLowerCase() === "cancellation_request";
+
+export const approveCancellationRequest = async (docID, performedBy = null) => {
   const bookingRef = db.collection("bookings").doc(docID);
   const bookingDoc = await bookingRef.get();
   if (!bookingDoc.exists) throw new Error("Booking not found.");
   const booking = bookingDoc.data();
 
-  if (booking.status?.toLowerCase() !== "cancellation_request") {
-    throw new Error(`Cannot approve: booking status is "${booking.status}", not "cancellation_request".`);
+  if (!hasPendingCancellationRequest(booking)) {
+    throw new Error(`Cannot approve: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
   }
 
   const now = new Date();
   await bookingRef.update({
     status: "cancelled",
+    cancellationRequestStatus: "approved",
     statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
     updatedAt: now,
   });
@@ -543,28 +594,38 @@ export const approveCancellationRequest = async (docID) => {
     console.error("[BOOKINGS] approveCancellationRequest: failed to resolve notification:", err.message)
   );
 
+  auditSafe({
+    action: "update",
+    description: `Cancellation request for booking ${booking.bookingID || docID} APPROVED — booking cancelled.`,
+    userID: performedBy,
+    bookingID: booking.bookingID || docID,
+  });
+
   return { id: docID, status: "cancelled" };
 };
 
-export const rejectCancellationRequest = async (docID, rejectReason) => {
+export const rejectCancellationRequest = async (docID, rejectReason, performedBy = null) => {
   const bookingRef = db.collection("bookings").doc(docID);
   const bookingDoc = await bookingRef.get();
   if (!bookingDoc.exists) throw new Error("Booking not found.");
   const booking = bookingDoc.data();
 
-  if (booking.status?.toLowerCase() !== "cancellation_request") {
-    throw new Error(`Cannot reject: booking status is "${booking.status}", not "cancellation_request".`);
+  if (!hasPendingCancellationRequest(booking)) {
+    throw new Error(`Cannot reject: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
   }
 
-  // Revert to whatever the booking was before the request came in — set
-  // by requestCancellation() on the customer-backend side. Falls back to
-  // "ongoing" if that field is somehow missing, since that's the only
-  // status this request path is ever entered from today.
-  const revertTo = booking.statusBeforeCancellationRequest || "ongoing";
+  // Older shape: status itself was flipped, so restore what it was before the
+  // request (falls back to "ongoing", the only status this request is ever
+  // entered from). Current shape: status never changed, nothing to restore.
+  const wasLegacy = (booking.status || "").toLowerCase() === "cancellation_request";
+  const revertTo = wasLegacy ? (booking.statusBeforeCancellationRequest || "ongoing") : booking.status;
 
   const now = new Date();
   await bookingRef.update({
     status: revertTo,
+    // "rejected" (not "pending") — the customer app only blocks a NEW request while
+    // one is "pending", so they can ask again if they need to.
+    cancellationRequestStatus: "rejected",
     statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
     cancellationRejectReason: rejectReason || "",
     updatedAt: now,
@@ -573,6 +634,13 @@ export const rejectCancellationRequest = async (docID, rejectReason) => {
   await resolveNotification("cancellation_request", docID).catch((err) =>
     console.error("[BOOKINGS] rejectCancellationRequest: failed to resolve notification:", err.message)
   );
+
+  auditSafe({
+    action: "update",
+    description: `Cancellation request for booking ${booking.bookingID || docID} REJECTED${rejectReason ? `: ${rejectReason}` : ""}.`,
+    userID: performedBy,
+    bookingID: booking.bookingID || docID,
+  });
 
   return { id: docID, status: revertTo };
 };
