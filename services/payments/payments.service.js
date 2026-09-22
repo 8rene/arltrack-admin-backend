@@ -15,6 +15,32 @@ const notifyCustomer = (userID, bookingID, type, title, message) => {
     .catch((err) => console.error(`[PAYMENTS] failed to notify customer (${type}):`, err.message));
 };
 
+// Single-person bell notification (used for the driver ping below) — same
+// shape as notifyCustomer, kept separate since "driver" isn't "customer"
+// even though the underlying write is identical.
+const notifyPerson = (userID, bookingID, type, title, message) => {
+  if (!userID) return Promise.resolve();
+  return createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID })
+    .catch((err) => console.error(`[PAYMENTS] failed to notify ${userID} (${type}):`, err.message));
+};
+
+// Looks up a booking by its bookingID (not the Firestore doc id) — used by
+// applyDiscount() for the chauffeur/driver checks, and doubles as the
+// fallback source for the customer's userID (see resolveCustomerUserID).
+const findBookingByBookingID = async (bookingID) => {
+  const snap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+  return snap.empty ? null : snap.docs[0].data();
+};
+
+// Resolves the customer's userID for a booking. Payment docs carry their
+// own userID field, but it isn't reliably populated on every record —
+// getAllPayments()/buildPaymentRow() above deliberately resolve
+// customerName from the BOOKING's userID rather than the payment's, for
+// the same reason. Bell notifications need a real userID to land on
+// anyone, so this prefers the payment doc's value (no extra read) and
+// falls back to the already-fetched booking doc if that's missing.
+const resolveCustomerUserID = (paymentUserID, bookingData) => paymentUserID || bookingData?.userID || null;
+
 // resolve customer name: firstName+lastName (priority), fallback to username
 const resolveCustomerName = async (userID) => {
   if (!userID) return "—";
@@ -415,9 +441,11 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
 // Staff applying a flat-peso discount to a booking's payment — e.g. a
 // goodwill deduction at pickup. Flat peso only, deliberately no
 // percentage option (matches how discounts are actually decided in
-// person). Staff-only (Payments.jsx or Car Tracking) — drivers can see
-// the resulting numbers via computeAmounts() above, but never call this
-// themselves; there's no driver-facing route for it.
+// person). Staff-only to CALL (Payments.jsx or Car Tracking) — there's
+// still no driver-facing route to apply one. But the driver IS one of the
+// people notified once it's applied (see notifyPerson(driverID, ...)
+// below), and on a chauffeur booking this blocks entirely until a driver
+// is assigned, since there'd otherwise be nobody in that role to notify.
 // ─────────────────────────────────────────────
 export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   if (!bookingID) throw new Error("bookingID is required.");
@@ -434,6 +462,24 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
 
   const doc = snap.docs[0];
   const existing = doc.data();
+
+  // Need the booking doc for three things below: the chauffeur/driver
+  // gate, the driver notification, and as a fallback source for the
+  // customer's userID (see resolveCustomerUserID).
+  const booking = await findBookingByBookingID(bookingID);
+  const isChauffeur = booking?.modeOfDriving === "With Chauffeur";
+  const driverID = booking?.driverID || null;
+
+  // A chauffeur trip needs a driver on record before a discount can be
+  // applied — the driver is one of the people who gets notified about the
+  // discount below, and there's nobody to notify if none is assigned yet.
+  // Self-drive bookings never have a driver, so this only applies here.
+  if (isChauffeur && !driverID) {
+    throw new Error(
+      "This is a chauffeur booking with no driver assigned yet. " +
+      "Assign a driver first — they need to be notified when a discount is applied."
+    );
+  }
 
   // Once a refund created by this discount has already been physically
   // handed back (refundIssued: true), this route is no longer the right
@@ -464,14 +510,22 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
   });
 
+  // Lightweight bell ping to Owner/Admin/Supervisor for EVERY discount —
+  // separate from the refund_due alert below, which is specifically about
+  // money owed back and stays as its own actionable notification. This one
+  // is just "a discount happened," so staff aren't blind to discounts that
+  // never create a refund.
+  await notifyStaff({
+    type: "discount_applied",
+    refID: bookingID,
+    refCollection: "bookings",
+    title: "Discount Applied",
+    message: `A discount of ₱${discountAmount.toLocaleString()} was applied to booking ${bookingID}${reason ? ` (${reason})` : ""}.`,
+  });
+
   if (refundDue > 0) {
     // Fanned out to Owner/Admin/Supervisor only — no longer a global
-    // userID:null doc. NOTE: this changes prior behavior — the driver
-    // holding the cash used to see this via the old global doc; now they
-    // don't, since notifications are staff-only across the board per the
-    // decision to exclude drivers from the (former) global alert types.
-    // If a driver still needs to be told a refund is owed, that has to
-    // happen outside the bell (staff messaging them directly) for now.
+    // userID:null doc.
     await notifyStaff({
       type: "refund_due",
       refID: bookingID,
@@ -489,17 +543,28 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   // is good news for the customer either way, so this fires regardless of
   // whether it also created a refund; the wording just adds the refund
   // line when there is one, without exposing the internal discountReason.
+  const customerUserID = resolveCustomerUserID(existing.userID, booking);
   await notifyCustomer(
-    existing.userID, bookingID, "discount_applied", "Discount Applied",
+    customerUserID, bookingID, "discount_applied", "Discount Applied",
     refundDue > 0
       ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Since you already paid, ₱${refundDue.toLocaleString()} will be returned to you.`
       : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}.`
   );
 
+  // Driver ping — only chauffeur trips have one, and the gate above
+  // guarantees driverID is set whenever isChauffeur is true, so this
+  // fires every time it's relevant.
+  if (driverID) {
+    await notifyPerson(
+      driverID, bookingID, "discount_applied", "Discount Applied To Your Trip",
+      `A discount of ₱${discountAmount.toLocaleString()} was applied to booking ${bookingID}.`
+    );
+  }
+
   createTransactionLog({
     bookingID,
     paymentID: existing.paymentID || doc.id,
-    userID: existing.userID || null,
+    userID: customerUserID,
     type: "Discount",
     amount: discountAmount,
     status: "Success",
@@ -613,15 +678,17 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
 
   await resolveNotification("refund_due", bookingID);
 
+  const booking = await findBookingByBookingID(bookingID);
+  const customerUserID = resolveCustomerUserID(data.userID, booking);
   await notifyCustomer(
-    data.userID, bookingID, "refund_completed", "Refund Completed",
+    customerUserID, bookingID, "refund_completed", "Refund Completed",
     `Your refund of ₱${refundDue.toLocaleString()} for booking ${bookingID} has been returned.`
   );
 
   createTransactionLog({
     bookingID,
     paymentID: data.paymentID || doc.id,
-    userID: data.userID || null,
+    userID: customerUserID,
     type: "Refund",
     amount: refundDue,
     status: "Refunded",
