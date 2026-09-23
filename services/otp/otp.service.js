@@ -26,7 +26,11 @@ const REQUIRED_ENV_VARS = ["EMAILJS_SERVICE_ID", "EMAILJS_PUBLIC_KEY", "EMAILJS_
 
 
 /**
- * Sends a one-time verification code to an admin/owner's own email.
+ * Sends a one-time verification code, either for the existing "confirm a
+ * sensitive action" flow (role change) or for the pre-login forgot-password
+ * flow — same OTP mechanics, different email copy since the second one is
+ * going to someone who, by definition, isn't logged in right now.
+ *
  * Fire-and-forget shape ({ success, error?, reason? }) — the caller decides
  * what to do if sending fails (the code is already stored either way).
  *
@@ -34,8 +38,9 @@ const REQUIRED_ENV_VARS = ["EMAILJS_SERVICE_ID", "EMAILJS_PUBLIC_KEY", "EMAILJS_
  * @param {string} params.toEmail
  * @param {string} params.toName
  * @param {string} params.otp
+ * @param {"role-change"|"password-reset"} [params.purpose="role-change"]
  */
-export const sendOtpEmail = async ({ toEmail, toName, otp }) => {
+export const sendOtpEmail = async ({ toEmail, toName, otp, purpose = "role-change" }) => {
   // Fail loud and specific instead of letting EmailJS reject an
   // undefined/empty field with a generic error that looks identical to a
   // real network hiccup.
@@ -47,6 +52,7 @@ export const sendOtpEmail = async ({ toEmail, toName, otp }) => {
   }
 
   const displayName = toName || toEmail.split("@")[0];
+  const isPasswordReset = purpose === "password-reset";
   const payload = {
     service_id:  process.env.EMAILJS_SERVICE_ID,
     template_id: process.env.EMAILJS_TEMPLATE_ID,
@@ -59,15 +65,26 @@ export const sendOtpEmail = async ({ toEmail, toName, otp }) => {
       // {{email}}, not {{to_email}} — must match exactly or EmailJS sees
       // an empty recipient.
       email:    toEmail,
-      subject:  "Your ARLTrack admin verification code",
-      body:
-        `Hi ${displayName},\n\n` +
-        `You're requesting to confirm a role change on your ARLTrack admin account.\n\n` +
-        `Your verification code is:\n\n` +
-        `${otp}\n\n` +
-        `This code expires in 5 minutes and can only be used once.\n\n` +
-        `If you did not request this, you can safely ignore this email — no changes will be made without the code.\n\n` +
-        `Best regards,\nArlTrack Admin Team`,
+      subject:  isPasswordReset ? "Reset your ARLTrack admin password" : "Your ARLTrack admin verification code",
+      body: isPasswordReset
+        ? (
+          `Hi ${displayName},\n\n` +
+          `You're requesting to reset the password on your ARLTrack admin account.\n\n` +
+          `Your verification code is:\n\n` +
+          `${otp}\n\n` +
+          `This code expires in 5 minutes and can only be used once.\n\n` +
+          `If you did not request this, you can safely ignore this email — your password will not be changed without the code.\n\n` +
+          `Best regards,\nArlTrack Admin Team`
+        )
+        : (
+          `Hi ${displayName},\n\n` +
+          `You're requesting to confirm a role change on your ARLTrack admin account.\n\n` +
+          `Your verification code is:\n\n` +
+          `${otp}\n\n` +
+          `This code expires in 5 minutes and can only be used once.\n\n` +
+          `If you did not request this, you can safely ignore this email — no changes will be made without the code.\n\n` +
+          `Best regards,\nArlTrack Admin Team`
+        ),
     },
   };
 

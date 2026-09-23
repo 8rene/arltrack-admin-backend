@@ -1,5 +1,6 @@
 import { login, logout } from "../../controllers/auth/auth.controller.js";
 import { sendOTP } from "../../controllers/otp/otp.controller.js";
+import { sendPasswordResetOTP, resetAdminPassword } from "../../controllers/auth/passwordReset.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 
 export const registerAuthRoutes = (app) => {
@@ -15,4 +16,12 @@ export const registerAuthRoutes = (app) => {
   // Used as a confirmation step before sensitive actions like changing a
   // user's role — see PATCH /api/users/:uid/role in user.routes.js.
   app.post("/api/auth/send-otp", verifyToken, sendOTP);
+
+  // Forgot-password flow — deliberately NOT behind verifyToken, since this
+  // is exactly for staff who can't log in at all. Counterpart to
+  // customer-backend's /api/auth/send-otp (purpose: "reset") +
+  // /api/auth/reset-password, which explicitly block staff accounts —
+  // this is where those accounts are meant to reset their password instead.
+  app.post("/api/auth/forgot-password/send-otp", sendPasswordResetOTP);
+  app.post("/api/auth/forgot-password/reset",    resetAdminPassword);
 };
