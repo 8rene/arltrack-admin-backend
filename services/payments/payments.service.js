@@ -463,6 +463,15 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   const doc = snap.docs[0];
   const existing = doc.data();
 
+  // Can't discount more than the booking is actually worth — previously
+  // unbounded, so a discount larger than the total fee would spill past
+  // everything the customer ever paid and create a refundDue for money
+  // that was never collected in the first place.
+  const totalFee = Number(existing.amount) || 0;
+  if (discountAmount > totalFee) {
+    throw new Error(`Discount can't exceed the total fee of ₱${totalFee.toLocaleString()}.`);
+  }
+
   // Need the booking doc for three things below: the chauffeur/driver
   // gate, the driver notification, and as a fallback source for the
   // customer's userID (see resolveCustomerUserID).
@@ -491,6 +500,26 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     throw new Error(
       "This discount's refund has already been marked as returned. " +
       "Only an Admin can correct the recorded amount now, via the discount correction option."
+    );
+  }
+
+  // Payment is already fully refunded — closed out, nothing left to
+  // discount against. Writing a discount here wouldn't change any money
+  // (the math short-circuits to zero) but it would sit on the record
+  // looking like an active discount on a payment that's already settled.
+  if (String(existing.status || "").toLowerCase() === "refunded") {
+    throw new Error("This payment has already been refunded — a discount can't be applied to it.");
+  }
+
+  // A refund request is open (Pending review or Approved but not yet
+  // physically returned). Changing the discount now would silently shift
+  // the numbers computeRefundPlan is using mid-flight, or disagree with
+  // an amount that's already gone out via PayMongo/cash.
+  const openRefundRequest = await findOpenRefundRequest(existing.paymentID || doc.id);
+  if (openRefundRequest) {
+    throw new Error(
+      "A refund request is already open for this payment. " +
+      "Resolve or cancel that refund request before applying a new discount."
     );
   }
 
@@ -623,6 +652,13 @@ export const correctIssuedDiscount = async (bookingID, amount, reason, corrected
     throw new Error(
       "This booking's refund hasn't been marked as returned yet — use the normal discount edit instead."
     );
+  }
+
+  // Same cap as applyDiscount — a correction still can't record a discount
+  // bigger than the booking was ever worth.
+  const totalFee = Number(existing.amount) || 0;
+  if (discountAmount > totalFee) {
+    throw new Error(`Discount can't exceed the total fee of ₱${totalFee.toLocaleString()}.`);
   }
 
   const previousAmount = Number(existing.discountAmount) || 0;
