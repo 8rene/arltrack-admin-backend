@@ -13,8 +13,17 @@ import { ROLE_IDS } from "../../utils/roles/role.util.js";
  * userID is optional — pass null/omit for a type that's still meant to
  * be a single shared doc (e.g. new_user, which every Owner/Admin/
  * Supervisor benefits from seeing and dismissing together).
+ *
+ * extra: optional extra fields stored on the doc (e.g. carID/phase for the
+ * inspection reminders, so the bell can deep-link to the right page).
+ *
+ * renotify: by default an already-active notification is left untouched
+ * (no duplicate, no re-ring). With renotify: true, that existing doc is
+ * instead "bumped" — marked unread again, timestamp refreshed, message
+ * updated — so a repeat of the same event (e.g. a driver tapping Remind
+ * Staff again) rings the bell again without stacking a second copy.
  */
-export const createNotification = async ({ type, refID, refCollection, title, message, userID = null }) => {
+export const createNotification = async ({ type, refID, refCollection, title, message, userID = null, extra = {}, renotify = false }) => {
   const existing = await db.collection("notifications")
     .where("type", "==", type)
     .where("refID", "==", refID)
@@ -23,7 +32,18 @@ export const createNotification = async ({ type, refID, refCollection, title, me
     .limit(1)
     .get();
 
-  if (!existing.empty) return existing.docs[0].id; // already active for this person, don't duplicate
+  if (!existing.empty) {
+    if (renotify) {
+      await existing.docs[0].ref.update({
+        title,
+        message,
+        ...extra,
+        isRead: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+    return existing.docs[0].id; // already active for this person, don't duplicate
+  }
 
   const ref = await db.collection("notifications").add({
     type,
@@ -31,6 +51,7 @@ export const createNotification = async ({ type, refID, refCollection, title, me
     refCollection,
     title,
     message,
+    ...extra,
     userID,
     isRead: false,
     status: "active",
@@ -54,14 +75,14 @@ export const createNotification = async ({ type, refID, refCollection, title, me
  * Reuses createNotification()'s own per-person dedup check — nothing
  * extra to do here, each person's active/inactive state is independent.
  */
-export const notifyStaff = async ({ type, refID, refCollection, title, message }) => {
+export const notifyStaff = async ({ type, refID, refCollection, title, message, extra = {}, renotify = false }) => {
   const staffSnap = await db.collection("user")
     .where("roleID", "in", [ROLE_IDS.OWNER, ROLE_IDS.ADMIN, ROLE_IDS.SUPERVISOR])
     .get();
 
   return Promise.all(
     staffSnap.docs.map((d) =>
-      createNotification({ type, refID, refCollection, title, message, userID: d.id })
+      createNotification({ type, refID, refCollection, title, message, userID: d.id, extra, renotify })
     )
   );
 };
@@ -97,6 +118,32 @@ export const resolveNotification = async (type, refID) => {
   });
   await batch.commit();
   console.log(`[NOTIF] Resolved ${type} for refID ${refID}`);
+};
+
+/**
+ * Same as resolveNotification, but matches on an extra field instead of
+ * refID — for notifications whose refID is a Firestore doc ID while the
+ * caller only has a business key (e.g. the inspection reminders store the
+ * booking's bookingID as `bookingKey` alongside a refID of the booking doc).
+ */
+export const resolveNotificationByField = async (type, field, value) => {
+  const snap = await db.collection("notifications")
+    .where("type", "==", type)
+    .where(field, "==", value)
+    .where("status", "==", "active")
+    .get();
+
+  if (snap.empty) return;
+
+  const batch = db.batch();
+  snap.forEach((doc) => {
+    batch.update(doc.ref, {
+      status: "resolved",
+      resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+  await batch.commit();
+  console.log(`[NOTIF] Resolved ${type} where ${field} = ${value}`);
 };
 
 /** Hard delete — used when the admin manually dismisses a notification (the "×" button). */

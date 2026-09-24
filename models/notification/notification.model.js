@@ -20,7 +20,11 @@ export const Notification = {
   type: "",
   //   "cancellation_request" | "new_user" | "geofence_alert" |
   //   "coding_alert" | "pickup_overdue" | "return_overdue" | "refund_due" |
-  //   "refund_request" | "license_expiring" | "license_expired"
+  //   "refund_request" | "license_expiring" | "license_expired" |
+  //   "inspection_pickup_needed" | "inspection_return_needed"
+  //   (the last two: a driver hit "Remind Staff" — extra fields carID,
+  //   phase and bookingKey are stored alongside, see
+  //   services/inspectionReminders/inspectionReminders.service.js)
 
   userID: "",            // which staff account this specific copy belongs to
   refID: "",              // doc ID of the record this notification is about

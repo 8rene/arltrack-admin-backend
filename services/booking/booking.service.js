@@ -2,7 +2,8 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markCustomerDroppedOff } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
-import { hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { resolveInspectionReminders } from "../../services/inspectionReminders/inspectionReminders.service.js";
 import { computeAmounts, derivePaymentStage } from "../../services/payments/payments.service.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
@@ -226,8 +227,8 @@ export const getAllBookings = async (statusFilter) => {
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(serviceTypeIDs.map((id) => resolveServiceType(id).then((s) => [id, s]))),
     Promise.all(bookingIDs.map((id) => resolveHistoryInfo(id).then((h) => [id, h]))),
-    Promise.all(bookingIDs.map((id) => hasCompleteBeforeTripDocs(id).then((v) => [id, v]))),
-    Promise.all(bookingIDs.map((id) => hasCompleteAfterTripDocs(id).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => getPhaseChecklist(id, "before").then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => getPhaseChecklist(id, "after").then((v) => [id, v]))),
   ]);
 
   const vehicleMap     = Object.fromEntries(vehicleEntries);
@@ -277,8 +278,14 @@ export const getAllBookings = async (statusFilter) => {
       lastArchivedAt:   histInfo.lastArchivedAt,
       pickupTime:           histInfo.pickupTime,
       customerDroppedOffAt: histInfo.customerDroppedOffAt,
-      beforeDocsComplete: beforeDocsMap[bID] ?? false,
-      afterDocsComplete:  afterDocsMap[bID] ?? false,
+      // "Complete" now means photos AND the parts-condition record — see
+      // getPhaseChecklist in vehicleDocumentation.service.js. The
+      // per-half breakdown is included for UIs that want to say which half
+      // is still missing.
+      beforeDocsComplete: beforeDocsMap[bID]?.complete ?? false,
+      afterDocsComplete:  afterDocsMap[bID]?.complete ?? false,
+      beforeInspection:   beforeDocsMap[bID] ?? { photos: false, parts: false, complete: false },
+      afterInspection:    afterDocsMap[bID] ?? { photos: false, parts: false, complete: false },
     };
   });
 };
@@ -340,30 +347,34 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
-  // ── Vehicle documentation validation: cannot mark picked-up/ongoing
-  // without a completed before-trip photo set (front/side/back views) ──
+  // ── Vehicle inspection validation: cannot mark picked-up/ongoing until
+  // the before-trip inspection is complete — the 3 exterior photos AND the
+  // parts-condition record, both entered by staff (drivers can't write
+  // either, see vehicleDocumentation.routes.js). This is the real gate the
+  // driver's Start Pickup goes through; the My Trips button state is just a
+  // convenience mirror of it. ──
   if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
     const bID = bookingID || docID;
-    const docsComplete = await hasCompleteBeforeTripDocs(bID);
-    if (!docsComplete) {
+    const checklist = await getPhaseChecklist(bID, "before");
+    if (!checklist.complete) {
       throw new Error(
-        "Cannot mark picked up: before-trip vehicle documentation is incomplete. " +
-        "Fill in the front, side, and back view photos in Vehicle Documentation first."
+        `Cannot mark picked up: the before-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
+        "A supervisor needs to complete it in Vehicle Inspections first."
       );
     }
   }
 
-  // ── Vehicle documentation validation: cannot mark completed/returned
-  // without a completed after-trip photo set (front/side/back views) ──
-  // Mirrors the before-trip guard above so Return can't skip documentation
-  // the same way Pickup can't.
+  // ── Vehicle inspection validation: cannot mark completed/returned until
+  // the after-trip inspection is complete (photos AND parts condition).
+  // Mirrors the before-trip guard above so Return can't skip the
+  // inspection the same way Pickup can't. ──
   if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
     const bID = bookingID || docID;
-    const docsComplete = await hasCompleteAfterTripDocs(bID);
-    if (!docsComplete) {
+    const checklist = await getPhaseChecklist(bID, "after");
+    if (!checklist.complete) {
       throw new Error(
-        "Cannot mark returned: after-trip vehicle documentation is incomplete. " +
-        "Fill in the front, side, and back view photos in Vehicle Documentation first."
+        `Cannot mark returned: the after-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
+        "A supervisor needs to complete it in Vehicle Inspections first."
       );
     }
   }
@@ -371,6 +382,23 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
   filtered.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
   await db.collection("bookings").doc(docID).update(filtered);
+
+  // The booking has moved on, so any "driver is waiting on the inspection"
+  // reminder for it is stale: pickup clears the pickup one, and once the
+  // trip is completed/cancelled/stolen nothing is left to remind about.
+  // Best-effort — never blocks the status change itself.
+  if (filtered.status && filtered.status !== oldStatus?.toLowerCase()) {
+    const reminderKey = bookingID || docID;
+    const stalePhases =
+      filtered.status === "ongoing" ? ["before"]
+      : ["completed", "cancelled", "stolen"].includes(filtered.status) ? ["before", "after"]
+      : [];
+    if (stalePhases.length) {
+      resolveInspectionReminders(reminderKey, stalePhases).catch((err) =>
+        console.error("[Booking] Failed to resolve inspection reminders:", err.message)
+      );
+    }
+  }
 
   // ── Link booking status transitions to the GPS session lifecycle ──
   // "ongoing" = pickup happened, car is now actually on the trip. This is

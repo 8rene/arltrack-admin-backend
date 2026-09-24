@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myReturn, myCollectBalance, myConfirmPayment, myRefundIssued } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myReturn, myCollectBalance, myConfirmPayment, myRefundIssued, myRemindInspection } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -24,6 +24,10 @@ export const registerDriverDispatchRoutes = (app) => {
   app.patch("/api/driver-dispatch/my-trips/:id/dropoff", verifyToken, requireRole(driverOnly), myDropoff);
   app.patch("/api/driver-dispatch/my-trips/:id/return",  verifyToken, requireRole(driverOnly), myReturn);
   app.patch("/api/driver-dispatch/my-trips/:id/collect-balance", verifyToken, requireRole(driverOnly), myCollectBalance);
+  // Driver is blocked at Pickup/Return because staff haven't finished the
+  // vehicle inspection yet — nudges Owner/Admin/Supervisor via the bell.
+  // Server-side 10-minute cooldown per booking + phase.
+  app.post ("/api/driver-dispatch/my-trips/:id/remind-inspection", verifyToken, requireRole(driverOnly), myRemindInspection);
   // Confirm a cash/in-person initial payment right at pickup — driver
   // never needs Payments page access for this.
   app.patch("/api/driver-dispatch/my-trips/:id/confirm-payment", verifyToken, requireRole(driverOnly), myConfirmPayment);

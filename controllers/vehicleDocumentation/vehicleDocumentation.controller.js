@@ -5,8 +5,8 @@ import {
   saveInventoryStatus,
   adminReplaceHistoryPhoto,
 } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
-import { db } from "../../config/firebaseConnection/firebase.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+import { resolveInspectionReminderIfComplete } from "../../services/inspectionReminders/inspectionReminders.service.js";
 
 // PATCH /api/vehicle-docs/history/:tripPhase/:bookingID — Admin-only,
 // points a photo field at a freshly-uploaded URL. The upload itself
@@ -30,19 +30,14 @@ export const editHistoryPhoto = async (req, res) => {
   }
 };
 
-// Drivers get their own routes below (vehicleDocumentation.routes.js), but
-// unlike Owner/Admin/Supervisor — who manage every car's documentation —
-// a Driver may only touch documentation for a booking assigned to THEM.
-// That's enforced here per-request rather than trusting the frontend to
-// only ever navigate them to their own bookings.
-const assertOwnershipIfDriver = async (req, bookingID) => {
-  if (req.user?.role !== "Driver") return; // staff roles: unrestricted
-  const doc = await db.collection("bookings").doc(bookingID).get();
-  if (!doc.exists || doc.data().driverID !== req.user.uid) {
-    const err = new Error("This booking's documentation is not accessible to you.");
-    err.status = 403;
-    throw err;
-  }
+// After any staff save, clear the "driver is waiting on the inspection"
+// reminder — but only once that phase is genuinely complete (photos AND
+// parts), so saving half of it doesn't dismiss the reminder early.
+// Fire-and-forget: a failure here must never fail the save itself.
+const clearReminderIfDone = (bookingID, phase) => {
+  resolveInspectionReminderIfComplete(bookingID, phase).catch((err) =>
+    console.error("[VEHICLE_DOCS] Failed to resolve inspection reminder:", err.message)
+  );
 };
 
 // ─────────────────────────────────────────────
@@ -54,8 +49,6 @@ export const getVehicleDocs = async (req, res) => {
     const { bookingID } = req.params;
     if (!bookingID)
       return res.status(400).json({ success: false, message: "bookingID is required." });
-
-    await assertOwnershipIfDriver(req, bookingID);
 
     const data = await getVehicleDocsByBooking(bookingID);
     return res.status(200).json({ success: true, data });
@@ -89,9 +82,8 @@ export const saveBeforeTrip = async (req, res) => {
     if (!photoFields || typeof photoFields !== "object")
       return res.status(400).json({ success: false, message: "photoFields object is required." });
 
-    await assertOwnershipIfDriver(req, bookingID);
-
     const result = await saveVehicleDocBefore({ bookingID, carID, photoFields });
+    clearReminderIfDone(bookingID, "before");
 
     createAuditLog({
       action: "update",
@@ -121,9 +113,8 @@ export const saveAfterTrip = async (req, res) => {
     if (!photoFields || typeof photoFields !== "object")
       return res.status(400).json({ success: false, message: "photoFields object is required." });
 
-    await assertOwnershipIfDriver(req, bookingID);
-
     const result = await saveVehicleDocAfter({ bookingID, carID, photoFields });
+    clearReminderIfDone(bookingID, "after");
 
     createAuditLog({
       action: "update",
@@ -155,9 +146,8 @@ export const saveInventoryStatusHandler = async (req, res) => {
     if (tripType !== "before" && tripType !== "after")
       return res.status(400).json({ success: false, message: "tripType must be 'before' or 'after'." });
 
-    await assertOwnershipIfDriver(req, bookingID);
-
     const result = await saveInventoryStatus({ bookingID, carID, tripType, overallStatus, damageParts });
+    clearReminderIfDone(bookingID, tripType);
 
     createAuditLog({
       action: "update",

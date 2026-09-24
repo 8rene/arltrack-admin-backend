@@ -3,7 +3,8 @@ import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
 import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
-import { hasCompleteBeforeTripDocs, hasCompleteAfterTripDocs } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { getPhaseChecklist } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
@@ -50,6 +51,7 @@ const resolveVehicleName = async (carID) => {
 // exactly instead of being derived a third, different way (or not at all,
 // which is what was happening here before).
 const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0, refundDue: 0, refundIssued: false };
+const EMPTY_CHECKLIST = { photos: false, parts: false, complete: false };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT;
   try {
@@ -419,9 +421,10 @@ export const getMyTrips = async (driverID) => {
   let bookings = [];
   snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
 
-  // withDocs: MyTrips needs to know whether before/after photos already exist
-  // so Start Pickup / Return doesn't bounce the driver back to Vehicle
-  // Documentation forever. History rows don't need it (skipped there).
+  // withDocs: MyTrips needs to know whether staff have finished the
+  // before/after vehicle inspection (photos + parts condition) so Start
+  // Pickup / Return can show what's still outstanding. History rows don't
+  // need it (skipped there).
   return shapeTripsForDriver(bookings, { withDocs: true });
 };
 
@@ -450,15 +453,18 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
   const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
 
-  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries, reminderCooldowns] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
-    // Same helpers + same key (bookingID || doc id) as booking.service.js's
-    // getAllBookings, so Car Tracking and My Trips agree on "photos done".
-    Promise.all(bookingIDs.map((id) => (withDocs ? hasCompleteBeforeTripDocs(id) : Promise.resolve(false)).then((v) => [id, v]))),
-    Promise.all(bookingIDs.map((id) => (withDocs ? hasCompleteAfterTripDocs(id)  : Promise.resolve(false)).then((v) => [id, v]))),
+    // Same helper + same key (bookingID || doc id) as booking.service.js's
+    // getAllBookings, so Car Tracking and My Trips agree on "inspection done".
+    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(id, "before") : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(id, "after")  : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
+    // Remaining "Remind Staff" cooldown per booking/phase (seconds, so the
+    // driver's own clock can't skew the countdown).
+    withDocs ? getReminderCooldowns(bookingIDs) : Promise.resolve({}),
   ]);
   const vehicleMap = Object.fromEntries(vehicleEntries);
   const userMap    = Object.fromEntries(userEntries);
@@ -495,19 +501,59 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },
-        // Photo checklist state — consumed by MyTrips.jsx handlePickup/handleReturn.
-        beforeDocsComplete:   beforeDocsMap[bID] ?? false,
-        afterDocsComplete:    afterDocsMap[bID] ?? false,
+        // Inspection state — consumed by MyTrips.jsx. "Complete" = the 3
+        // exterior photos AND the parts-condition record, both entered by
+        // staff; the per-half breakdown drives the checklist on the card.
+        beforeDocsComplete:   beforeDocsMap[bID]?.complete ?? false,
+        afterDocsComplete:    afterDocsMap[bID]?.complete ?? false,
+        beforeInspection:     beforeDocsMap[bID] ?? EMPTY_CHECKLIST,
+        afterInspection:      afterDocsMap[bID]  ?? EMPTY_CHECKLIST,
+        inspectionReminder:   reminderCooldowns[bID] ?? { before: { retryAfterSeconds: 0 }, after: { retryAfterSeconds: 0 } },
       };
     })
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
 };
 
-/** Driver-triggered pickup — ownership-checked, then reuses the same gated updateBooking staff already use (vehicle-docs check included). */
+/** Driver-triggered pickup — ownership-checked, then reuses the same gated updateBooking staff already use (payment + completed before-trip inspection checks included — the driver can't fill the inspection in themselves, so it must already be done by staff). */
 export const driverPickup = async (bookingDocID, driverID) => {
   await assertOwnsBooking(bookingDocID, driverID);
   await updateBooking(bookingDocID, { status: "ongoing" });
   return { id: bookingDocID };
+};
+
+/**
+ * Driver tapping "Remind Staff" on a trip whose before/after inspection
+ * isn't done yet — notifies Owner/Admin/Supervisor. Ownership-checked like
+ * every other driver action; the 10-minute cooldown is enforced inside
+ * sendInspectionReminder.
+ */
+export const driverRemindInspection = async (bookingDocID, driverID, phase) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+
+  // Pickup needs payment settled too. If payment is what's really blocking
+  // the trip, an inspection reminder would only send staff chasing the
+  // wrong thing — so say so instead.
+  if (phase === "before") {
+    const pay = await resolvePaymentInfo(bID);
+    const paymentReady = ["approved", "paid"].includes((pay.paymentStatus || "").toLowerCase()) && (pay.balance ?? 0) <= 0;
+    if (!paymentReady) {
+      const err = new Error("Payment still needs to be settled before pickup — sort that out first.");
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  const [vehicleName, driverInfo] = await Promise.all([
+    resolveVehicleName(booking.carID),
+    resolveUserInfo(driverID),
+  ]);
+
+  return sendInspectionReminder({
+    booking, bookingDocID, phase, driverID,
+    driverName: driverInfo.name,
+    vehicleName,
+  });
 };
 
 /** Driver-triggered drop-off — ownership-checked, then the same rules as the staff dropoff endpoint. */

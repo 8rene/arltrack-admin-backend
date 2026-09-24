@@ -8,6 +8,13 @@ const DOC_COLLECTIONS = {
   after:  "vehicleDocumentationAfterTrip",
 };
 
+// The Good/Damaged part-condition records — separate collections from the
+// photo docs above, same upsert-by-bookingID pattern.
+const INVENTORY_COLLECTION = {
+  before: "inventoryBeforeTrip",
+  after:  "inventoryAfterTrip",
+};
+
 /**
  * Admin-only: replace (or add) a single photo on a past trip's
  * documentation record. `fieldKey` is either an exterior slot
@@ -122,30 +129,66 @@ export const getVehicleDocsByBooking = async (bookingID) => {
 };
 
 // ─────────────────────────────────────────────
-// Gate used by booking.service.js before a booking can move to "ongoing"
-// (i.e. Pickup). Only the 3 exterior shots are required — matches
-// VehicleDocs.jsx, where part photos are shown but never marked Required.
+// Inspection checklist — the gate behind Pickup and Return.
+//
+// A phase ("before" = Pickup, "after" = Return) counts as inspected only
+// when BOTH of these exist for the booking:
+//   photos — the 3 exterior shots (front/side/back). Part photos are shown
+//            in the UI but never required, same as VehicleDocs.jsx.
+//   parts  — a saved part-condition record (inventoryBeforeTrip /
+//            inventoryAfterTrip, the Good/Damaged flags). Even an
+//            all-Good car needs the record: staff must explicitly confirm
+//            the parts, it is never assumed.
+//
+// Drivers can't write either half anymore (vehicleDocumentation.routes.js),
+// so "complete" always means a supervisor/admin/owner did the inspection.
 // ─────────────────────────────────────────────
-export const hasCompleteBeforeTripDocs = async (bookingID) => {
-  if (!bookingID) return false;
-  const snap = await db.collection("vehicleDocumentationBeforeTrip").where("bookingID", "==", bookingID).get();
-  const doc = pickLatest(snap);
-  if (!doc) return false;
-  return !!(doc.frontViewUrl && doc.sideViewUrl && doc.backViewUrl);
+const photosComplete = (doc) => !!(doc && doc.frontViewUrl && doc.sideViewUrl && doc.backViewUrl);
+
+/** { photos, parts, complete } for one phase of one booking. */
+export const getPhaseChecklist = async (bookingID, phase) => {
+  const empty = { photos: false, parts: false, complete: false };
+  if (!bookingID || !DOC_COLLECTIONS[phase]) return empty;
+
+  const [docsSnap, invSnap] = await Promise.all([
+    db.collection(DOC_COLLECTIONS[phase]).where("bookingID", "==", bookingID).get(),
+    db.collection(INVENTORY_COLLECTION[phase]).where("bookingID", "==", bookingID).limit(1).get(),
+  ]);
+
+  const photos = photosComplete(pickLatest(docsSnap));
+  const parts  = !invSnap.empty;
+  return { photos, parts, complete: photos && parts };
 };
 
-/**
- * Same check as hasCompleteBeforeTripDocs, but for the after-trip photo
- * set — used to gate the "completed" (Return) transition the same way
- * before-trip docs gate "ongoing" (Pickup).
- */
-export const hasCompleteAfterTripDocs = async (bookingID) => {
-  if (!bookingID) return false;
-  const snap = await db.collection("vehicleDocumentationAfterTrip").where("bookingID", "==", bookingID).get();
-  const doc = pickLatest(snap);
-  if (!doc) return false;
-  return !!(doc.frontViewUrl && doc.sideViewUrl && doc.backViewUrl);
+/** Both phases at once — { before, after }, each { photos, parts, complete }. */
+export const getInspectionChecklist = async (bookingID) => {
+  const [before, after] = await Promise.all([
+    getPhaseChecklist(bookingID, "before"),
+    getPhaseChecklist(bookingID, "after"),
+  ]);
+  return { before, after };
 };
+
+/** Human-readable list of what's still missing, e.g. "front, side and back photos and parts condition". */
+export const describeMissingInspection = (checklist) => {
+  const missing = [];
+  if (!checklist?.photos) missing.push("front, side and back photos");
+  if (!checklist?.parts)  missing.push("parts condition");
+  return missing.join(" and ");
+};
+
+// Gate used by booking.service.js before a booking can move to "ongoing"
+// (Pickup). Kept as a thin wrapper so existing callers keep working — but
+// it now includes the parts record, not just the photos.
+export const hasCompleteBeforeTripDocs = async (bookingID) =>
+  (await getPhaseChecklist(bookingID, "before")).complete;
+
+/**
+ * Same check for the after-trip set — gates the "completed" (Return)
+ * transition the same way the before-trip set gates "ongoing" (Pickup).
+ */
+export const hasCompleteAfterTripDocs = async (bookingID) =>
+  (await getPhaseChecklist(bookingID, "after")).complete;
 
 // ─────────────────────────────────────────────
 // SAVE / UPSERT — Before Trip Documentation
@@ -251,11 +294,6 @@ export const saveVehicleDocAfter = async ({ bookingID, carID, photoFields }) => 
 // previous record) from VehicleDocs.jsx's commitStatusEdits — this only
 // moves the write itself, same as everywhere else in this migration.
 // ─────────────────────────────────────────────
-const INVENTORY_COLLECTION = {
-  before: "inventoryBeforeTrip",
-  after:  "inventoryAfterTrip",
-};
-
 export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallStatus, damageParts }) => {
   if (!bookingID || !carID) throw new Error("bookingID and carID are required.");
   if (tripType !== "before" && tripType !== "after") throw new Error("tripType must be 'before' or 'after'.");

@@ -1,6 +1,6 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver,
-  getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverReturn, driverCollectBalance, driverConfirmPayment, driverMarkRefundIssued,
+  getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverReturn, driverCollectBalance, driverConfirmPayment, driverMarkRefundIssued, driverRemindInspection,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
 export const getBoard = async (req, res) => {
@@ -121,6 +121,23 @@ export const myConfirmPayment = async (req, res) => {
   } catch (error) {
     console.error("[DRIVER DISPATCH] my-confirm-payment error:", error);
     return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/driver-dispatch/my-trips/:id/remind-inspection  { phase: "before" | "after" }
+// 429 (with retryAfterSeconds) while the 10-minute cooldown is still running.
+export const myRemindInspection = async (req, res) => {
+  try {
+    const { phase } = req.body || {};
+    const result = await driverRemindInspection(req.params.id, req.user.uid, phase);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    if (error.status !== 429) console.error("[DRIVER DISPATCH] my-remind-inspection error:", error);
+    return res.status(error.status || 400).json({
+      success: false,
+      message: error.message,
+      ...(error.retryAfterSeconds != null ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+    });
   }
 };
 

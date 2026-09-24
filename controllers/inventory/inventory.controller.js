@@ -5,6 +5,7 @@ import {
   getNearestBookingForCar,
   adminUpdateHistoryPartStatus,
 } from "../../services/inventory/inventory.service.js";
+import { resolveInspectionReminderIfComplete } from "../../services/inspectionReminders/inspectionReminders.service.js";
 
 // PATCH /api/inventory/history/:tripPhase/:bookingID  — Admin-only direct
 // edit of a past trip's part status. Upserts: creates the record if the
@@ -67,6 +68,9 @@ export const saveBefore = async (req, res) => {
       return res.status(400).json({ success: false, message: "bookingID, carID, and parts[] are required." });
     }
     const result = await saveBeforeTrip({ bookingID, carID, parts });
+    resolveInspectionReminderIfComplete(bookingID, "before").catch((err) =>
+      console.error("[INVENTORY] Failed to resolve inspection reminder:", err.message)
+    );
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[INVENTORY] saveBefore error:", error);
@@ -84,6 +88,9 @@ export const saveAfter = async (req, res) => {
       return res.status(400).json({ success: false, message: "bookingID, carID, and parts[] are required." });
     }
     const result = await saveAfterTrip({ bookingID, carID, parts, userID });
+    resolveInspectionReminderIfComplete(bookingID, "after").catch((err) =>
+      console.error("[INVENTORY] Failed to resolve inspection reminder:", err.message)
+    );
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[INVENTORY] saveAfter error:", error);

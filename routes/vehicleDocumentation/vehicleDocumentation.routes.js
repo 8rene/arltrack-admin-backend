@@ -8,11 +8,14 @@ import {
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// Visible to: Owner, Supervisor, Admin, and Driver (Driver is
-// ownership-checked per-request in the controller above — ROLE_LIST_
-// VIEWABLE_BY-style role gating alone isn't enough here since a Driver
-// must only reach their OWN booking's docs, not the fleet's).
-const allowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN, roles.DRIVER];
+// Visible to: Owner, Supervisor, Admin — Driver deliberately excluded.
+// Vehicle inspection is a staff responsibility now: a Driver can neither
+// read nor write it (this used to be Driver-inclusive with a per-booking
+// ownership check). A Driver's Pickup/Return is instead GATED on staff
+// having completed it — see hasCompleteBeforeTripDocs/AfterTripDocs in
+// vehicleDocumentation.service.js, enforced in booking.service.js's
+// updateBooking, which the driver's My Trips actions go through.
+const allowed = [roles.OWNER, roles.SUPERVISOR, roles.ADMIN];
 
 // Editing/replacing past-trip photos — Admin only, same as the parts
 // status edit (see inventory.routes.js).
