@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { getBookingRefundPreview } from "../refundRequest/refundRequest.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -152,7 +153,7 @@ export const updateCar = async (carID, carData) => {
 // ─────────────────────────────────────────────
 // UPDATE car status only
 // ─────────────────────────────────────────────
-export const updateCarStatus = async (carID, status) => {
+export const updateCarStatus = async (carID, status, statusReason = null) => {
   const validStatuses = ["Active", "Rented", "Reserved", "Maintenance", "Inactive"];
   if (!validStatuses.includes(status)) throw new Error(`Invalid status. Must be one of: ${validStatuses.join(", ")}`);
 
@@ -160,8 +161,54 @@ export const updateCarStatus = async (carID, status) => {
   const carDoc = await carRef.get();
   if (!carDoc.exists) throw new Error("Car not found.");
 
-  await carRef.update({ status, updatedAt: timestamp() });
-  return { id: carID, status };
+  // Cleared back to null once the car leaves Maintenance/Inactive, same as
+  // the frontend's own applyStatusChange() already did client-side — kept
+  // here too now that this is the authoritative write path.
+  await carRef.update({ status, statusReason, updatedAt: timestamp() });
+  return { id: carID, status, statusReason };
+};
+
+// The bookings.carID field matches the car doc's OWN "carID" field, not its
+// Firestore doc id — but some older car docs never got one written, so this
+// falls back to the doc id itself, same fallback Fleet.jsx's frontend
+// already uses for its own booking lookups.
+const carBookingIDValue = (carDoc) => carDoc.data().carID || carDoc.id;
+
+// Bookings currently in flight for a car — "upcoming" (not yet started,
+// still cancellable/refundable) and "ongoing" (car already with the
+// customer, shown for awareness only). Used both by the status-change
+// preview endpoint below and, as a lighter existence check, by
+// changeCarStatus() to block Maintenance/Inactive until every upcoming
+// booking has been resolved.
+export const getOpenBookingsForCar = async (carID) => {
+  const carDoc = await db.collection("cars").doc(carID).get();
+  if (!carDoc.exists) throw new Error("Car not found.");
+  const carIDValue = carBookingIDValue(carDoc);
+
+  const snap = await db.collection("bookings").where("carID", "==", carIDValue).get();
+  const bookings = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+  const upcoming = bookings.filter((b) => String(b.status || "").toLowerCase() === "upcoming");
+  const ongoing  = bookings.filter((b) => String(b.status || "").toLowerCase() === "ongoing");
+
+  return { upcoming, ongoing };
+};
+
+// Same as above, plus a refund-amount preview attached to each upcoming
+// booking — this is what the "are you sure" modal in Fleet.jsx actually
+// renders (one Refund button + ₱ amount per upcoming booking, one FYI row
+// per ongoing booking, no button since there's nothing to refund yet).
+export const getCarBookingsForStatusChange = async (carID) => {
+  const { upcoming, ongoing } = await getOpenBookingsForCar(carID);
+
+  const upcomingWithPreview = await Promise.all(
+    upcoming.map(async (b) => ({
+      ...b,
+      refundPreview: await getBookingRefundPreview(b.bookingID).catch(() => ({ total: 0, onlineAmount: 0, manualAmount: 0 })),
+    }))
+  );
+
+  return { upcoming: upcomingWithPreview, ongoing };
 };
 
 // ─────────────────────────────────────────────

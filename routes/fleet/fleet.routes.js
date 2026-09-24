@@ -4,6 +4,7 @@ import {
   createCar,
   editCar,
   changeCarStatus,
+  getStatusChangePreview,
   removeCar,
   getCarPricing,
   addCarPricing,
@@ -29,6 +30,7 @@ export const registerFleetRoutes = (app) => {
   app.get   ("/api/fleet/cars/:carID",                   verifyToken, requireRole(allowed), getCar);
   app.post  ("/api/fleet/cars",                          verifyToken, requireRole(allowed), createCar);
   app.put   ("/api/fleet/cars/:carID",                   verifyToken, requireRole(allowed), editCar);
+  app.get   ("/api/fleet/cars/:carID/status-change-preview", verifyToken, requireRole(allowed), getStatusChangePreview);
   app.patch ("/api/fleet/cars/:carID/status",            verifyToken, requireRole(allowed), changeCarStatus);
   app.delete("/api/fleet/cars/:carID",                   verifyToken, requireRole(allowed), removeCar);
 

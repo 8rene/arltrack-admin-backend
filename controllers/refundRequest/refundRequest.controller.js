@@ -3,6 +3,7 @@ import {
   approveRefundRequest,
   rejectRefundRequest,
   markManualRefundIssued,
+  staffRefundBooking,
 } from "../../services/refundRequest/refundRequest.service.js";
 
 export const listRefundRequests = async (req, res) => {
@@ -43,6 +44,29 @@ export const rejectRefund = async (req, res) => {
     return res.status(200).json({ success: true, message: "Refund request rejected.", data });
   } catch (error) {
     console.error("[REFUND] reject error:", error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/refund-requests/staff-refund/:bookingID   { reason }
+// Staff force-cancelling + refunding one upcoming booking, e.g. while
+// switching its car to Maintenance/Inactive — see Fleet.jsx's status-change
+// flow and staffRefundBooking() for the full picture.
+export const staffRefund = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const { reason } = req.body;
+    const staffUserID = req.user?.userID || req.user?.uid || null;
+    const data = await staffRefundBooking(bookingID, reason, staffUserID);
+    return res.status(200).json({
+      success: true,
+      message: data.manualRefund
+        ? `Booking cancelled. ${data.onlineAmount ? "Part of the refund is" : "The refund is"} being processed by PayMongo — the remaining manual portion needs to be handed back and marked as returned from the Refund Requests page.`
+        : "Booking cancelled and refunded.",
+      data,
+    });
+  } catch (error) {
+    console.error("[REFUND] staffRefund error:", error);
     return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };

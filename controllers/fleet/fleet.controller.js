@@ -17,8 +17,16 @@ import {
   addModel,
   deleteModel,
   setPrimaryCarImage,
+  getOpenBookingsForCar,
+  getCarBookingsForStatusChange,
 } from "../../services/fleet/fleet.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+import { consumeOtp } from "../otp/otp.controller.js";
+
+// Statuses that need a reason + OTP + a clean bookings check before they can
+// be written — see changeCarStatus() below. Leaving Maintenance/Inactive
+// (going back to Active) never needs any of this.
+const GATED_STATUSES = ["Maintenance", "Inactive"];
 
 // ─────────────────────────────────────────────
 // CARS
@@ -64,9 +72,26 @@ export const createCar = async (req, res) => {
 
 // PUT /api/fleet/cars/:carID
 // Body: any subset of car fields (excluding pricing — use /pricing endpoints)
+//
+// Deliberately refuses to move status into Maintenance/Inactive from here —
+// the EditCarModal's Details tab used to send status as just another field
+// in this same call, which meant it could switch a car out of service with
+// no reason, no bookings check, and no OTP. That whole flow now runs first
+// against the dedicated /status endpoint below (reason → refund-any-upcoming
+// bookings → OTP), and only THEN does the rest of the edit form save through
+// here — with status either unchanged or already applied, either way fine.
 export const editCar = async (req, res) => {
   try {
     const { carID } = req.params;
+    if (GATED_STATUSES.includes(req.body?.status)) {
+      const carDoc = await getCarById(carID).catch(() => null);
+      if (carDoc && carDoc.status !== req.body.status) {
+        return res.status(400).json({
+          success: false,
+          message: `Switching a car to ${req.body.status} needs a reason and confirmation — use the status control instead of Save Changes.`,
+        });
+      }
+    }
     const data = await updateCar(carID, req.body);
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -76,14 +101,69 @@ export const editCar = async (req, res) => {
   }
 };
 
+// GET /api/fleet/cars/:carID/status-change-preview
+// What staff see before confirming a switch to Maintenance/Inactive: every
+// upcoming booking on this car (with what refunding it would cost) and
+// every ongoing one (FYI only — the car's already with that customer, so
+// there's nothing to refund or cancel here).
+export const getStatusChangePreview = async (req, res) => {
+  try {
+    const { carID } = req.params;
+    const data = await getCarBookingsForStatusChange(carID);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[FLEET] getStatusChangePreview error:", error);
+    const status = error.message === "Car not found." ? 404 : 500;
+    return res.status(status).json({ success: false, message: error.message });
+  }
+};
+
 // PATCH /api/fleet/cars/:carID/status
-// Body: { status: "Active" | "Rented" | "Reserved" | "Maintenance" | "Inactive" }
+// Body: { status, statusReason?, otp? }
+//
+// Moving TO Maintenance or Inactive is gated three ways: a reason is
+// required, the acting staff member must supply a fresh OTP sent to their
+// OWN email (consumeOtp — same "prove it's really you" mechanic already
+// used for role changes), and every upcoming booking on the car must
+// already be refunded/cancelled (re-checked here server-side, never just
+// trusted from the frontend, which is why Fleet.jsx's own gate could never
+// be enough on its own). Moving to any other status (back to Active) skips
+// all three — there's no bookings-safety concern leaving service.
 export const changeCarStatus = async (req, res) => {
   try {
     const { carID } = req.params;
-    const { status } = req.body;
+    const { status, statusReason, otp } = req.body;
     if (!status) return res.status(400).json({ success: false, message: "status is required." });
-    const data = await updateCarStatus(carID, status);
+
+    if (GATED_STATUSES.includes(status)) {
+      if (!statusReason || !statusReason.trim()) {
+        return res.status(400).json({ success: false, message: "A reason is required." });
+      }
+      if (!otp) {
+        return res.status(400).json({ success: false, message: "Verification code is required." });
+      }
+      const otpResult = await consumeOtp(req.user?.email, otp);
+      if (!otpResult.ok) {
+        return res.status(otpResult.status).json({ success: false, message: otpResult.message });
+      }
+
+      const { upcoming } = await getOpenBookingsForCar(carID);
+      if (upcoming.length > 0) {
+        return res.status(409).json({
+          success: false,
+          message: `${upcoming.length} upcoming booking(s) still need to be refunded before this car can be marked ${status}.`,
+        });
+      }
+    }
+
+    const data = await updateCarStatus(carID, status, GATED_STATUSES.includes(status) ? statusReason.trim() : null);
+
+    createAuditLog({
+      action: "update",
+      description: `Status changed for car ${carID} to ${status}${statusReason ? `: ${statusReason}` : "."}${GATED_STATUSES.includes(status) ? " (OTP-confirmed)" : ""}`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[FLEET] Failed to write audit log:", err));
+
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[FLEET] changeCarStatus error:", error);
