@@ -58,7 +58,7 @@ export const sendLicenseExpiryEmail = async ({ toEmail, toName, isExpired, daysL
       payload,
       { headers: { "Content-Type": "application/json" } }
     );
-    console.log(`✅ License ${isExpired ? "expired" : "expiring"} email sent to ${toEmail}`);
+
     return { success: true };
   } catch (error) {
     const detail = error.response?.data || error.message;
@@ -132,7 +132,7 @@ export const sendRefundEmail = async ({ toEmail, toName, bookingID, amount, manu
       payload,
       { headers: { "Content-Type": "application/json" } }
     );
-    console.log(`✅ Refund email sent to ${toEmail} for booking ${bookingID}`);
+
     return { success: true };
   } catch (error) {
     const detail = error.response?.data || error.message;

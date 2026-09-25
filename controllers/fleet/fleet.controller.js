@@ -22,6 +22,7 @@ import {
 } from "../../services/fleet/fleet.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { consumeOtp } from "../otp/otp.controller.js";
+import { staffRefundBooking } from "../../services/refundRequest/refundRequest.service.js";
 
 // Statuses that need a reason + OTP + a clean bookings check before they can
 // be written — see changeCarStatus() below. Leaving Maintenance/Inactive
@@ -124,47 +125,76 @@ export const getStatusChangePreview = async (req, res) => {
 // Moving TO Maintenance or Inactive is gated three ways: a reason is
 // required, the acting staff member must supply a fresh OTP sent to their
 // OWN email (consumeOtp — same "prove it's really you" mechanic already
-// used for role changes), and every upcoming booking on the car must
-// already be refunded/cancelled (re-checked here server-side, never just
-// trusted from the frontend, which is why Fleet.jsx's own gate could never
-// be enough on its own). Moving to any other status (back to Active) skips
-// all three — there's no bookings-safety concern leaving service.
+// used for role changes, verified right here, right before anything real
+// happens — not earlier in the flow, so the code that unlocks the actual
+// money movement is the one actually protecting it), and every upcoming
+// booking on the car gets refunded/cancelled in one batch, right here,
+// server-side. The car's own upcoming-bookings list is re-derived from
+// scratch on every call — never trusted from whatever the frontend showed
+// a minute earlier, since a booking could appear in between. Moving to any
+// other status (back to Active) skips all three — there's no
+// bookings-safety concern leaving service.
+//
+// The batch is sequential and stops at the first real failure: anything
+// already resolved before that point stays resolved (a real PayMongo
+// refund can't be undone), the car's status is NOT written, and the
+// response reports exactly what got through — see refundResults below.
+// Retrying means a fresh OTP (the one just spent is single-use) and is
+// safe to re-run: each booking's payment status is re-checked live before
+// it's touched, so anything already resolved on a previous attempt is
+// simply skipped rather than retried.
 export const changeCarStatus = async (req, res) => {
   try {
     const { carID } = req.params;
     const { status, statusReason, otp } = req.body;
     if (!status) return res.status(400).json({ success: false, message: "status is required." });
 
-    if (GATED_STATUSES.includes(status)) {
-      if (!statusReason || !statusReason.trim()) {
-        return res.status(400).json({ success: false, message: "A reason is required." });
-      }
-      if (!otp) {
-        return res.status(400).json({ success: false, message: "Verification code is required." });
-      }
-      const otpResult = await consumeOtp(req.user?.email, otp);
-      if (!otpResult.ok) {
-        return res.status(otpResult.status).json({ success: false, message: otpResult.message });
-      }
+    if (!GATED_STATUSES.includes(status)) {
+      const data = await updateCarStatus(carID, status, null);
+      createAuditLog({
+        action: "update",
+        description: `Status changed for car ${carID} to ${status}.`,
+        userID: req.user?.uid || null,
+      }).catch((err) => console.error("[FLEET] Failed to write audit log:", err));
+      return res.status(200).json({ success: true, data: { ...data, statusChanged: true, refundResults: [] } });
+    }
 
-      const { upcoming } = await getOpenBookingsForCar(carID);
-      if (upcoming.length > 0) {
-        return res.status(409).json({
-          success: false,
-          message: `${upcoming.length} upcoming booking(s) still need to be refunded before this car can be marked ${status}.`,
+    const cleanReason = (statusReason || "").trim();
+    if (!cleanReason) return res.status(400).json({ success: false, message: "A reason is required." });
+    if (!otp) return res.status(400).json({ success: false, message: "Verification code is required." });
+    const otpResult = await consumeOtp(req.user?.email, otp);
+    if (!otpResult.ok) return res.status(otpResult.status).json({ success: false, message: otpResult.message });
+
+    const { upcoming } = await getOpenBookingsForCar(carID);
+    const refundResults = [];
+    for (const booking of upcoming) {
+      try {
+        const r = await staffRefundBooking(booking.bookingID, cleanReason, req.user?.uid || null);
+        refundResults.push({ bookingID: booking.bookingID, outcome: r.outcome, amount: r.amount, manualAmount: r.manualAmount });
+      } catch (e) {
+        refundResults.push({ bookingID: booking.bookingID, outcome: "failed", amount: 0, error: e.message });
+        // Stop here — anything already resolved above is real and stays
+        // that way; the status change itself does not go through.
+        return res.status(200).json({
+          success: true,
+          message: `Stopped at ${booking.bookingID}: ${e.message}. The switch to ${status} was NOT applied. Anything already resolved above is final — request a fresh code and retry to finish the rest.`,
+          data: { statusChanged: false, status: null, statusReason: null, refundResults },
         });
       }
     }
 
-    const data = await updateCarStatus(carID, status, GATED_STATUSES.includes(status) ? statusReason.trim() : null);
+    const data = await updateCarStatus(carID, status, cleanReason);
 
     createAuditLog({
       action: "update",
-      description: `Status changed for car ${carID} to ${status}${statusReason ? `: ${statusReason}` : "."}${GATED_STATUSES.includes(status) ? " (OTP-confirmed)" : ""}`,
+      description: `Status changed for car ${carID} to ${status}: ${cleanReason} (OTP-confirmed${refundResults.length > 0 ? `; ${refundResults.length} booking(s) resolved` : ""})`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[FLEET] Failed to write audit log:", err));
 
-    return res.status(200).json({ success: true, data });
+    return res.status(200).json({
+      success: true,
+      data: { ...data, statusChanged: true, refundResults },
+    });
   } catch (error) {
     console.error("[FLEET] changeCarStatus error:", error);
     const status = error.message === "Car not found." ? 404 : 400;

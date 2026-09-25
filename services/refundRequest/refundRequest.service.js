@@ -100,12 +100,45 @@ export const getAllRefundRequests = async (status) => {
 // What refunding this booking right now would look like — same computation
 // getAllRefundRequests() already does for a Pending request's planPreview,
 // pulled out so the fleet status-change modal can show a real ₱ figure on
-// each booking's Refund button before staff click it.
+// each booking's Refund row before staff stage it. alreadyRefunded flags the
+// data-mismatch case (payment says Refunded, booking never got cancelled to
+// match) so the UI can show it distinctly instead of a confusing ₱0 button.
 export const getBookingRefundPreview = async (bookingID) => {
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
-  if (paymentSnap.empty) return { total: 0, onlineAmount: 0, manualAmount: 0 };
-  const plan = computeRefundPlan(paymentSnap.docs[0].data());
-  return { total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount };
+  if (paymentSnap.empty) return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false };
+  const payment = paymentSnap.docs[0].data();
+  if (lower(payment.status) === "refunded") {
+    return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: true };
+  }
+  const plan = computeRefundPlan(payment);
+  const outstandingDiscountRefund = payment.discountAmount > 0 && !payment.refundIssued ? plan.breakdown.refundDue : 0;
+  const total = plan.total + outstandingDiscountRefund;
+  return { total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount + outstandingDiscountRefund, alreadyRefunded: false };
+};
+
+// What actually happened the last time staff ran a refund/cancel against
+// this booking — used by getResolvedBookingsForCar() (services/fleet/
+// fleet.service.js) to label a booking in the "Already resolved" section.
+// Every staffRefundBooking()/staffCancelWithNoRefund() outcome writes a
+// refundRequests doc (source: "staff"), even the two where no money moved,
+// specifically so this lookup always has something to find.
+export const getStaffRefundOutcome = async (bookingID) => {
+  // Two equality filters, no orderBy — avoids needing a composite Firestore
+  // index. In practice there's only ever one of these per booking (once
+  // resolved, the booking's "cancelled" and this never runs again for it),
+  // but sort in memory just in case there's somehow more than one.
+  const snap = await db.collection("refundRequests")
+    .where("bookingID", "==", bookingID)
+    .where("source", "==", "staff")
+    .get();
+  if (snap.empty) return { outcome: null, amount: 0 };
+  const docs = snap.docs.map((d) => d.data());
+  docs.sort((a, b) => {
+    const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
+    const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
+    return bT - aT;
+  });
+  return { outcome: docs[0].outcome || null, amount: docs[0].amount || 0 };
 };
 
 // One PayMongo refund against one payment. Returns the PayMongo refund id.
@@ -347,24 +380,113 @@ export const approveRefundRequest = async (refundRequestID, adminUserID) => {
   }
 };
 
+// Cancels a booking with nothing left to actually refund — either its
+// payment was already refunded earlier (a data mismatch: the payment side
+// finished but the booking never got cancelled to match — this is what
+// Fleet.jsx's status-change flow runs into and surfaces), or genuinely
+// nothing was ever collected. Same cancel + bell notification either way,
+// just no PayMongo call, no email (nothing happened to their money worth
+// emailing about), and no transaction log (that ledger is money-movement
+// only — the audit log below is what records this instead).
+const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staffUserID, outcome) => {
+  const userID = payment?.userID || booking.userID || null;
+  const now = new Date();
+
+  // Written even though nothing's actually being refunded — this is the one
+  // place the "Already resolved" list (getResolvedBookingsForCar) looks up
+  // what happened to a booking, so every outcome needs a record here to be
+  // found later, not just the ones where real money moved.
+  const refundRequestRef = db.collection("refundRequests").doc();
+  await refundRequestRef.set({
+    refundRequestID: refundRequestRef.id,
+    bookingID,
+    paymentID: payment?.paymentID || null,
+    userID,
+    reason,
+    notes: outcome === "already_refunded"
+      ? "Staff-initiated: payment was already refunded earlier; booking cancelled to match."
+      : "Staff-initiated: nothing had been paid; booking cancelled, no refund needed.",
+    source: "staff",
+    outcome,
+    amount: 0,
+    onlineAmount: 0,
+    manualAmount: 0,
+    parts: [],
+    manualRefund: null,
+    status: "Refunded", // nothing left to do — no manual portion to issue later
+    processedBy: staffUserID,
+    processedAt: now,
+    customerNotified: true,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const cancel = await cancelBookingForRefund(bookingID, `Cancelled by staff: ${reason}`);
+
+  await notifyCustomer(
+    userID, bookingID, "refund_approved", "Booking Cancelled",
+    outcome === "already_refunded"
+      ? `Your booking was cancelled: ${reason}. This booking's payment had already been refunded, so no new refund was needed.`
+      : `Your booking was cancelled: ${reason}.`
+  );
+
+  if (cancel.driverID) {
+    createNotification({
+      type: "refund_request", refID: bookingID, refCollection: "bookings",
+      title: "Booking cancelled",
+      message: `A booking you were assigned to (${bookingID}) was cancelled by staff: ${reason}.`,
+      userID: cancel.driverID,
+    }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
+  }
+
+  auditSafe({
+    action: "update",
+    description: outcome === "already_refunded"
+      ? `Booking ${bookingID} cancelled — its payment was already refunded earlier but the booking itself hadn't been. Car status change: ${reason}.`
+      : `Booking ${bookingID} cancelled — nothing had been paid, so nothing to refund. Car status change: ${reason}.`,
+    userID: staffUserID,
+    bookingID,
+    paymentID: payment?.paymentID || null,
+  });
+
+  return { outcome, bookingID, amount: 0, manualAmount: 0, bookingCancelled: cancel.cancelled };
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Staff-initiated refund for ONE booking — used when a car is being switched
 // to Maintenance/Inactive and has an upcoming booking sitting on it (see
-// Fleet.jsx's status-change flow). Unlike approveRefundRequest() above,
-// there's no customer-submitted request behind this: staff are the ones
-// forcing the cancellation, so this creates the refundRequests record AND
-// resolves it in the same call, starting straight at "Approved" — there's
-// no review step to sit in "Pending" for. This is the one deliberate
-// exception to refundRequest.model.js's "admin never creates" note; the
-// doc it writes carries source: "staff" so it's easy to tell apart from a
-// customer-submitted one in the Refund Requests list.
+// Fleet.jsx's status-change flow, which calls this in a loop, one booking at
+// a time, stopping at the first failure — see changeCarStatus()). Unlike
+// approveRefundRequest() above, there's no customer-submitted request behind
+// this: staff are the ones forcing the cancellation, so this creates the
+// refundRequests record AND resolves it in the same call, starting straight
+// at "Approved" — there's no review step to sit in "Pending" for. This is
+// the one deliberate exception to refundRequest.model.js's "admin never
+// creates" note; the doc it writes carries source: "staff" so it's easy to
+// tell apart from a customer-submitted one in the Refund Requests list.
 //
-// Always a FULL refund of whatever the customer has paid so far — no
-// cancellation fee, since this is the business forcing the cancellation,
-// not the customer's choice. Only ever called for an "upcoming" booking
-// (never "ongoing" — the car's already with the customer by then, and
-// cancelBookingForRefund() below won't cancel anything past "upcoming"
-// anyway) — Fleet.jsx never shows a Refund button for one that isn't.
+// Returns { outcome, bookingID, amount, manualAmount, bookingCancelled }.
+// outcome is one of:
+//   "refunded"        — real money moved (PayMongo and/or a manual/cash
+//                        portion still to be handed back in person)
+//   "already_refunded"— the payment was already Refunded but the booking
+//                        wasn't cancelled to match; just closes that gap
+//   "nothing_owed"     — genuinely nothing had been collected; cancel only
+// Only "refunded" sends the customer an email and writes a transactionLogs
+// entry — the other two are anomalies (see notes in Fleet.jsx), not real
+// money movement, so they're bell + audit log only.
+//
+// Always a FULL refund of whatever's been collected — no cancellation fee,
+// since this is the business forcing the cancellation, not the customer's
+// choice — and that includes any outstanding discount spillover the
+// customer is still separately owed (see applyDiscount()'s refundDue) that
+// hadn't been handed back yet; that gets folded into the manual amount here
+// and the payment's refundIssued flag gets set so the old discount-
+// correction page doesn't also try to pay it out later.
+//
+// Only ever called for an "upcoming" booking (never "ongoing" — the car's
+// already with the customer by then, and cancelBookingForRefund() below
+// won't cancel anything past "upcoming" anyway).
 // ─────────────────────────────────────────────────────────────────────────────
 export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   if (!bookingID) throw fail("bookingID is required.", 400);
@@ -381,55 +503,68 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   if (paymentSnap.empty) throw fail("No payment record found for this booking.", 404);
   const paymentRef = paymentSnap.docs[0].ref;
   const payment = paymentSnap.docs[0].data();
-
   const payStatus = lower(payment.status);
-  if (payStatus === "refunded") throw fail("This payment has already been refunded.", 409);
+
+  // Data mismatch: payment's already Refunded, booking never got cancelled
+  // to match. Nothing left to refund — just close the booking out.
+  if (payStatus === "refunded") {
+    return staffCancelWithNoRefund(bookingID, booking, payment, reason, staffUserID, "already_refunded");
+  }
 
   const userID = payment.userID || booking.userID || null;
   const plan = computeRefundPlan(payment);
+  const outstandingDiscountRefund = payment.discountAmount > 0 && !payment.refundIssued ? plan.breakdown.refundDue : 0;
+  const totalToRefund = plan.total + outstandingDiscountRefund;
+
+  // Genuinely nothing collected (still Pending, etc.) — cancel only.
+  if (totalToRefund === 0) {
+    return staffCancelWithNoRefund(bookingID, booking, payment, reason, staffUserID, "nothing_owed");
+  }
+
+  if (!["paid", "approved"].includes(payStatus)) {
+    throw fail(`This payment is "${payment.status}" with ${peso(totalToRefund)} apparently owed — needs manual review before this can be refunded automatically.`, 409);
+  }
 
   const now = new Date();
   const refundRequestRef = db.collection("refundRequests").doc();
   const refundRequestID = refundRequestRef.id;
 
   let parts = [];
-  if (plan.total > 0) {
-    if (!["paid", "approved"].includes(payStatus)) {
-      throw fail(`This payment is "${payment.status}" — nothing has actually been collected to refund.`, 400);
-    }
-    for (const part of plan.parts) {
-      try {
-        const paymongoRefundID = await createPaymongoRefund({
-          paymongoPaymentID: part.paymongoPaymentID,
-          amount: part.amount,
-          reason,
-        });
-        parts.push({ kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID, status: "pending" });
-      } catch (e) {
-        // Nothing (or only an earlier part) went out — safe to just fail
-        // the whole thing here rather than leave a half-written record,
-        // since (unlike approveRefundRequest) there's no existing Pending
-        // doc a retry needs to find its way back to.
-        auditSafe({
-          action: "update",
-          description: `Staff refund for booking ${bookingID} failed at PayMongo for the ${part.kind} part (${e.message})${parts.length > 0 ? ` after ${parts.length} earlier part(s) already went through — needs manual follow-up` : ""}.`,
-          userID: staffUserID,
-          bookingID,
-          paymentID: payment.paymentID,
-        });
-        throw fail(
-          parts.length > 0
-            ? `Part of the refund went through at PayMongo, but the ${part.kind} refund failed: ${e.message}. Please finish this one manually from the Refund Requests page.`
-            : `Refund failed: ${e.message}`,
-          502
-        );
-      }
+  for (const part of plan.parts) {
+    try {
+      const paymongoRefundID = await createPaymongoRefund({
+        paymongoPaymentID: part.paymongoPaymentID,
+        amount: part.amount,
+        reason,
+      });
+      parts.push({ kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID, status: "pending" });
+    } catch (e) {
+      // Nothing (or only an earlier part) went out — safe to just fail
+      // the whole thing here rather than leave a half-written record,
+      // since (unlike approveRefundRequest) there's no existing Pending
+      // doc a retry needs to find its way back to.
+      auditSafe({
+        action: "update",
+        description: `Staff refund for booking ${bookingID} failed at PayMongo for the ${part.kind} part (${e.message})${parts.length > 0 ? ` after ${parts.length} earlier part(s) already went through — needs manual follow-up` : ""}.`,
+        userID: staffUserID,
+        bookingID,
+        paymentID: payment.paymentID,
+      });
+      throw fail(
+        parts.length > 0
+          ? `Part of the refund went through at PayMongo, but the ${part.kind} refund failed: ${e.message}. Please finish this one manually from the Refund Requests page.`
+          : `Refund failed: ${e.message}`,
+        502
+      );
     }
   }
 
   const onlineAmount = plan.total - plan.manualAmount;
-  const manualRefund = plan.manualAmount > 0
-    ? { amount: plan.manualAmount, issued: false, issuedBy: null, issuedAt: null, method: null }
+  // The cash/manual bucket now also carries any outstanding discount
+  // spillover, since PayMongo has no way to return that part either.
+  const manualAmount = plan.manualAmount + outstandingDiscountRefund;
+  const manualRefund = manualAmount > 0
+    ? { amount: manualAmount, issued: false, issuedBy: null, issuedAt: null, method: null }
     : null;
 
   await refundRequestRef.set({
@@ -440,9 +575,10 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
     reason,
     notes: "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.",
     source: "staff",
-    amount: plan.total,
+    outcome: "refunded",
+    amount: totalToRefund,
     onlineAmount,
-    manualAmount: plan.manualAmount,
+    manualAmount,
     parts,
     paymongoRefundID: parts[0]?.paymongoRefundID || null,
     paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
@@ -455,11 +591,12 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
     updatedAt: now,
   });
 
-  // Same amount-owed guard applyDiscount() uses: a payment can't sit with
-  // discountAmount/refundDue implying money still owed once it's refunded.
-  if (plan.total > 0) {
-    await paymentRef.update({ updatedAt: now });
-  }
+  // Resolve any outstanding discount spillover now that it's folded into
+  // this refund, so correctIssuedDiscount() doesn't also try to pay it.
+  await paymentRef.update({
+    updatedAt: now,
+    ...(outstandingDiscountRefund > 0 ? { refundIssued: true } : {}),
+  });
 
   const cancel = await cancelBookingForRefund(bookingID, `Cancelled by staff: ${reason}`);
 
@@ -468,19 +605,17 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   await notifyCustomer(
     userID, bookingID, "refund_approved", "Booking Cancelled — Refund Processed",
     manualRefund
-      ? `Your booking was cancelled: ${reason}. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(plan.manualAmount)} will be handed back to you by our staff.`
-      : plan.total > 0
-        ? `Your booking was cancelled: ${reason}. Your payment of ${peso(plan.total)} is being refunded through PayMongo.`
-        : `Your booking was cancelled: ${reason}.`
+      ? `Your booking was cancelled: ${reason}. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff.`
+      : `Your booking was cancelled: ${reason}. Your payment of ${peso(totalToRefund)} is being refunded through PayMongo.`
   );
 
-  if (customerEmail && plan.total > 0) {
+  if (customerEmail) {
     sendRefundEmail({
       toEmail: customerEmail,
       toName: customerName,
       bookingID,
-      amount: plan.total,
-      manualAmount: plan.manualAmount,
+      amount: totalToRefund,
+      manualAmount,
       reason,
     }).catch((err) => console.error("[REFUND] staff refund email failed:", err.message));
   }
@@ -494,24 +629,22 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
     }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
   }
 
-  if (plan.total > 0) {
-    createTransactionLog({
-      bookingID,
-      paymentID: payment.paymentID,
-      refundRequestID,
-      userID,
-      type: "Refund",
-      amount: plan.total,
-      status: "Refunded",
-      description: `${peso(plan.total)} refunded for booking ${bookingID} — staff cancelled it while changing the car's status: ${reason}.`,
-      performedBy: staffUserID,
-      logID: `${refundRequestID}_staff`,
-    });
-  }
+  createTransactionLog({
+    bookingID,
+    paymentID: payment.paymentID,
+    refundRequestID,
+    userID,
+    type: "Refund",
+    amount: totalToRefund,
+    status: "Refunded",
+    description: `${peso(totalToRefund)} refunded for booking ${bookingID} — staff cancelled it while changing the car's status: ${reason}.`,
+    performedBy: staffUserID,
+    logID: `${refundRequestID}_staff`,
+  });
 
   auditSafe({
     action: "update",
-    description: `Refund ${refundRequestID}: booking ${bookingID} cancelled and ${plan.total > 0 ? `${peso(plan.total)} refunded` : "nothing was owed to refund"} — car status change: ${reason}.`,
+    description: `Refund ${refundRequestID}: booking ${bookingID} cancelled and ${peso(totalToRefund)} refunded — car status change: ${reason}.`,
     userID: staffUserID,
     bookingID,
     paymentID: payment.paymentID,
@@ -519,11 +652,11 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   });
 
   return {
-    refundRequestID,
+    outcome: "refunded",
     bookingID,
-    amount: plan.total,
+    amount: totalToRefund,
     onlineAmount,
-    manualAmount: plan.manualAmount,
+    manualAmount,
     manualRefund,
     bookingCancelled: cancel.cancelled,
   };

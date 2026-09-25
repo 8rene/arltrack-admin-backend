@@ -1,4 +1,4 @@
-import { listRefundRequests, approveRefund, rejectRefund, manualRefundIssued, staffRefund } from "../../controllers/refundRequest/refundRequest.controller.js";
+import { listRefundRequests, approveRefund, rejectRefund, manualRefundIssued } from "../../controllers/refundRequest/refundRequest.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -11,7 +11,9 @@ export const registerRefundRequestRoutes = (app) => {
   app.patch("/api/refund-requests/:id/reject",  verifyToken, requireRole(allowed), rejectRefund);
   // Staff confirm the in-person part of a refund (the balance PayMongo can't return) was handed back.
   app.patch("/api/refund-requests/:id/manual-issued", verifyToken, requireRole(allowed), manualRefundIssued);
-  // Staff force-cancel + refund one upcoming booking directly (no prior customer request) —
-  // used by Fleet.jsx's status-change flow when switching a car to Maintenance/Inactive.
-  app.post("/api/refund-requests/staff-refund/:bookingID", verifyToken, requireRole(allowed), staffRefund);
+  // NOTE: a car's upcoming bookings are now force-refunded/cancelled as one
+  // batch, entirely server-side, inside PATCH /api/fleet/cars/:carID/status
+  // (fleet.controller.js's changeCarStatus) — there's no standalone
+  // "refund this one booking right now" endpoint anymore; firing outside
+  // that one gated, OTP-verified batch would bypass the whole point of it.
 };

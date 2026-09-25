@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getBookingRefundPreview } from "../refundRequest/refundRequest.service.js";
+import { getBookingRefundPreview, getStaffRefundOutcome } from "../refundRequest/refundRequest.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -194,21 +194,66 @@ export const getOpenBookingsForCar = async (carID) => {
   return { upcoming, ongoing };
 };
 
-// Same as above, plus a refund-amount preview attached to each upcoming
-// booking — this is what the "are you sure" modal in Fleet.jsx actually
-// renders (one Refund button + ₱ amount per upcoming booking, one FYI row
-// per ongoing booking, no button since there's nothing to refund yet).
+// Firestore Timestamp or a plain date value — same fallback used elsewhere
+// in the backend (auditLogs/transactionLogs/refundRequest services).
+const toJsDate = (v) => (v?.toDate ? v.toDate() : v ? new Date(v) : null);
+
+const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+
+// Bookings on this car that staff already cancelled through THIS flow
+// (tagged by the "Cancelled by staff: " prefix cancelBookingForRefund
+// writes into cancellationReason), scoped to today-or-later starts only —
+// a booking from months ago that happened to get cancelled this way
+// shouldn't pile up here forever. Shown on the status-change screen after
+// a partial batch failure so staff see the full picture (what already
+// went through), not just what's still blocking — see StatusChangeFlow /
+// AreYouSureRefundModal in Fleet.jsx.
+export const getResolvedBookingsForCar = async (carID) => {
+  const carDoc = await db.collection("cars").doc(carID).get();
+  if (!carDoc.exists) throw new Error("Car not found.");
+  const carIDValue = carBookingIDValue(carDoc);
+  const cutoff = startOfToday();
+
+  const snap = await db.collection("bookings")
+    .where("carID", "==", carIDValue)
+    .where("status", "==", "cancelled")
+    .get();
+
+  const candidates = snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .filter((b) => (b.cancellationReason || "").startsWith("Cancelled by staff:"))
+    .filter((b) => {
+      const start = toJsDate(b.startDateTime);
+      return !start || start >= cutoff; // no date on record — don't hide it, show it
+    });
+
+  return Promise.all(
+    candidates.map(async (b) => {
+      const outcome = await getStaffRefundOutcome(b.bookingID);
+      return { bookingID: b.bookingID, startDateTime: b.startDateTime, endDateTime: b.endDateTime, ...outcome };
+    })
+  );
+};
+
+// Same as getOpenBookingsForCar, plus a refund-amount preview attached to
+// each upcoming booking and the resolved list above — this is what the
+// "are you sure" modal in Fleet.jsx actually renders: one Refund row +
+// ₱ amount per upcoming booking (or an "already refunded" flag), one FYI
+// row per ongoing booking, and an "already resolved" section for context
+// on a retry after a partial batch failure.
 export const getCarBookingsForStatusChange = async (carID) => {
   const { upcoming, ongoing } = await getOpenBookingsForCar(carID);
 
   const upcomingWithPreview = await Promise.all(
     upcoming.map(async (b) => ({
       ...b,
-      refundPreview: await getBookingRefundPreview(b.bookingID).catch(() => ({ total: 0, onlineAmount: 0, manualAmount: 0 })),
+      refundPreview: await getBookingRefundPreview(b.bookingID).catch(() => ({ total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false })),
     }))
   );
 
-  return { upcoming: upcomingWithPreview, ongoing };
+  const resolved = await getResolvedBookingsForCar(carID);
+
+  return { upcoming: upcomingWithPreview, ongoing, resolved };
 };
 
 // ─────────────────────────────────────────────

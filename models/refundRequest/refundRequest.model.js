@@ -5,8 +5,14 @@
 // (services/refundRequest/refundRequest.service.js) lets staff originate a
 // refund directly when they force-cancel an upcoming booking while changing
 // a car's status to Maintenance/Inactive. Those docs carry source: "staff"
-// and start straight at "Approved" — there's no review step to sit in
-// "Pending" for, since staff already decided.
+// and an outcome field ("refunded" | "already_refunded" | "nothing_owed" —
+// the latter two mean no money actually moved, see staffRefundBooking()'s
+// comment) — status starts straight at "Approved" for a real refund, or
+// goes directly to "Refunded" for the other two since there's nothing left
+// to do. No review step to sit in "Pending" for either way, since staff
+// already decided. getResolvedBookingsForCar() (services/fleet/fleet.
+// service.js) reads these back by bookingID so the status-change screen can
+// show what already happened on a retry after a partial batch failure.
 //
 // status flow:
 //   "Pending"  → waiting for admin review
@@ -24,6 +30,7 @@ export const RefundRequest = {
   reason: "",
   notes: "",
   source: "customer", // "customer" (default) | "staff" — see comment above
+  outcome: null, // "refunded" | "already_refunded" | "nothing_owed" — staff-origin docs only
   amount: 0,
   status: "Pending",
   paymongoRefundID: null,

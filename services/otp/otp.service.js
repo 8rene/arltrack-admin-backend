@@ -94,7 +94,7 @@ export const sendOtpEmail = async ({ toEmail, toName, otp, purpose = "role-chang
       payload,
       { headers: { "Content-Type": "application/json" } }
     );
-    console.log(`✅ Admin OTP email sent to ${toEmail}`);
+
     return { success: true };
   } catch (error) {
     const detail = error.response?.data || error.message;
