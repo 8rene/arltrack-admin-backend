@@ -1,5 +1,5 @@
 import { login, logout } from "../../controllers/auth/auth.controller.js";
-import { sendOTP } from "../../controllers/otp/otp.controller.js";
+import { sendOTP, checkOTP } from "../../controllers/otp/otp.controller.js";
 import { sendPasswordResetOTP, resetAdminPassword } from "../../controllers/auth/passwordReset.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 
@@ -16,6 +16,13 @@ export const registerAuthRoutes = (app) => {
   // Used as a confirmation step before sensitive actions like changing a
   // user's role — see PATCH /api/users/:uid/role in user.routes.js.
   app.post("/api/auth/send-otp", verifyToken, sendOTP);
+
+  // Real-time "is this code actually right?" check — doesn't burn the code
+  // (see peekOtp()'s comment in otp.controller.js), just gives immediate
+  // feedback the moment someone finishes typing it. The action that
+  // actually fires still does its own real, single-use check via
+  // consumeOtp() at the moment it happens — this is a courtesy check.
+  app.post("/api/auth/check-otp", verifyToken, checkOTP);
 
   // Forgot-password flow — deliberately NOT behind verifyToken, since this
   // is exactly for staff who can't log in at all. Counterpart to

@@ -84,17 +84,17 @@ export const sendOTP = async (req, res) => {
 };
 
 /**
- * Shared verifier for any sensitive-action endpoint that wants to require
- * a fresh OTP (currently: updateUserRole). NOT an Express handler — call
- * it directly from another controller with the acting admin's email and
- * the code they submitted.
- *
- * Consumes (deletes) the code on success so it can't be replayed, and
- * enforces the same expiry/attempt-lockout rules as the send step.
- *
- * @returns {{ ok: true } | { ok: false, status: number, message: string }}
+ * Shared expiry/lockout/match checking, used by both consumeOtp() and
+ * peekOtp() below so the two never drift out of sync with each other.
+ * consume=true deletes the code on a correct match (single-use, for the
+ * moment an action actually fires); consume=false leaves it in place (for
+ * "is this even right?" feedback the moment someone finishes typing it,
+ * without spending the code before they've actually done anything with it).
+ * A wrong guess always counts against the attempt limit either way —
+ * that's what stops someone from brute-forcing it through the non-consuming
+ * path just because it doesn't burn the code on success.
  */
-export const consumeOtp = async (email, otp) => {
+const checkOtp = async (email, otp, { consume }) => {
   if (!email) return { ok: false, status: 401, message: "Not authenticated." };
   if (!otp)   return { ok: false, status: 400, message: "Verification code is required." };
 
@@ -127,7 +127,44 @@ export const consumeOtp = async (email, otp) => {
     };
   }
 
-  // Valid — burn it so it can't be reused.
-  await docRef.delete();
+  if (consume) await docRef.delete(); // burn it so it can't be reused
   return { ok: true };
+};
+
+/**
+ * Real, single-use check — for the moment a sensitive action actually
+ * fires (currently: updateUserRole, and changeCarStatus's refund batch).
+ * NOT an Express handler — call it directly from another controller with
+ * the acting admin's email and the code they submitted. Deletes the code
+ * on success so it can't be replayed.
+ *
+ * @returns {{ ok: true } | { ok: false, status: number, message: string }}
+ */
+export const consumeOtp = (email, otp) => checkOtp(email, otp, { consume: true });
+
+/**
+ * "Is this code actually right?" check for the moment someone finishes
+ * typing it — real validation (wrong digits / expired / locked out all
+ * still apply), but does NOT burn the code, since nothing's actually
+ * happening yet. Lets the OTP screen tell staff immediately if they
+ * mistyped it, instead of only finding out at the very end after staging
+ * every booking. The code is still verified for real via consumeOtp()
+ * above at the moment it's actually used — this is a courtesy check, not
+ * a replacement for that one.
+ *
+ * @returns {{ ok: true } | { ok: false, status: number, message: string }}
+ */
+export const peekOtp = (email, otp) => checkOtp(email, otp, { consume: false });
+
+/**
+ * POST /api/auth/check-otp   { otp }
+ * (mounted behind verifyToken)
+ * Express wrapper around peekOtp() for the OTP screen's own "Continue"
+ * button — see peekOtp()'s comment for why this doesn't consume the code.
+ */
+export const checkOTP = async (req, res) => {
+  const result = await peekOtp(req.user?.email, req.body?.otp);
+  return res.status(result.ok ? 200 : result.status).json(
+    result.ok ? { success: true } : { success: false, message: result.message }
+  );
 };

@@ -210,7 +210,10 @@ const notifyCustomer = (userID, bookingID, type, title, message) => {
 // resolve customer email + display name for the refund email — mirrors
 // resolveCustomerName's fallback chain (userDetails first/last name, then
 // the "user" collection doc), since the email only lives on the latter.
-const resolveCustomerContact = async (userID) => {
+// Exported too: getCarBookingsForStatusChange() (services/fleet/fleet.
+// service.js) uses it to show "who booked" on the per-booking confirm
+// modal in Fleet.jsx, since bookings only carry a userID.
+export const resolveCustomerContact = async (userID) => {
   if (!userID) return { email: null, name: "—" };
   try {
     let name = "—";
