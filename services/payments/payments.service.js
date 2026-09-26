@@ -840,3 +840,27 @@ export const getPaymentById = async (id) => {
   const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
   return buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund);
 };
+
+// Same full detail as getPaymentById() above (discounts, the deposit/balance
+// timeline, payment stage), just looked up by a booking's OWN bookingID
+// field instead of the payment doc's Firestore id — bookings only carry the
+// former. Reuses buildPaymentRow() so this can never drift out of sync with
+// what the main Payments page shows for the same payment. Used by Fleet.jsx's
+// per-booking confirm modal (status-change → refund flow) so staff see the
+// real payment history before confirming, not a stripped-down summary.
+export const getPaymentDetailsByBookingID = async (bookingID) => {
+  const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  if (paymentSnap.empty) return null;
+  const payment = { id: paymentSnap.docs[0].id, ...paymentSnap.docs[0].data() };
+
+  const bookingSnap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+  const bookingData = bookingSnap.empty ? {} : bookingSnap.docs[0].data();
+
+  const [customerName, vehicleName] = await Promise.all([
+    resolveCustomerName(bookingData.userID),
+    resolveVehicleName(bookingData.carID),
+  ]);
+
+  const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
+  return buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund);
+};

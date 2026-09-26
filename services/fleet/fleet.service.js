@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getBookingRefundPreview, getStaffRefundOutcome, resolveCustomerContact } from "../refundRequest/refundRequest.service.js";
+import { getBookingRefundPreview, getStaffRefundOutcome } from "../refundRequest/refundRequest.service.js";
+import { getPaymentDetailsByBookingID } from "../payments/payments.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -244,15 +245,17 @@ export const getResolvedBookingsForCar = async (carID) => {
 export const getCarBookingsForStatusChange = async (carID) => {
   const { upcoming, ongoing } = await getOpenBookingsForCar(carID);
 
-  // customerName resolved here (not just userID) so Fleet.jsx's
-  // per-booking confirm modal can show "who booked" before staff confirm
-  // it — see the "show booking info + payment + who booked, one short
-  // confirm modal" ask this was built for.
+  // paymentDetails carries the full picture (discounts, the deposit/balance
+  // timeline, payment stage, customer name) — same shape the main Payments
+  // page already builds, reused here (getPaymentDetailsByBookingID) rather
+  // than a stripped-down version, so Fleet.jsx's per-booking confirm modal
+  // can show real payment history before staff confirm it, not a summary
+  // that can drift out of sync with what Payments.jsx itself shows.
   const upcomingWithPreview = await Promise.all(
     upcoming.map(async (b) => ({
       ...b,
       refundPreview: await getBookingRefundPreview(b.bookingID).catch(() => ({ total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false })),
-      customerName: (await resolveCustomerContact(b.userID).catch(() => ({ name: "—" }))).name,
+      paymentDetails: await getPaymentDetailsByBookingID(b.bookingID).catch(() => null),
     }))
   );
 
