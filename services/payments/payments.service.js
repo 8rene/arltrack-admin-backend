@@ -134,7 +134,12 @@ export const computeAmounts = (payment) => {
 // request in flight for this payment? (Pending = awaiting review, Approved =
 // PayMongo/cash return still being completed.)
 const OPEN_REFUND_STATUSES = ["Pending", "Approved"];
-const findOpenRefundRequest = async (paymentID) => {
+// Exported for staffRefundBooking() (services/refundRequest/refundRequest.
+// service.js) too — it needs the exact same check before firing a refund of
+// its own, so a customer's own already-submitted (Pending/Approved) refund
+// request on the same payment can never get raced/duplicated by the staff
+// status-change batch.
+export const findOpenRefundRequest = async (paymentID) => {
   if (!paymentID) return null;
   const snap = await db.collection("refundRequests")
     .where("paymentID", "==", paymentID)

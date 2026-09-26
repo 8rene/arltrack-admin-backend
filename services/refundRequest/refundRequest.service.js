@@ -3,7 +3,7 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { resolveNotification, createNotification } from "../notification/notification.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { computeRefundPlan } from "../payments/paymentBreakdown.js";
-import { PAYMENT_METHODS } from "../payments/payments.service.js";
+import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail } from "../email/email.service.js";
 
@@ -512,6 +512,22 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   // to match. Nothing left to refund — just close the booking out.
   if (payStatus === "refunded") {
     return staffCancelWithNoRefund(bookingID, booking, payment, reason, staffUserID, "already_refunded");
+  }
+
+  // The CUSTOMER already submitted their own refund request for this same
+  // payment (POST /api/refunds on the customer backend) and it's still
+  // sitting Pending or Approved, waiting on the normal admin review — that
+  // request doesn't touch payment.status until an admin actually approves
+  // it, so without this check this batch would sail right past it and fire
+  // a second, completely independent PayMongo refund on the same money.
+  // Stop here instead — the existing one on the Refund Requests page is
+  // the one that should be resolved, not raced by this one.
+  const openCustomerRequest = await findOpenRefundRequest(payment.paymentID);
+  if (openCustomerRequest) {
+    throw fail(
+      `A refund request (${openCustomerRequest.status}) is already open for this booking from the customer's side — resolve it from the Refund Requests page first, then retry.`,
+      409
+    );
   }
 
   const userID = payment.userID || booking.userID || null;
