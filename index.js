@@ -39,6 +39,7 @@ import { registerProfileRequestsRoutes }       from "./routes/profileRequests/pr
 import { registerDriverDispatchRoutes }        from "./routes/driverDispatch/driverDispatch.routes.js"; // ← NEW
 import { registerSystemSettingsRoutes }       from "./routes/systemSettings/systemSettings.routes.js"; // ← NEW
 import { registerLocationOptionsRoutes }       from "./routes/locationOptions/locationOptions.routes.js"; // ← NEW
+import { registerPenaltyRoutes }               from "./routes/penalty/penalty.routes.js"; // ← NEW
 import { seedCacheFromFirestore }            from "./services/gps/gps.service.js";
 
 const app = express();
@@ -98,6 +99,7 @@ registerProfileRequestsRoutes(app);   // ← NEW
 registerDriverDispatchRoutes(app);    // ← NEW
 registerSystemSettingsRoutes(app);   // ← NEW
 registerLocationOptionsRoutes(app);   // ← NEW
+registerPenaltyRoutes(app);           // ← NEW
 
 const PORT = process.env.PORT || 5000;
 

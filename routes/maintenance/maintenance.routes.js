@@ -3,6 +3,7 @@ import {
   listMaintenance,
   getOneMaintenance,
   listMaintenanceByCar,
+  listMaintenanceByBooking,
   addMaintenance,
   editMaintenance,
   setMaintenanceStatus,
@@ -17,7 +18,8 @@ const allowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 
 export const registerMaintenanceRoutes = (app) => {
   app.get   ("/api/maintenance/config",       verifyToken, requireRole(allowed), getConfig);
-  app.get   ("/api/maintenance/car/:carID",   verifyToken, requireRole(allowed), listMaintenanceByCar);
+  app.get   ("/api/maintenance/car/:carID",       verifyToken, requireRole(allowed), listMaintenanceByCar);
+  app.get   ("/api/maintenance/booking/:bookingID", verifyToken, requireRole(allowed), listMaintenanceByBooking);
   app.get   ("/api/maintenance/:id",          verifyToken, requireRole(allowed), getOneMaintenance);
   app.get   ("/api/maintenance",              verifyToken, requireRole(allowed), listMaintenance);
   app.post  ("/api/maintenance",              verifyToken, requireRole(allowed), addMaintenance);

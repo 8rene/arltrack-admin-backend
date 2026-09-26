@@ -196,11 +196,25 @@ export const getMaintenanceByCar = async (carID) => {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
+// Every maintenance record tied to one booking — powers the "linked
+// maintenance" list on a booking's detail view (Bookings.jsx). Most
+// bookings will return an empty array here, since routine maintenance
+// isn't tied to any particular rental.
+export const listMaintenanceForBooking = async (bookingID) => {
+  const snap = await db
+    .collection("carMaintenance")
+    .where("bookingID", "==", bookingID)
+    .orderBy("createdAt", "desc")
+    .get();
+
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+};
+
 // ─────────────────────────────────────────────
 // CREATE maintenance record
 // ─────────────────────────────────────────────
 export const createMaintenance = async (payload, editedBy = null) => {
-  const { carID, basis, services = [], overrideTotal, description = "", maintenanceDate = null, nextMaintenanceDate = null, status, partsAddressed = [] } = payload;
+  const { carID, bookingID = null, basis, services = [], overrideTotal, description = "", maintenanceDate = null, nextMaintenanceDate = null, status, partsAddressed = [] } = payload;
 
   if (!carID) throw new Error("carID is required.");
   if (!BASIS_OPTIONS.includes(basis)) throw new Error(`Invalid basis. Must be one of: ${BASIS_OPTIONS.join(", ")}`);
@@ -218,6 +232,16 @@ export const createMaintenance = async (payload, editedBy = null) => {
 
   const ref = await db.collection("carMaintenance").add({
     carID,
+    // FK -> bookings. Null for routine/scheduled maintenance that isn't
+    // tied to any one rental (oil changes, monthly checks). Set either
+    // automatically (jobs/postRentalMaintenance.job.js, on the completed
+    // booking) or manually via the "+ Post-Rental Maintenance" button on
+    // a booking's detail view (Bookings.jsx's goToMaintenance), which
+    // deep-links here with ?carID=&bookingID= pre-filled. See
+    // listMaintenanceForBooking() below for the read side — this is what
+    // lets a booking's detail view show "linked maintenance" and what a
+    // penalty's optional maintenanceID field can point back to.
+    bookingID,
     basis,
     services: normalizedServices,
     totalCost,

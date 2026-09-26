@@ -24,6 +24,14 @@ const DEFAULTS = {
   storeName: "",
   storeLat: null,
   storeLng: null,
+
+  // Security deposit + late-fee penalty settings — see
+  // services/penalty/penalty.service.js, which snapshots these onto each
+  // deposit/penalty at creation time so a later change here doesn't
+  // retroactively affect bookings already in progress.
+  securityDepositAmount: 1000, // ₱, refundable deposit collected at pickup
+  lateFeeRatePerHour: 100,     // ₱ per billable hour late, after grace
+  lateFeeGraceMinutes: 30,     // subtracted before rounding up to the next hour
 };
 
 const NUMERIC_FIELDS = [
@@ -33,6 +41,9 @@ const NUMERIC_FIELDS = [
   "extraFeeOutsideArea",
   "driversFeeBaseArea",
   "driversFeeOutsideArea",
+  "securityDepositAmount",
+  "lateFeeRatePerHour",
+  "lateFeeGraceMinutes",
 ];
 
 // ─────────────────────────────────────────────

@@ -379,6 +379,22 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
+  // Stamp the actual return moment, once, at the exact instant Return is
+  // clicked (ongoing -> completed). This is deliberately a server
+  // timestamp on THIS transition only — never editable afterward (this
+  // endpoint already blocks further edits to a "completed" booking via
+  // the nonEditable guard above) and never derived from GPS. Chauffeur
+  // bookings use customerDroppedOffAt instead (see bookingSession.service.js),
+  // set earlier when the driver drops the customer off, since the
+  // customer isn't present for this Return click. See
+  // services/penalty/penalty.service.js's previewLateFeeForBooking,
+  // which reads this field to compute the late fee — before this line
+  // was added, that computation had nothing to read for a self-drive
+  // booking and always returned 0.
+  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+    filtered.returnedAt = admin.firestore.FieldValue.serverTimestamp();
+  }
+
   filtered.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
   await db.collection("bookings").doc(docID).update(filtered);

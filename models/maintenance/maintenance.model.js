@@ -6,6 +6,22 @@
 // truth and must stay word-for-word identical to those fallback arrays or
 // a record saved with one label won't match the UI's filter/display logic
 // for the other.
+//
+// bookingID (new): optional FK -> bookings, null for routine maintenance
+// that isn't tied to a specific rental. Set two ways —
+//   1. Automatically, by customer-backend/jobs/postRentalMaintenance.job.js
+//      when it auto-schedules the day after a booking is marked returned.
+//   2. Manually, via the "+ Post-Rental Maintenance" button on a
+//      booking's detail view (Bookings.jsx's goToMaintenance), which
+//      deep-links to /maintenance?carID=&bookingID= and pre-fills the
+//      create form (Maintenance.jsx) to that car and booking, basis
+//      defaulted to "Post-Rental".
+// See services/maintenance/maintenance.service.js's createMaintenance
+// (write side) and listMaintenanceForBooking (read side — powers the
+// "linked maintenance" list on a booking's detail view). This is also
+// what a penalty's optional maintenanceID field points back at, so a
+// customer-caused charge and its actual repair cost stay traceable to
+// each other without being merged into one number.
 
 export const BASIS_OPTIONS = [
   "Post-Rental",

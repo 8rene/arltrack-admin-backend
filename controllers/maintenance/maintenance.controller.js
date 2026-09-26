@@ -3,6 +3,7 @@ import {
   getAllMaintenance,
   getMaintenanceById,
   getMaintenanceByCar,
+  listMaintenanceForBooking,
   createMaintenance,
   updateMaintenance,
   updateMaintenanceStatus,
@@ -49,6 +50,17 @@ export const listMaintenanceByCar = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[MAINTENANCE] listMaintenanceByCar error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/maintenance/booking/:bookingID
+export const listMaintenanceByBooking = async (req, res) => {
+  try {
+    const data = await listMaintenanceForBooking(req.params.bookingID);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[MAINTENANCE] listMaintenanceByBooking error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

@@ -1,7 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 
-const VALID_TYPES   = ["Payment", "Refund", "Deposit", "Discount", "Expense"];
+const VALID_TYPES   = ["Payment", "Refund", "Deposit", "DepositReturn", "Discount", "Expense"];
 const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 
 // Writes one entry to the transactionLogs collection. This is the single

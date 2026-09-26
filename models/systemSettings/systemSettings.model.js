@@ -55,6 +55,17 @@ export const PricingSettings = {
   storeLat: null,  // null = not configured yet; "Pick up in-store" is hidden until both are set
   storeLng: null,
 
+  // Security deposit + late-fee penalty settings. UNLIKE depositFee above
+  // (a reservation deposit concept that's never actually charged — see
+  // services/penalty/penalty.service.js's notes on that), securityDepositAmount
+  // is the real refundable deposit, snapshotted onto each booking's payment
+  // doc at pickup so a later change here doesn't retroactively affect
+  // bookings already in progress. lateFeeRatePerHour/lateFeeGraceMinutes
+  // are likewise snapshotted onto each late-fee penalty at creation time.
+  securityDepositAmount: 1000,
+  lateFeeRatePerHour: 100,
+  lateFeeGraceMinutes: 30,
+
   systemSettingsID: null,  // mirrors this doc's own Firestore ID
   createdAt: null,         // Firestore server timestamp
   updatedBy: null,         // { userID, name } of the staff member who saved this snapshot
