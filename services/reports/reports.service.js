@@ -237,23 +237,31 @@ export const generateReport = async (period, selection = {}) => {
   const byStatus   = {};
   const byMethod   = {};
   const paymentRows = [];
+  // bookingID -> payment amount, so the booking rows below can show a real
+  // total. bookings.totalFee was always written as 0 and has since been
+  // removed from the model entirely — the payment's own `amount` was
+  // always the only real total, same as everywhere else in this app.
+  const paymentAmountByBookingID = {};
 
   paySnap.forEach((doc) => {
     const p = doc.data();
     const amount   = Number(p.amount)     || 0;
-    const deposit  = Number(p.depositFee) || 0;
     const mop      = (p.methodOfPayment || "").toLowerCase();
     let amountPaid = 0;
 
-    if (mop.includes("full"))         { amountPaid = amount; }
-    else if (mop.includes("down"))    { amountPaid = Math.round(amount / 2); }
-    else if (mop.includes("deposit")) { amountPaid = deposit; }
+    if (mop.includes("full"))                        { amountPaid = amount; }
+    else if (mop.includes("down") || mop.includes("partial")) { amountPaid = Math.round(amount / 2); }
     else {
-      amountPaid = ["paid","approved"].includes((p.status||"").toLowerCase()) ? amount : deposit;
+      // Unrecognised/legacy methodOfPayment: only count it if actually
+      // confirmed paid — previously this fell back to a flat ₱1,000
+      // "deposit" figure even for payments that were never collected.
+      amountPaid = ["paid","approved"].includes((p.status||"").toLowerCase()) ? amount : 0;
     }
 
     let status = p.status || "Pending";
     if (status === "Paid") status = "Approved";
+
+    if (p.bookingID) paymentAmountByBookingID[p.bookingID] = amount;
 
     totalRevenue += amount;
     totalPaid    += amountPaid;
@@ -299,7 +307,7 @@ export const generateReport = async (period, selection = {}) => {
       carID:     b.carID || null,
       status:    b.status   || "—",
       location:  b.location || "—",
-      totalFee:  Number(b.totalFee || b.amount || 0),
+      totalFee:  paymentAmountByBookingID[b.bookingID || doc.id] || 0,
       totalDays: b.totalDays || 0,
       startDate: toDate(b.startDateTime || b.startDate)?.toISOString() || null,
       endDate:   toDate(b.endDateTime   || b.endDate)?.toISOString()   || null,

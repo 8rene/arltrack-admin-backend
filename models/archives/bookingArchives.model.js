@@ -11,9 +11,7 @@ export const BookingArchive = {
   endDateTime: null,
   totalDays: 0,
   rentalFee: 0,
-  depositFee: 0,
   serviceFee: 0,
-  totalFee: 0,
   status: "",              // "pending" | "approved" | "completed" | "cancelled"
   isReviewed: false,
   userRating: null,

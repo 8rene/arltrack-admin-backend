@@ -5,9 +5,8 @@ import { resolveVehicleName } from "../booking/booking.service.js";
 const parsePaymentTotal = (data) => {
   const rental  = parseFloat(data.rentalFee  ?? 0) || 0;
   const service = parseFloat(data.serviceFee ?? 0) || 0;
-  const deposit = parseFloat(data.depositFee ?? 0) || 0;
   const extra   = parseFloat(data.extraFee   ?? 0) || 0;
-  return rental + service + deposit + extra;
+  return rental + service + extra;
 };
 
 const toTimestamp = (date) => admin.firestore.Timestamp.fromDate(date);

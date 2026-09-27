@@ -23,8 +23,10 @@ export const getAllBookingArchives = async () => {
       const data = doc.data();
       const bookingID = data.bookingID ?? doc.id;
 
-      // Look up the linked payment archive for the actual amount
-      let paymentAmount = data.totalFee ?? null;
+      // Look up the linked payment archive for the actual amount.
+      // (bookingArchives no longer stores its own totalFee — the payment
+      // archive's `amount` is the real source, looked up below.)
+      let paymentAmount = null;
       try {
         const paySnap = await db
           .collection("paymentsArchives")

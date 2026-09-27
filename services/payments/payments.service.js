@@ -214,7 +214,6 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     // a paid deposit and no refund opened): staff need to see that.
     heldAfterCancel: bookingStatus === "cancelled" && amountPaid > 0 && String(payment.status || "").toLowerCase() !== "refunded" && !openRefund,
     proofUrl: payment.proofUrl || "",
-    depositFee: Number(payment.depositFee) || 0,
     rentalFee: Number(payment.rentalFee) || 0,
     extraFee: Number(payment.extraFee) || 0,
     serviceFee: Number(payment.serviceFee) || 0,

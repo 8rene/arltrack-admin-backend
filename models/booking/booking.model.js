@@ -8,9 +8,7 @@ export const Booking = {
   endDateTime: null,
   totalDays: 0,
   rentalFee: 0,
-  depositFee: 0,
   serviceFee: 0,
-  totalFee: 0,        // rentalFee + depositFee + serviceFee
   status: "",         // "upcoming" | "ongoing" | "completed" | "cancelled" | "cancellation_request" | "stolen"
   modeOfDriving: "",  // "With Chauffeur" | "Self Drive" — set at creation by the customer backend
   hasDevice: false,

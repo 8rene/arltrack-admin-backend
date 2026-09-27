@@ -11,7 +11,6 @@ const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 const DEFAULTS = {
   serviceFee: 50,
   gatewayFee: 53,
-  depositFee: 1000,
   extraFeeOutsideArea: 500,
   driversFeeBaseArea: 1000,
   driversFeeOutsideArea: 1500,
@@ -37,7 +36,6 @@ const DEFAULTS = {
 const NUMERIC_FIELDS = [
   "serviceFee",
   "gatewayFee",
-  "depositFee",
   "extraFeeOutsideArea",
   "driversFeeBaseArea",
   "driversFeeOutsideArea",

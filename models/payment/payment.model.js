@@ -7,7 +7,6 @@ export const Payment = {
   proofUrl: "",
   amount: 0,          // deposit amount (partial)
   rentalFee: 0,
-  depositFee: 0,
   serviceFee: 0,
   extraFee: 0,
   status: "",         // "Paid" | "Pending" | "Refunded"

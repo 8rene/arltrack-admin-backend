@@ -31,7 +31,6 @@ export const PricingSettings = {
   // Flat fees
   serviceFee: 50,      // flat platform/service fee
   gatewayFee: 53,      // flat payment gateway fee
-  depositFee: 1000,    // reservation deposit
 
   // Out-of-area / chauffeur fees
   extraFeeOutsideArea: 500,     // added when destination is outside the base area
@@ -55,10 +54,10 @@ export const PricingSettings = {
   storeLat: null,  // null = not configured yet; "Pick up in-store" is hidden until both are set
   storeLng: null,
 
-  // Security deposit + late-fee penalty settings. UNLIKE depositFee above
-  // (a reservation deposit concept that's never actually charged — see
-  // services/penalty/penalty.service.js's notes on that), securityDepositAmount
-  // is the real refundable deposit, snapshotted onto each booking's payment
+  // Security deposit + late-fee penalty settings. securityDepositAmount
+  // is the real refundable deposit (the old flat, never-actually-charged
+  // "reservation deposit" concept has been removed), snapshotted onto
+  // each booking's payment
   // doc at pickup so a later change here doesn't retroactively affect
   // bookings already in progress. lateFeeRatePerHour/lateFeeGraceMinutes
   // are likewise snapshotted onto each late-fee penalty at creation time.

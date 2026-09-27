@@ -1,7 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import {
-  PENALTY_TYPES,
   PENALTY_STATUSES,
   createPenaltyPayload,
 } from "../../models/penalty/penalty.model.js";
@@ -102,23 +101,29 @@ export const previewLateFeeForBooking = async (bookingID) => {
 // Draft creation / editing
 // ─────────────────────────────────────────────
 
-// Deterministic ID for types that should only ever exist once per
-// booking (late fee, a specific damaged part) so a double-click on "+"
-// can't create a duplicate draft. Free-typed "other" penalties get a
-// random ID since there's no natural key to dedupe on.
-const buildPenaltyID = (bookingID, type, key) => {
-  if (type === "Late") return `${bookingID}_late`;
-  if (type === "Part" && key) return `${bookingID}_part_${key}`;
+// Deterministic ID for the one kind of penalty that should only ever
+// exist once per booking (the late fee) so a double-click on "+" can't
+// create a duplicate draft. Everything else — including damaged parts,
+// now that they're named manually in `lineItems` instead of via a
+// carPartID FK — gets a random ID, since there's no natural key left to
+// dedupe on. There's no `type` field anymore to check against "Late", so
+// this keys off lateMinutes being present instead (it's null for every
+// non-late-fee penalty — see the model).
+const buildPenaltyID = (bookingID, lateMinutes) => {
+  if (lateMinutes !== null && lateMinutes !== undefined) return `${bookingID}_late`;
   return null; // caller falls back to db.collection("penalties").doc().id
 };
 
 export const createDraftPenalty = async ({
-  bookingID, type, description = "", carPartID = null, inspectionID = null,
+  bookingID, lineItems = [],
   lateMinutes = null, graceMinutes = null, rateAtCreation = null,
   computedAmount = 0, amount, overrideReason = "", createdBy,
 }) => {
-  if (!PENALTY_TYPES.includes(type)) {
-    return { error: `Invalid penalty type "${type}".` };
+  if (!Array.isArray(lineItems) || lineItems.length === 0) {
+    return { error: "At least one line item is required." };
+  }
+  if (lineItems.some((item) => !item?.description?.trim())) {
+    return { error: "Every line item needs a description." };
   }
 
   const booking = await getBookingDoc(bookingID);
@@ -132,7 +137,7 @@ export const createDraftPenalty = async ({
     return { error: "A reason is required when the amount is adjusted from the computed value." };
   }
 
-  const deterministicID = buildPenaltyID(bookingID, type, carPartID);
+  const deterministicID = buildPenaltyID(bookingID, lateMinutes);
   const ref = deterministicID
     ? db.collection("penalties").doc(deterministicID)
     : db.collection("penalties").doc();
@@ -152,7 +157,7 @@ export const createDraftPenalty = async ({
     paymentID: payment.data.paymentID || payment.ref.id,
     userID:    booking.data.userID    || null,
     carID:     booking.data.carID     || null,
-    type, description, carPartID, inspectionID,
+    lineItems,
     lateMinutes, graceMinutes, rateAtCreation,
     computedAmount, amount: finalAmount, overrideReason,
     status: "Draft",
@@ -165,7 +170,7 @@ export const createDraftPenalty = async ({
   createAuditLog?.({
     action: "create", userID: createdBy,
     bookingID, paymentID: payload.paymentID,
-    description: `Drafted ${type} penalty of \u20b1${finalAmount} on booking ${bookingID}.`,
+    description: `Drafted penalty of \u20b1${finalAmount} on booking ${bookingID}: ${lineItems.map((i) => i.description).join(", ")}.`,
   }).catch(() => {});
 
   return { penaltyID: ref.id };
@@ -173,12 +178,21 @@ export const createDraftPenalty = async ({
 
 // Only Draft penalties can be edited — once Confirmed, use
 // voidOrWaivePenalty + a new draft instead of mutating history.
-export const updateDraftPenalty = async (penaltyID, { amount, overrideReason, description }, actorUid) => {
+export const updateDraftPenalty = async (penaltyID, { amount, overrideReason, lineItems }, actorUid) => {
   const ref = db.collection("penalties").doc(penaltyID);
   const snap = await ref.get();
   if (!snap.exists) return { error: "Penalty not found." };
   const penalty = snap.data();
   if (penalty.status !== "Draft") return { error: "Only draft penalties can be edited." };
+
+  if (lineItems !== undefined) {
+    if (!Array.isArray(lineItems) || lineItems.length === 0) {
+      return { error: "At least one line item is required." };
+    }
+    if (lineItems.some((item) => !item?.description?.trim())) {
+      return { error: "Every line item needs a description." };
+    }
+  }
 
   const finalAmount = amount ?? penalty.amount;
   if (finalAmount !== penalty.computedAmount && !(overrideReason ?? penalty.overrideReason ?? "").trim()) {
@@ -188,7 +202,7 @@ export const updateDraftPenalty = async (penaltyID, { amount, overrideReason, de
   await ref.update({
     amount: finalAmount,
     overrideReason: overrideReason ?? penalty.overrideReason ?? "",
-    description: description ?? penalty.description,
+    lineItems: lineItems ?? penalty.lineItems,
     updatedAt: timestamp(),
   });
   return { penaltyID };
@@ -211,11 +225,12 @@ export const listDraftQueue = async () => {
 };
 
 // Confirmed penalties that still have an outstanding balance (paidAmount
-// < amount) for a given customer — this is what powers the createBooking
-// guard on the customer side. See services/user/user.service.js's
-// outstandingPenaltyBalance mirror, written by settleBooking() below,
-// which is the cheap read the customer backend actually uses; this
-// function is the source of truth it's mirrored from.
+// < amount) for a given customer. Used by recordShortfallPayment() below.
+// The customer-backend's own createBooking guard and profile endpoint
+// used to read a cached outstandingPenaltyBalance field mirrored onto the
+// user doc from this same query — that field was removed since it could
+// drift out of sync, so those two spots now run this same kind of query
+// directly against Firestore themselves instead of reading a mirror of it.
 export const listUnpaidPenaltiesForUser = async (userID) => {
   const snap = await db.collection("penalties")
     .where("userID", "==", userID)
@@ -242,15 +257,17 @@ export const confirmPenalty = async (penaltyID, actorUid) => {
     updatedAt: timestamp(),
   });
 
+  const itemNames = (penalty.lineItems || []).map((i) => i.description).join(", ");
+
   await notifyCustomer(
     penalty.userID, penalty.bookingID, "PenaltyConfirmed",
     "A charge was added to your booking",
-    `A ₱${penalty.amount} charge (${penalty.type}) was confirmed on your recent booking. See your booking details for the breakdown.`
+    `A ₱${penalty.amount} charge was confirmed on your recent booking — ${itemNames}. See your booking details for the breakdown.`
   );
   createAuditLog?.({
     action: "update", userID: actorUid,
     bookingID: penalty.bookingID, paymentID: penalty.paymentID,
-    description: `Confirmed ${penalty.type} penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}).`,
+    description: `Confirmed penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}): ${itemNames}.`,
   }).catch(() => {});
 
   return { penaltyID };
@@ -281,17 +298,19 @@ export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorU
     updatedAt: timestamp(),
   });
 
+  const itemNames = (penalty.lineItems || []).map((i) => i.description).join(", ");
+
   if (status === "Waived") {
     await notifyCustomer(
       penalty.userID, penalty.bookingID, "PenaltyWaived",
       "A charge on your booking was waived",
-      `The ₱${penalty.amount} charge (${penalty.type}) on your recent booking was waived.`
+      `The ₱${penalty.amount} charge on your recent booking was waived — ${itemNames}.`
     );
   }
   createAuditLog?.({
     action: "update", userID: actorUid,
     bookingID: penalty.bookingID, paymentID: penalty.paymentID,
-    description: `${status} ${penalty.type} penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}). Reason: ${statusReason}`,
+    description: `${status} penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}): ${itemNames}. Reason: ${statusReason}`,
   }).catch(() => {});
 
   return { penaltyID };
@@ -465,15 +484,11 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     });
   }
 
-  // Mirror the still-outstanding balance onto the user doc so
-  // createBooking() on the customer side is a cheap single read instead
-  // of scanning that customer's penalties on every booking attempt.
-  if (result.userID) {
-    await db.collection("user").doc(result.userID).set(
-      { outstandingPenaltyBalance: result.outstandingAfterDeposit },
-      { merge: true }
-    );
-  }
+  // outstandingPenaltyBalance used to be mirrored onto the user doc here.
+  // That field has been removed — createBooking() on the customer side
+  // now queries `penalties` directly (userID + status == "Confirmed",
+  // summing amount - paidAmount) instead of reading a cached rollup, so
+  // there's nothing to write back to the user doc anymore.
 
   return {
     bookingID, paymentID,
@@ -486,8 +501,9 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
 
 // Called once staff record a customer paying off an OwedByCustomer
 // balance in store (or online — see customer-backend/routes/penalty.routes.js
-// for that path). Reduces the mirrored balance and marks the still-open
-// penalties as paid in creation order, same as the deposit deduction above.
+// for that path). Marks the still-open penalties as paid in creation
+// order, same as the deposit deduction above. No user-doc rollup to
+// update anymore — the customer side queries `penalties` live instead.
 export const recordShortfallPayment = async ({ userID, amount, method, referenceNumber = "", performedBy }) => {
   if (!(amount > 0)) return { error: "amount must be greater than 0." };
 
@@ -512,7 +528,6 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
 
   const stillUnpaid = await listUnpaidPenaltiesForUser(userID);
   const newBalance = stillUnpaid.reduce((sum, p) => sum + (p.amount - (p.paidAmount || 0)), 0);
-  await db.collection("user").doc(userID).set({ outstandingPenaltyBalance: newBalance }, { merge: true });
 
   await createTransactionLog({
     userID, type: "Payment", amount: amount - remaining, status: "Success",
@@ -521,4 +536,61 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
   });
 
   return { userID, applied: amount - remaining, remainingBalance: newBalance };
+};
+
+// ─────────────────────────────────────────────
+// Full listing for the admin Penalties page.
+//
+// Returns every penalty, newest first, enriched with display fields the
+// page's stat cards / table need. Mirrors getAllMaintenance()'s join
+// pattern in services/maintenance/maintenance.service.js: fetch the
+// related collections once, build lookup maps, spread them onto each
+// record. userID/carID are already denormalized on the penalty doc, so
+// no lookup through `bookings` is needed for those two — only the
+// booking's own date range is fetched via bookingID, for display context.
+//
+// No counts/summaries are computed here — same as maintenance, the
+// frontend derives its stat-card counts by filtering this array
+// client-side, so there's only one place that owns "what counts as
+// Draft/Unpaid/Settled/Voided".
+// ─────────────────────────────────────────────
+export const getAllPenalties = async () => {
+  const [penaltiesSnap, bookingsSnap, carsSnap, brandSnap, modelSnap, userSnap] = await Promise.all([
+    db.collection("penalties").orderBy("createdAt", "desc").get(),
+    db.collection("bookings").get(),
+    db.collection("cars").get(),
+    db.collection("brand").get(),
+    db.collection("model").get(),
+    db.collection("user").get(),
+  ]);
+
+  const bookingMap = Object.fromEntries(bookingsSnap.docs.map((d) => [d.data().bookingID || d.id, d.data()]));
+  const carMap     = Object.fromEntries(carsSnap.docs.map((d) => [d.id, d.data()]));
+  const brandMap   = Object.fromEntries(brandSnap.docs.map((d) => [d.id, d.data().brandName]));
+  const modelMap   = Object.fromEntries(modelSnap.docs.map((d) => [d.id, d.data().modelName]));
+  const userMap    = Object.fromEntries(userSnap.docs.map((d) => [d.id, d.data()]));
+
+  const toISO = (v) => (v?.toDate ? v.toDate().toISOString() : v ?? null);
+
+  return penaltiesSnap.docs.map((d) => {
+    const data = d.data();
+    const booking = bookingMap[data.bookingID];
+    const car = carMap[data.carID];
+    const customer = userMap[data.userID];
+
+    return {
+      id: d.id,
+      ...data,
+      customerName: customer?.username || "—",
+      plateNumber:  car?.plateNumber   || "—",
+      brandName:    car ? brandMap[car.brandID] || "—" : "—",
+      modelName:    car ? modelMap[car.modelID] || "—" : "—",
+      bookingStart: booking ? toISO(booking.startDateTime) : null,
+      bookingEnd:   booking ? toISO(booking.endDateTime)   : null,
+      createdAt:    toISO(data.createdAt),
+      confirmedAt:  toISO(data.confirmedAt),
+      paidAt:       toISO(data.paidAt),
+      updatedAt:    toISO(data.updatedAt),
+    };
+  });
 };

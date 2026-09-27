@@ -10,20 +10,19 @@
 // Only Confirmed penalties count toward the deposit settlement math or
 // are ever shown to the customer. Once Confirmed, a penalty is locked —
 // corrections go through Voided/Waived + a new entry, never a silent
-// edit to amount/type after the fact (see updateDraftPenalty, which
+// edit to amount/lineItems after the fact (see updateDraftPenalty, which
 // refuses once status !== "Draft").
+//
+// PENALTY_TYPES / the single `type` + `description` fields are gone —
+// replaced by `lineItems`, an array of { description, amount } typed
+// freely at draft time (e.g. [{ description: "Cleaning", amount: 300 },
+// { description: "Missing floor mat", amount: 200 }]). This is what the
+// "manual input instead of a carPartID/inspectionID/maintenanceID FK"
+// change landed as: a plain snapshot of what was true when the penalty
+// was charged, not a live join back to those other collections. The
+// penalty's own `amount` is the actually-charged total — normally the
+// sum of lineItems' amounts, but can be overridden (see overrideReason).
 // ─────────────────────────────────────────────────────────────
-
-export const PENALTY_TYPES = [
-  "Late",        // computed from returnedAt / customerDroppedOffAt vs. end time
-  "Part",        // sourced from the booking's after-trip inspection
-  "Cleaning",
-  "Fuel",
-  "Violation",
-  "Smoking",
-  "LostItem",
-  "Other",
-];
 
 export const PENALTY_STATUSES = ["Draft", "Confirmed", "Voided", "Waived"];
 
@@ -48,22 +47,15 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   userID:    data.userID    || null, // FK -> user (customer being charged)
   carID:     data.carID     || null, // FK -> car (denormalized, for per-car reporting)
 
-  type:        data.type        || "Other",
-  description: data.description || "",
+  lineItems: Array.isArray(data.lineItems) ? data.lineItems : [], // [{ description, amount }]
 
-  // Late-fee specific — null for every other type.
+  // Late-fee specific — null for every other kind of penalty. This is
+  // also how the code now tells a late-fee draft apart from any other
+  // kind (see buildPenaltyID in penalty.service.js) now that there's no
+  // `type` field to check against "Late".
   lateMinutes:    data.lateMinutes    ?? null,
   graceMinutes:   data.graceMinutes   ?? null, // system-settings snapshot at creation time
   rateAtCreation: data.rateAtCreation ?? null, // ₱/hour, system-settings snapshot
-
-  // Part-damage specific — null for every other type.
-  carPartID:    data.carPartID    || null, // FK -> carParts
-  inspectionID: data.inspectionID || null, // FK -> vehicleDocumentation (the after-trip doc)
-
-  // Optional link to a repair record filed for this same damage — set
-  // later, independent of this penalty's own lifecycle. See
-  // services/maintenance/maintenance.service.js for the other side.
-  maintenanceID: data.maintenanceID || null,
 
   computedAmount: data.computedAmount ?? 0, // auto-calculated value, before any manual override
   amount:         data.amount         ?? 0, // amount actually charged (editable while Draft)

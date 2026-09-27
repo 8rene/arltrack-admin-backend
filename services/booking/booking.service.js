@@ -27,7 +27,7 @@ export const resolveVehicleName = async (carID) => {
   } catch { return "—"; }
 };
 
-// bookingID → { paymentMethod, totalFee, rentalFee, depositFee, serviceFee,
+// bookingID → { paymentMethod, totalFee, rentalFee, serviceFee,
 // extraFee, amountPaid, balance, payType, paymentStatus } from payments
 // collection. totalFee comes from payments.amount; the fee breakdown comes
 // straight off the same doc. amountPaid/balance/payType are derived via the
@@ -39,7 +39,7 @@ export const resolveVehicleName = async (carID) => {
 // cancelled *booking* still forces "Cancelled" (applied by the caller,
 // which has b.status handy — see getAllBookings below).
 const EMPTY_PAYMENT_INFO = {
-  paymentMethod: "—", totalFee: 0, rentalFee: 0, depositFee: 0, serviceFee: 0, extraFee: 0,
+  paymentMethod: "—", totalFee: 0, rentalFee: 0, serviceFee: 0, extraFee: 0,
   amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentStage: "—", discountAmount: 0,
   refundDue: 0, refundIssued: false,
 };
@@ -59,7 +59,6 @@ const resolvePaymentInfo = async (bookingID) => {
       paymentMethod: data.paymentMethod || "—",
       totalFee:      data.amount        ?? 0,
       rentalFee:     data.rentalFee     ?? 0,
-      depositFee:    data.depositFee    ?? 0,
       serviceFee:    data.serviceFee    ?? 0,
       extraFee:      data.extraFee      ?? 0,
       amountPaid,
@@ -261,7 +260,6 @@ export const getAllBookings = async (statusFilter) => {
       paymentMethod:    payInfo.paymentMethod,
       totalFee:         payInfo.totalFee,        // from payments.amount
       rentalFee:        payInfo.rentalFee,
-      depositFee:       payInfo.depositFee,
       serviceFee:       payInfo.serviceFee,
       extraFee:         payInfo.extraFee,
       amountPaid:       payInfo.amountPaid,

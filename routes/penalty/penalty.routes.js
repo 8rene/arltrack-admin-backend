@@ -10,6 +10,7 @@ import {
   postWaiveDeposit,
   postSettleBooking,
   postShortfallPayment,
+  getAllPenaltiesHandler,
 } from "../../controllers/penalty/penalty.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
@@ -22,6 +23,7 @@ const staff      = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR, roles.DRIVER];
 const supervisor = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 
 export const registerPenaltyRoutes = (app) => {
+  app.get ("/api/penalties",                              verifyToken, requireRole(staff), getAllPenaltiesHandler);
   app.get ("/api/penalties/late-fee-preview/:bookingID", verifyToken, requireRole(staff), getLateFeePreview);
   app.get ("/api/penalties/booking/:bookingID",           verifyToken, requireRole(staff), getBookingPenalties);
   app.get ("/api/penalties/queue",                        verifyToken, requireRole(staff), getDraftQueue);

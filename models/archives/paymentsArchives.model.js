@@ -9,7 +9,6 @@ export const PaymentsArchive = {
   proofUrl: "",
   amount: 0,
   rentalFee: 0,
-  depositFee: 0,
   serviceFee: 0,
   extraFee: 0,
   status: "",              // "Paid" | "Pending" | "Refunded"
