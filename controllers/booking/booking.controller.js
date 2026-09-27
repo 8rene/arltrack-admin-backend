@@ -1,4 +1,4 @@
-import { getAllBookings, updateBooking, markBookingDroppedOff, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
+import { getAllBookings, updateBooking, markBookingDroppedOff, markDeviceChecked, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
 import { deleteBookingWithCascade } from "../../services/booking/bookingDelete.service.js";
 
 export const listBookings = async (req, res) => {
@@ -47,7 +47,7 @@ export const rejectCancellation = async (req, res) => {
   }
 };
 
-// ── Chauffeur-only: mark customer dropped off, separate from Return ──
+// ── Mark the vehicle physically dropped off, every booking type, separate from Return ──
 export const markDroppedOff = async (req, res) => {
   try {
     const { id } = req.params;
@@ -55,6 +55,31 @@ export const markDroppedOff = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] markDroppedOff error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// ── Required GPS device-check note at Return — does not touch gpsDevice, see booking.service.js ──
+export const deviceCheck = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body || {};
+    const result = await markDeviceChecked(id, note, req.user?.email || req.user?.uid || null);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[BOOKINGS] deviceCheck error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// ── Read-only "what's still missing before Return" panel — never blocks anything ──
+export const returnChecklist = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await getReturnChecklist(id);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[BOOKINGS] returnChecklist error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

@@ -65,10 +65,18 @@ export const computeLateFee = ({ scheduledEndAt, actualReturnAt, graceMinutes, r
 };
 
 // Preview a booking's late fee against the CURRENT system settings and
-// its own returnedAt/customerDroppedOffAt — used to pre-fill the "+"
-// button in the Penalties page before a draft is created. Chauffeur
-// bookings use customerDroppedOffAt (the driver isn't holding the car
-// hostage waiting for a Return click); everything else uses returnedAt.
+// its own droppedOffTime — used to pre-fill the "+" button in the
+// Penalties page (and the driver's own "create penalty" action) before a
+// draft is created.
+//
+// Every booking type now uses the single droppedOffTime stamped on the
+// bookingSession when the vehicle itself is physically dropped off — this
+// used to branch on modeOfDriving and read a customerDroppedOffAt field
+// straight off the *bookings* collection for chauffeur trips, but that
+// field only ever lived on the bookingSession doc, never on the booking
+// doc itself, so that branch silently computed 0 for every chauffeur
+// booking. Reading the session directly fixes that as well as unifying
+// the two paths into one.
 export const previewLateFeeForBooking = async (bookingID) => {
   const booking = await getBookingDoc(bookingID);
   if (!booking) return null;
@@ -77,15 +85,8 @@ export const previewLateFeeForBooking = async (bookingID) => {
   const graceMinutes = Number(settings.lateFeeGraceMinutes ?? 30);
   const ratePerHour   = Number(settings.lateFeeRatePerHour ?? 100);
 
-  // "With Chauffeur" bookings use customerDroppedOffAt — the driver keeps
-  // the car after drop-off to return it and do the after-trip inspection,
-  // so attributing that transit/inspection time to the customer as
-  // lateness would overcharge them. Field name matches booking.service.js
-  // / driverDispatch.service.js's modeOfDriving check exactly.
-  const isChauffeur = booking.data.modeOfDriving === "With Chauffeur";
-  const actualReturnAt = isChauffeur
-    ? booking.data.customerDroppedOffAt
-    : booking.data.returnedAt;
+  const session = await getSessionByBookingID(bookingID);
+  const actualReturnAt = session?.data?.droppedOffTime || booking.data.returnedAt;
 
   const { lateMinutes, billableHours, computedAmount } = computeLateFee({
     scheduledEndAt: booking.data.endDateTime,
@@ -172,6 +173,23 @@ export const createDraftPenalty = async ({
     bookingID, paymentID: payload.paymentID,
     description: `Drafted penalty of \u20b1${finalAmount} on booking ${bookingID}: ${lineItems.map((i) => i.description).join(", ")}.`,
   }).catch(() => {});
+
+  // Late-fee penalties are system-computed (lateMinutes is set), not a
+  // human judgment call the way a damage/cleaning charge is — nothing for
+  // a supervisor to review, so skip the Draft queue and confirm right
+  // away. This deducts from the deposit and notifies the customer
+  // immediately. Manually-typed penalties (lateMinutes null) stay Draft,
+  // waiting on a supervisor, same as before.
+  if (lateMinutes !== null && lateMinutes !== undefined) {
+    const confirmResult = await confirmPenalty(ref.id, createdBy);
+    if (confirmResult.error) {
+      // Draft already exists and is valid — surface the confirm failure
+      // but don't roll back the draft; staff can confirm it manually.
+      console.error(`[PENALTY] auto-confirm of late fee ${ref.id} failed:`, confirmResult.error);
+      return { penaltyID: ref.id, autoConfirmError: confirmResult.error };
+    }
+    return { penaltyID: ref.id, autoConfirmed: true };
+  }
 
   return { penaltyID: ref.id };
 };
@@ -572,6 +590,20 @@ export const getAllPenalties = async () => {
 
   const toISO = (v) => (v?.toDate ? v.toDate().toISOString() : v ?? null);
 
+  // Only meaningful for Confirmed penalties — that's the only status
+  // where paidAmount tracks real money changing hands (Draft has none
+  // yet, Voided/Waived are refused once anything's been paid — see
+  // voidOrWaivePenalty). Draft/Voided/Waived just pass their own status
+  // through unchanged so the badge always shows something sensible.
+  const settlementStatusFor = (data) => {
+    if (data.status !== "Confirmed") return data.status;
+    const paid = data.paidAmount || 0;
+    const amount = data.amount || 0;
+    if (paid <= 0) return "Unpaid";
+    if (paid < amount) return "Partially Paid";
+    return "Paid";
+  };
+
   return penaltiesSnap.docs.map((d) => {
     const data = d.data();
     const booking = bookingMap[data.bookingID];
@@ -581,6 +613,7 @@ export const getAllPenalties = async () => {
     return {
       id: d.id,
       ...data,
+      settlementStatus: settlementStatusFor(data),
       customerName: customer?.username || "—",
       plateNumber:  car?.plateNumber   || "—",
       brandName:    car ? brandMap[car.brandID] || "—" : "—",

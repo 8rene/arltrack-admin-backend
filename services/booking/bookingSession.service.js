@@ -134,15 +134,18 @@ export const markSessionStolen = async (bookingSessionID) => {
 };
 
 /**
- * Chauffeur-only marker: the customer's leg of the trip is over, but the
- * session stays "active" — the driver still has the car until Return.
- * Deliberately doesn't touch `status`; this is purely an extra timestamp
- * alongside pickupTime/returnTime. No backfill, no re-editing — the
- * caller (booking.service.js) is responsible for only calling this once.
+ * Universal marker, every booking type: the vehicle itself is physically
+ * back, as distinct from Return (which only happens once inspection /
+ * penalties / device-check all clear). Deliberately doesn't touch
+ * `status`; this is purely an extra timestamp alongside pickupTime/
+ * returnTime. No backfill, no re-editing — the caller
+ * (booking.service.js's markBookingDroppedOff) is responsible for only
+ * calling this once, and for checking droppedOffTime isn't already set
+ * before calling it.
  */
-export const markCustomerDroppedOff = async (bookingSessionID) => {
+export const markDroppedOff = async (bookingSessionID) => {
   await SESSIONS().doc(bookingSessionID).update({
-    customerDroppedOffAt: admin.firestore.FieldValue.serverTimestamp(),
+    droppedOffTime: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 };

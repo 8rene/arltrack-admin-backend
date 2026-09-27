@@ -30,17 +30,20 @@ export const BookingSession = {
   pickupTime:          null,
   returnTime:          null,
 
-  // Chauffeur-only, admin-side addition. The customer's leg of the trip
-  // can end well before the driver actually returns the car (driver still
-  // has to drive back), so this is tracked separately from returnTime
-  // rather than conflating "customer dropped off" with "trip complete".
-  // Only ever set for modeOfDriving === "With Chauffeur" bookings — never
+  // Admin-side addition, set for EVERY booking (self-drive and chauffeur
+  // alike) — the moment the vehicle itself is physically back on the lot,
+  // as distinct from returnTime (which only gets stamped once Return is
+  // actually confirmed, after inspection/penalty/device-check clear).
+  // Whoever has custody of the car marks this: the assigned driver on a
+  // chauffeur booking, or a supervisor/staff member on a self-drive one
+  // (there's no driver to do it on those). This is the single moment used
+  // for the late-fee calculation for every booking type — never
   // auto-filled/backfilled from returnTime, and never editable after the
   // fact: if it's null, nobody tapped "Dropped Off", full stop. That's a
   // deliberate choice — a guessed or backfilled timestamp here would look
   // just as authoritative as a real one with no way to tell them apart,
   // which is worse than an honest gap.
-  customerDroppedOffAt: null,
+  droppedOffTime: null,
 
   currentPosition:     null, // { lat, lng, date }
   archiveUrl:          null, // public Firebase Storage URL, set by the nightly flush job

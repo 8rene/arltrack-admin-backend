@@ -50,7 +50,13 @@ const resolveVehicleName = async (carID) => {
 // use, so the driver's My Trips payment modal matches the admin side
 // exactly instead of being derived a third, different way (or not at all,
 // which is what was happening here before).
-const EMPTY_PAYMENT = { totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", discountAmount: 0, refundDue: 0, refundIssued: false };
+const EMPTY_PAYMENT = {
+  totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—",
+  discountAmount: 0, refundDue: 0, refundIssued: false,
+  // Deposit / penalty breakdown — populated for the ongoing-trip Payments
+  // button; 0/false for a trip with no payment doc yet.
+  depositAmount: 0, depositStatus: "—", confirmedPenaltyTotal: 0, amountToReturn: 0,
+};
 const EMPTY_CHECKLIST = { photos: false, parts: false, complete: false };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT;
@@ -64,10 +70,32 @@ const resolvePaymentInfo = async (bookingID) => {
     const { amountPaid, balance, payType, refundDue } = computeAmounts(data);
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
+
+    // Same "what does the customer get back / still owe" math as
+    // settleBooking() in penalty.service.js: deposit held minus every
+    // unpaid Confirmed penalty, still-negative-allowed. Read-only here —
+    // this never writes anything, it's just a live preview for the
+    // driver's Payments button before Return actually runs settlement.
+    const deposit = data.deposit || null;
+    const depositAmount = deposit?.amount || 0;
+    const depositStatus = deposit?.status || "—";
+    const penaltiesSnap = await db.collection("penalties")
+      .where("bookingID", "==", bookingID)
+      .where("status", "==", "Confirmed")
+      .get();
+    const confirmedPenaltyTotal = penaltiesSnap.docs.reduce(
+      (sum, p) => sum + Math.max(0, (p.data().amount || 0) - (p.data().paidAmount || 0)),
+      0
+    );
+    // Can go negative — that's the customer owing more than the deposit
+    // covers, same as settleBooking()'s `net`.
+    const amountToReturn = depositAmount - confirmedPenaltyTotal;
+
     return {
       totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus,
       discountAmount: Number(data.discountAmount) || 0,
       refundDue, refundIssued: !!data.refundIssued,
+      depositAmount, depositStatus, confirmedPenaltyTotal, amountToReturn,
     };
   } catch { return EMPTY_PAYMENT; }
 };
@@ -447,7 +475,7 @@ export const getMyTripHistory = async (driverID) => {
 
 // Shared shaping for the two driver-facing lists above — same vehicle/
 // customer resolution as getDispatchBoard, plus each booking's session
-// (for pickupTime/customerDroppedOffAt/returnTime display).
+// (for pickupTime/droppedOffTime/returnTime display).
 const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
@@ -492,7 +520,7 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         customerName:         userMap[b.userID]?.name || "—",
         customerPhone:        userMap[b.userID]?.phone || "—",
         pickupTime:           toJSDate(sessions[i]?.data?.pickupTime),
-        customerDroppedOffAt: toJSDate(sessions[i]?.data?.customerDroppedOffAt),
+        droppedOffTime:       toJSDate(sessions[i]?.data?.droppedOffTime),
         returnTime:           toJSDate(sessions[i]?.data?.returnTime),
         // Set by the customer backend at booking time (see bookingsession.model.js).
         // Null when a session hasn't been created yet / doesn't have coords geocoded.
