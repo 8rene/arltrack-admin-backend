@@ -111,11 +111,21 @@ const resolveServiceType = async (serviceTypeID) => {
 // actually flushed a trail to Storage (archiveUrl set) — a session that
 // exists but never got flushed still reports false, same as "no session at
 // all", since either way there's nothing in History to show yet.
+const EMPTY_HISTORY_INFO = {
+  hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, droppedOffTime: null,
+  // { address, lat, lng } | null — set by the customer backend at booking
+  // time (see bookingsession.model.js). geofenceZones carries any extra
+  // stops the customer selected beyond pickup/dropoff (same field
+  // CarTracking's live map and BookingInfoPanel already read) — surfaced
+  // here too so Bookings.jsx's detail view can plot every stop on a map,
+  // not just the two endpoints.
+  pickupLocation: null, dropoffLocation: null, geofenceZones: [],
+};
 const resolveHistoryInfo = async (bookingID) => {
-  if (!bookingID) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, droppedOffTime: null };
+  if (!bookingID) return EMPTY_HISTORY_INFO;
   try {
     const snap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
-    if (snap.empty) return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, droppedOffTime: null };
+    if (snap.empty) return EMPTY_HISTORY_INFO;
     const data = snap.docs[0].data();
     return {
       hasHistory:       !!data.archiveUrl,
@@ -127,8 +137,11 @@ const resolveHistoryInfo = async (bookingID) => {
       // show the Dropped Off marker without an extra round trip per booking.
       pickupTime:       data.pickupTime || null,
       droppedOffTime:   data.droppedOffTime || null,
+      pickupLocation:   data.pickupLocation || null,
+      dropoffLocation:  data.dropoffLocation || null,
+      geofenceZones:    data.geofenceZones || [],
     };
-  } catch { return { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, droppedOffTime: null }; }
+  } catch { return EMPTY_HISTORY_INFO; }
 };
 
 // ─────────────────────────────────────────────
@@ -220,11 +233,18 @@ export const getAllBookings = async (statusFilter) => {
   const bookingIDs     = [...new Set(rows.map((b) => b.bookingID || b.id).filter(Boolean))];
   const userIDs        = [...new Set(rows.map((b) => b.userID).filter(Boolean))];
   const serviceTypeIDs = [...new Set(rows.map((b) => b.serviceTypeID).filter(Boolean))];
+  // Chauffeur bookings carry driverID once driverDispatch.assignDriver()
+  // has run (see that service) — resolved the same way as the customer
+  // (userDetails + user collections) so Bookings.jsx can show who's
+  // actually driving, or that no one's assigned yet, without a separate
+  // Driver Dispatch lookup.
+  const driverIDs      = [...new Set(rows.map((b) => b.driverID).filter(Boolean))];
 
-  const [vehicleEntries, paymentEntries, userEntries, serviceTypeEntries, historyEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
+  const [vehicleEntries, paymentEntries, userEntries, driverEntries, serviceTypeEntries, historyEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
+    Promise.all(driverIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(serviceTypeIDs.map((id) => resolveServiceType(id).then((s) => [id, s]))),
     Promise.all(bookingIDs.map((id) => resolveHistoryInfo(id).then((h) => [id, h]))),
     Promise.all(bookingIDs.map((id) => getPhaseChecklist(id, "before").then((v) => [id, v]))),
@@ -234,6 +254,7 @@ export const getAllBookings = async (statusFilter) => {
   const vehicleMap     = Object.fromEntries(vehicleEntries);
   const paymentMap     = Object.fromEntries(paymentEntries);
   const userMap        = Object.fromEntries(userEntries);
+  const driverMap      = Object.fromEntries(driverEntries);
   const serviceTypeMap = Object.fromEntries(serviceTypeEntries);
   const historyMap     = Object.fromEntries(historyEntries);
   const beforeDocsMap  = Object.fromEntries(beforeDocsEntries);
@@ -271,12 +292,24 @@ export const getAllBookings = async (statusFilter) => {
       paymentStage,
       customerName:     userMap[b.userID]?.customerName || "—",
       phone:            userMap[b.userID]?.phone || "—",
+      // No driverID at all (e.g. self-drive, or a chauffeur booking not yet
+      // assigned) → driverName stays null so the UI can say "No driver
+      // assigned" instead of a misleading "—".
+      driverID:         b.driverID || null,
+      driverName:       b.driverID ? (driverMap[b.driverID]?.customerName || "—") : null,
+      driverPhone:      b.driverID ? (driverMap[b.driverID]?.phone || "—") : null,
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
       hasHistory:       histInfo.hasHistory,
       bookingSessionID: histInfo.bookingSessionID,
       lastArchivedAt:   histInfo.lastArchivedAt,
       pickupTime:           histInfo.pickupTime,
       droppedOffTime:       histInfo.droppedOffTime,
+      // Every stop for this booking's trip — pickup, dropoff, and any
+      // extra stops selected at booking time — so the detail view can
+      // plot them on a map instead of just printing the address string.
+      pickupLocation:   histInfo.pickupLocation,
+      dropoffLocation:  histInfo.dropoffLocation,
+      geofenceZones:    histInfo.geofenceZones,
       // Device-check requirement (see markDeviceChecked below) — lives
       // directly on the booking doc since it's a one-off staff checkbox,
       // not something with its own collection.

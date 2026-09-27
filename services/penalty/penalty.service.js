@@ -590,13 +590,14 @@ export const getAllPenalties = async () => {
 
   const toISO = (v) => (v?.toDate ? v.toDate().toISOString() : v ?? null);
 
-  // Only meaningful for Confirmed penalties — that's the only status
-  // where paidAmount tracks real money changing hands (Draft has none
-  // yet, Voided/Waived are refused once anything's been paid — see
-  // voidOrWaivePenalty). Draft/Voided/Waived just pass their own status
-  // through unchanged so the badge always shows something sensible.
+  // Paid vs amount, nothing else — no branching on status. A Draft is
+  // Unpaid same as an unsettled Confirmed one; a fully-covered Confirmed
+  // (deposit or recordShortfallPayment) is Paid. Voided/Waived also read
+  // as Unpaid here since paidAmount is always 0 on those (voidOrWaivePenalty
+  // refuses to void/waive anything already paid against) — if that reads
+  // wrong on the page (implying money's still due on something cancelled),
+  // say so and it can special-case those back out.
   const settlementStatusFor = (data) => {
-    if (data.status !== "Confirmed") return data.status;
     const paid = data.paidAmount || 0;
     const amount = data.amount || 0;
     if (paid <= 0) return "Unpaid";

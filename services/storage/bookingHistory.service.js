@@ -17,10 +17,23 @@ export const flushBookingHistory = async (bookingSessionID) => {
   }
   const { data } = session;
 
-  // A session that's still active has no returnTime yet — use "now" as the
-  // end of the range so today's tab is still included.
+  // pickupTime/returnTime on this doc are the SCHEDULED times set by the
+  // customer app at booking time — they're never rewritten to the actual
+  // pickup/return moment. A session that's still active has no returnTime
+  // yet, so "now" covers that case — but even when returnTime IS set, it
+  // can be stale: if the actual pickup happens later than the scheduled
+  // window (a late handover, common on a short/single-day booking with
+  // little schedule slack), the real GPS pings land on a date AFTER the
+  // scheduled returnTime already passed. datesBetweenPHT would then see
+  // end < start and silently collapse to just the (wrong) start date,
+  // missing the day the trail actually lives on. Flushing always happens
+  // at or after the real event, so "now" is always a safe upper bound —
+  // never let the scheduled returnTime pull the end of the range earlier
+  // than today.
   const pickup = data.pickupTime?.toDate?.() || (data.pickupTime ? new Date(data.pickupTime) : new Date());
-  const end    = data.returnTime?.toDate?.()  || (data.returnTime ? new Date(data.returnTime) : new Date());
+  const scheduledEnd = data.returnTime?.toDate?.() || (data.returnTime ? new Date(data.returnTime) : new Date());
+  const now = new Date();
+  const end = scheduledEnd > now ? scheduledEnd : now;
   const dateStrings = datesBetweenPHT(pickup, end);
 
   const rows = await fetchSessionRows(data.carID, bookingSessionID, dateStrings);

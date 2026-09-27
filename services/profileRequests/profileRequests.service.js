@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { resolveNotification } from "../notification/notification.service.js";
+import { resolveNotification, createNotification } from "../notification/notification.service.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
@@ -8,6 +8,17 @@ const notFound = (message) => {
   const err = new Error(message);
   err.statusCode = 404;
   throw err;
+};
+
+// Tells the requester (not the reviewer) what happened to their own
+// request — mirrors refundRequest.service.js's notifyCustomer helper.
+// refCollection is "account" so Header.jsx's click-through just lands
+// the requester back on their own Account page; there's no per-request
+// detail view to deep-link into the way a booking/refund has.
+const notifyRequester = (userID, reqID, type, title, message) => {
+  if (!userID) return Promise.resolve();
+  return createNotification({ type, refID: reqID, refCollection: "account", title, message, userID })
+    .catch((err) => console.error(`[PROFILE_REQUESTS] failed to notify requester (${type}):`, err.message));
 };
 
 // Guards approveProfileRequest/approveIdResubmitRequest against a request
@@ -93,6 +104,11 @@ export const approveProfileRequest = async (reqID, adminUid) => {
   resolveNotification("edit_request", reqID)
     .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
 
+  notifyRequester(
+    req.userID, reqID, "profile_edit_approved", "Profile Update Approved",
+    "Your profile update request has been approved and is now live on your account."
+  );
+
   return { id: reqID, userID: req.userID };
 };
 
@@ -139,6 +155,17 @@ export const approveIdResubmitRequest = async (reqID, driverLicenseExpiry, admin
 
   await ref.update({ status: "approved", reviewedBy: adminUid || null, reviewedAt: timestamp(), updatedAt: timestamp() });
 
+  resolveNotification("id_resubmit_request", reqID)
+    .catch((err) => console.error("[NOTIF] Failed to resolve id_resubmit_request:", err.message));
+
+  notifyRequester(
+    req.userID, reqID, "id_resubmit_approved",
+    kind === "license" ? "License Update Approved" : "Document Update Approved",
+    kind === "license"
+      ? "Your driver's license resubmission has been approved."
+      : "Your document resubmission has been approved."
+  );
+
   return { id: reqID, userID: req.userID, documentKind: kind };
 };
 
@@ -160,12 +187,26 @@ export const rejectRequest = async (kind, reqID, note, adminUid) => {
     updatedAt: timestamp(),
   });
 
+  const reasonSuffix = note ? ` Reason: ${note}` : "";
+
   if (kind === "profile") {
     resolveNotification("edit_request", reqID)
       .catch((err) => console.error("[NOTIF] Failed to resolve edit_request:", err.message));
+
+    notifyRequester(
+      req.userID, reqID, "profile_edit_rejected", "Profile Update Rejected",
+      `Your profile update request was rejected.${reasonSuffix}`
+    );
   } else {
     resolveNotification("id_resubmit_request", reqID)
       .catch((err) => console.error("[NOTIF] Failed to resolve id_resubmit_request:", err.message));
+
+    const isLicense = (req.documentKind || "license") === "license";
+    notifyRequester(
+      req.userID, reqID, "id_resubmit_rejected",
+      isLicense ? "License Update Rejected" : "Document Update Rejected",
+      `Your ${isLicense ? "driver's license" : "document"} resubmission was rejected.${reasonSuffix}`
+    );
   }
 
   return { id: reqID, userID: req.userID };

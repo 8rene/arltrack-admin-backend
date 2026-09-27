@@ -526,6 +526,13 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         // Null when a session hasn't been created yet / doesn't have coords geocoded.
         pickupLocation:       sessions[i]?.data?.pickupLocation || null,
         dropoffLocation:      sessions[i]?.data?.dropoffLocation || null,
+        // Extra stops the customer selected at booking time, beyond
+        // pickup/dropoff (same field CarTracking's live map and
+        // BookingInfoPanel already read off the session doc). Without
+        // this, MyTrips.jsx's tripStops() always saw an empty/undefined
+        // list here and could only ever plot the two endpoints — this is
+        // what was missing.
+        geofenceZones:        sessions[i]?.data?.geofenceZones || [],
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },
