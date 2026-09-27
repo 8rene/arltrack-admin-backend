@@ -1,6 +1,7 @@
 import { login, logout } from "../../controllers/auth/auth.controller.js";
 import { sendOTP, checkOTP } from "../../controllers/otp/otp.controller.js";
 import { sendPasswordResetOTP, resetAdminPassword } from "../../controllers/auth/passwordReset.controller.js";
+import { changePassword } from "../../controllers/auth/changePassword.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 
 export const registerAuthRoutes = (app) => {
@@ -31,4 +32,10 @@ export const registerAuthRoutes = (app) => {
   // this is where those accounts are meant to reset their password instead.
   app.post("/api/auth/forgot-password/send-otp", sendPasswordResetOTP);
   app.post("/api/auth/forgot-password/reset",    resetAdminPassword);
+
+  // Logged-in "change my own password" flow, from Account settings.
+  // Reuses POST /api/auth/send-otp above (with { purpose: "change-password" }
+  // in the body) to email the code, then this consumes it and sets the
+  // new password. See changePassword.controller.js for the full picture.
+  app.patch("/api/auth/change-password", verifyToken, changePassword);
 };

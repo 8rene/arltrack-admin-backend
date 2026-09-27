@@ -200,14 +200,24 @@ export const getMaintenanceByCar = async (carID) => {
 // maintenance" list on a booking's detail view (Bookings.jsx). Most
 // bookings will return an empty array here, since routine maintenance
 // isn't tied to any particular rental.
+//
+// No orderBy in the query itself on purpose — where("bookingID", ...) +
+// orderBy("createdAt") on a different field needs a Firestore composite
+// index that doesn't exist for this collection. Sorted client-side below
+// instead, same visible result (newest first) without needing an index
+// created for this collection — same tradeoff already made for
+// editRequests/idResubmitRequests in the admin frontend's Account.jsx.
 export const listMaintenanceForBooking = async (bookingID) => {
   const snap = await db
     .collection("carMaintenance")
     .where("bookingID", "==", bookingID)
-    .orderBy("createdAt", "desc")
     .get();
 
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const toMillis = (ts) => ts?.toMillis?.() ?? ts?._seconds * 1000 ?? 0;
+
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
 };
 
 // ─────────────────────────────────────────────

@@ -54,7 +54,15 @@ export const sendOTP = async (req, res) => {
       attempts: 0,
     });
 
-    const result = await sendOtpEmail({ toEmail: email, toName: req.user.username, otp });
+    // purpose only picks which canned copy the email uses (see
+    // otp.service.js) — it never changes what the code itself unlocks.
+    // "password-reset" is deliberately not accepted here — that copy
+    // belongs to the separate, unauthenticated forgot-password flow
+    // (passwordReset.controller.js). Anything else falls back to the
+    // default "role-change" wording.
+    const purpose = req.body?.purpose === "change-password" ? "change-password" : undefined;
+
+    const result = await sendOtpEmail({ toEmail: email, toName: req.user.username, otp, purpose });
     if (!result.success) {
       // Code is stored either way — surface the email failure so the UI
       // can tell the admin to contact support instead of silently hanging.

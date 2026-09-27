@@ -26,9 +26,10 @@ const REQUIRED_ENV_VARS = ["EMAILJS_SERVICE_ID", "EMAILJS_PUBLIC_KEY", "EMAILJS_
 
 
 /**
- * Sends a one-time verification code, either for the existing "confirm a
- * sensitive action" flow (role change) or for the pre-login forgot-password
- * flow — same OTP mechanics, different email copy since the second one is
+ * Sends a one-time verification code, for any of: the existing "confirm a
+ * sensitive action" flow (role change), the pre-login forgot-password flow,
+ * or a logged-in admin changing their own password from Account — same OTP
+ * mechanics throughout, different email copy since "forgot password" is
  * going to someone who, by definition, isn't logged in right now.
  *
  * Fire-and-forget shape ({ success, error?, reason? }) — the caller decides
@@ -38,7 +39,7 @@ const REQUIRED_ENV_VARS = ["EMAILJS_SERVICE_ID", "EMAILJS_PUBLIC_KEY", "EMAILJS_
  * @param {string} params.toEmail
  * @param {string} params.toName
  * @param {string} params.otp
- * @param {"role-change"|"password-reset"} [params.purpose="role-change"]
+ * @param {"role-change"|"password-reset"|"change-password"} [params.purpose="role-change"]
  */
 export const sendOtpEmail = async ({ toEmail, toName, otp, purpose = "role-change" }) => {
   // Fail loud and specific instead of letting EmailJS reject an
@@ -53,6 +54,23 @@ export const sendOtpEmail = async ({ toEmail, toName, otp, purpose = "role-chang
 
   const displayName = toName || toEmail.split("@")[0];
   const isPasswordReset = purpose === "password-reset";
+  const isChangePassword = purpose === "change-password";
+
+  const subject =
+    isPasswordReset ? "Reset your ARLTrack admin password"
+    : isChangePassword ? "Confirm your ARLTrack admin password change"
+    : "Your ARLTrack admin verification code";
+
+  const actionLine =
+    isPasswordReset ? "You're requesting to reset the password on your ARLTrack admin account."
+    : isChangePassword ? "You're requesting to change the password on your ARLTrack admin account."
+    : "You're requesting to confirm a role change on your ARLTrack admin account.";
+
+  const disclaimerLine =
+    isPasswordReset || isChangePassword
+      ? "If you did not request this, you can safely ignore this email — your password will not be changed without the code."
+      : "If you did not request this, you can safely ignore this email — no changes will be made without the code.";
+
   const payload = {
     service_id:  process.env.EMAILJS_SERVICE_ID,
     template_id: process.env.EMAILJS_TEMPLATE_ID,
@@ -64,27 +82,16 @@ export const sendOtpEmail = async ({ toEmail, toName, otp, purpose = "role-chang
       // placeholders. Recipient field in the template's "To Email" box is
       // {{email}}, not {{to_email}} — must match exactly or EmailJS sees
       // an empty recipient.
-      email:    toEmail,
-      subject:  isPasswordReset ? "Reset your ARLTrack admin password" : "Your ARLTrack admin verification code",
-      body: isPasswordReset
-        ? (
-          `Hi ${displayName},\n\n` +
-          `You're requesting to reset the password on your ARLTrack admin account.\n\n` +
-          `Your verification code is:\n\n` +
-          `${otp}\n\n` +
-          `This code expires in 5 minutes and can only be used once.\n\n` +
-          `If you did not request this, you can safely ignore this email — your password will not be changed without the code.\n\n` +
-          `Best regards,\nArlTrack Admin Team`
-        )
-        : (
-          `Hi ${displayName},\n\n` +
-          `You're requesting to confirm a role change on your ARLTrack admin account.\n\n` +
-          `Your verification code is:\n\n` +
-          `${otp}\n\n` +
-          `This code expires in 5 minutes and can only be used once.\n\n` +
-          `If you did not request this, you can safely ignore this email — no changes will be made without the code.\n\n` +
-          `Best regards,\nArlTrack Admin Team`
-        ),
+      email:   toEmail,
+      subject,
+      body:
+        `Hi ${displayName},\n\n` +
+        `${actionLine}\n\n` +
+        `Your verification code is:\n\n` +
+        `${otp}\n\n` +
+        `This code expires in 5 minutes and can only be used once.\n\n` +
+        `${disclaimerLine}\n\n` +
+        `Best regards,\nArlTrack Admin Team`,
     },
   };
 
