@@ -54,7 +54,10 @@ export const discountPayment = async (req, res) => {
     const result = await applyDiscount(bookingID, amount, reason, appliedBy);
     return res.status(200).json({ success: true, data: result, message: "Discount applied." });
   } catch (error) {
-    console.error("[PAYMENTS] discount error:", error);
+    // Every failure this function throws is an expected business-rule
+    // rejection (exceeds total fee, no driver assigned yet, etc.), already
+    // surfaced to the user via the response message — not a real bug.
+    console.warn("[PAYMENTS] discount rejected:", error.message);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

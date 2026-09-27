@@ -21,9 +21,12 @@ export const assign = async (req, res) => {
     const result = await assignDriver(bookingID, driverID, assignedBy, !!force, editedBy);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
-    console.error("[DRIVER DISPATCH] assign error:", error);
-    // Conflicts are a distinct, expected case the frontend needs to branch
-    // on (show a warning + "assign anyway" instead of a plain error toast).
+    // Conflicts (double-booking, expired license, etc.) are an expected
+    // outcome the frontend branches on (warning + "assign anyway"), not a
+    // real server error — warn instead of error so they don't get flagged
+    // alongside actual bugs. Anything else here is still unexpected.
+    if (error.conflict) console.warn("[DRIVER DISPATCH] assign conflict:", error.message);
+    else console.error("[DRIVER DISPATCH] assign error:", error);
     const status = error.conflict ? 409 : 400;
     return res.status(status).json({
       success: false,

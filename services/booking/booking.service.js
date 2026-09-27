@@ -537,6 +537,8 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     createAuditLog({
       action: "update",
       userID: performedBy,
+      bookingID: bID,
+      description: `Marked pickup complete on booking ${bID}.`,
     }).catch((err) => console.error("[AuditLog] Pickup log failed:", err.message));
     try {
       const bID = bookingID || docID;
@@ -567,6 +569,8 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     createAuditLog({
       action: "update",
       userID: performedBy,
+      bookingID: bID,
+      description: `Marked returned on booking ${bID}.`,
     }).catch((err) => console.error("[AuditLog] Return log failed:", err.message));
     try {
       const bID = bookingID || docID;

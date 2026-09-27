@@ -59,7 +59,6 @@ export const createNotification = async ({ type, refID, refCollection, title, me
     resolvedAt: null,
   });
 
-  console.log(`[NOTIF] Created ${type} for ${refCollection}/${refID}${userID ? ` (userID: ${userID})` : ""}`);
   return ref.id;
 };
 
@@ -117,7 +116,6 @@ export const resolveNotification = async (type, refID) => {
     });
   });
   await batch.commit();
-  console.log(`[NOTIF] Resolved ${type} for refID ${refID}`);
 };
 
 /**
@@ -143,7 +141,6 @@ export const resolveNotificationByField = async (type, field, value) => {
     });
   });
   await batch.commit();
-  console.log(`[NOTIF] Resolved ${type} where ${field} = ${value}`);
 };
 
 /** Hard delete — used when the admin manually dismisses a notification (the "×" button). */
