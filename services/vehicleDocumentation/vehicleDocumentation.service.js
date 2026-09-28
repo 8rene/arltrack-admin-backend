@@ -114,6 +114,32 @@ const pickLatest = (snap) => {
   return docs[0];
 };
 
+/**
+ * Fold EVERY photo doc for a booking into one record (oldest → newest, so a
+ * newer non-empty URL wins). Older saves created one doc per photo slot (see
+ * the note in VechicleInspection.jsx's Save All); picking only the latest doc
+ * then looked like "only one photo uploaded" and the inspection never counted
+ * as complete. Merging makes both the old split data and the new single-doc
+ * data read the same.
+ */
+const mergeDocs = (snap) => {
+  if (snap.empty) return null;
+  const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  docs.sort((a, b) => {
+    const ta = a.updatedAt?._seconds ?? a.createdAt?._seconds ?? 0;
+    const tb = b.updatedAt?._seconds ?? b.createdAt?._seconds ?? 0;
+    return ta - tb;
+  });
+  const merged = {};
+  docs.forEach((d) => {
+    Object.entries(d).forEach(([k, v]) => {
+      if (v !== "" && v !== null && v !== undefined) merged[k] = v;
+    });
+  });
+  merged.id = docs[docs.length - 1].id; // keep the latest doc's id
+  return merged;
+};
+
 // ─────────────────────────────────────────────
 // GET — fetch before + after docs for a booking
 // ─────────────────────────────────────────────
@@ -123,8 +149,8 @@ export const getVehicleDocsByBooking = async (bookingID) => {
     db.collection("vehicleDocumentationAfterTrip").where("bookingID", "==", bookingID).get(),
   ]);
   return {
-    before: pickLatest(beforeSnap),
-    after:  pickLatest(afterSnap),
+    before: mergeDocs(beforeSnap),
+    after:  mergeDocs(afterSnap),
   };
 };
 
@@ -155,7 +181,7 @@ export const getPhaseChecklist = async (bookingID, phase) => {
     db.collection(INVENTORY_COLLECTION[phase]).where("bookingID", "==", bookingID).limit(1).get(),
   ]);
 
-  const photos = photosComplete(pickLatest(docsSnap));
+  const photos = photosComplete(mergeDocs(docsSnap));
   const parts  = !invSnap.empty;
   return { photos, parts, complete: photos && parts };
 };
