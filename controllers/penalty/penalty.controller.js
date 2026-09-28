@@ -1,17 +1,16 @@
 import {
   previewLateFeeForBooking,
   listPenaltiesForBooking,
-  listDraftQueue,
-  createDraftPenalty as createDraftPenaltyService,
-  updateDraftPenalty as updateDraftPenaltyService,
-  confirmPenalty as confirmPenaltyService,
+  createPenalty as createPenaltyService,
   voidOrWaivePenalty as voidOrWaivePenaltyService,
   recordDepositReceived as recordDepositReceivedService,
   waiveDeposit as waiveDepositService,
   settleBooking as settleBookingService,
   recordShortfallPayment as recordShortfallPaymentService,
   getAllPenalties,
+  isBookingAssignedTo,
 } from "../../services/penalty/penalty.service.js";
+import { ROLES } from "../../utils/roles/role.util.js";
 
 // Reconstructed — this file was found overwritten with a stray copy of
 // customer-backend's read-only controller (CommonJS require/module.exports,
@@ -21,8 +20,26 @@ import {
 // either `{ error }` or a plain data object — never throws for expected
 // failures — so each wrapper checks `.error` first and only falls into
 // the catch block for unexpected exceptions.
+//
+// getDraftQueue / postDraftPenalty (edit) / postConfirmPenalty are gone
+// along with the Draft step itself — creating a penalty now confirms it
+// in the same call (see postCreatePenalty), so there's no queue to list
+// and nothing left in a state that could be edited or separately
+// confirmed.
 
 const actorId = (req) => req.user?.userID || req.user?.uid || null;
+
+// A Driver may only touch penalties on a booking assigned to them — create,
+// see the late-fee suggestion, or list. Owner/Admin/Supervisor are unchecked.
+// (The driver-dispatch routes check this per trip already; this is the same
+// rule for the general /api/penalties routes a driver can also reach.)
+// Sends the 403 itself and returns false so the handler can just `return`.
+const driverMayUse = async (req, res, bookingID) => {
+  if (req.user?.role !== ROLES.DRIVER) return true;
+  if (await isBookingAssignedTo(bookingID, actorId(req))) return true;
+  res.status(403).json({ success: false, message: "This booking is not assigned to you." });
+  return false;
+};
 
 export const getAllPenaltiesHandler = async (req, res) => {
   try {
@@ -37,6 +54,7 @@ export const getAllPenaltiesHandler = async (req, res) => {
 export const getLateFeePreview = async (req, res) => {
   try {
     const { bookingID } = req.params;
+    if (!(await driverMayUse(req, res, bookingID))) return;
     const data = await previewLateFeeForBooking(bookingID);
     if (!data) return res.status(404).json({ success: false, message: "Booking not found." });
     return res.status(200).json({ success: true, data });
@@ -49,6 +67,7 @@ export const getLateFeePreview = async (req, res) => {
 export const getBookingPenalties = async (req, res) => {
   try {
     const { bookingID } = req.params;
+    if (!(await driverMayUse(req, res, bookingID))) return;
     const data = await listPenaltiesForBooking(bookingID);
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -57,47 +76,14 @@ export const getBookingPenalties = async (req, res) => {
   }
 };
 
-export const getDraftQueue = async (req, res) => {
+export const postCreatePenalty = async (req, res) => {
   try {
-    const data = await listDraftQueue();
-    return res.status(200).json({ success: true, data });
-  } catch (error) {
-    console.error("[PENALTY] draft queue error:", error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-export const postDraftPenalty = async (req, res) => {
-  try {
-    const result = await createDraftPenaltyService({ ...req.body, createdBy: actorId(req) });
+    if (!(await driverMayUse(req, res, req.body?.bookingID))) return;
+    const result = await createPenaltyService({ ...req.body, createdBy: actorId(req) });
     if (result.error) return res.status(400).json({ success: false, message: result.error });
     return res.status(201).json({ success: true, data: result });
   } catch (error) {
-    console.error("[PENALTY] create draft error:", error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-export const patchDraftPenalty = async (req, res) => {
-  try {
-    const { penaltyID } = req.params;
-    const result = await updateDraftPenaltyService(penaltyID, req.body, actorId(req));
-    if (result.error) return res.status(400).json({ success: false, message: result.error });
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[PENALTY] update draft error:", error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-export const postConfirmPenalty = async (req, res) => {
-  try {
-    const { penaltyID } = req.params;
-    const result = await confirmPenaltyService(penaltyID, actorId(req));
-    if (result.error) return res.status(400).json({ success: false, message: result.error });
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[PENALTY] confirm error:", error);
+    console.error("[PENALTY] create error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

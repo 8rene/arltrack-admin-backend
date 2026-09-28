@@ -6,12 +6,18 @@
 // charge). A booking can have many penalties — nothing here assumes one
 // penalty per booking.
 //
-// Lifecycle: Draft -> Confirmed -> (optionally) Voided | Waived.
-// Only Confirmed penalties count toward the deposit settlement math or
-// are ever shown to the customer. Once Confirmed, a penalty is locked —
+// Lifecycle: Confirmed -> (optionally) Voided | Waived.
+//
+// There used to be a Draft step in front of Confirmed — staff logged a
+// charge, a supervisor reviewed it, only then did the customer hear
+// about it. That's gone: every penalty is confirmed and the customer
+// notified the moment it's created (see createPenalty in
+// penalty.service.js). A penalty is locked from the moment it exists —
 // corrections go through Voided/Waived + a new entry, never a silent
-// edit to amount/lineItems after the fact (see updateDraftPenalty, which
-// refuses once status !== "Draft").
+// edit to amount/lineItems after the fact. Void/Waive is now the only
+// safety net for a mistake, which is why both notify the customer (see
+// voidOrWaivePenalty) — by the time anyone can undo a charge, the
+// customer's already seen it once.
 //
 // PENALTY_TYPES / the single `type` + `description` fields are gone —
 // replaced by `lineItems`, an array of { description, amount } typed
@@ -24,7 +30,7 @@
 // sum of lineItems' amounts, but can be overridden (see overrideReason).
 // ─────────────────────────────────────────────────────────────
 
-export const PENALTY_STATUSES = ["Draft", "Confirmed", "Voided", "Waived"];
+export const PENALTY_STATUSES = ["Confirmed", "Voided", "Waived"];
 
 // How a confirmed penalty was actually settled once money changes hands.
 // "Deposit" / "DepositPartial" are set automatically by settleBooking();
@@ -61,7 +67,7 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   amount:         data.amount         ?? 0, // amount actually charged (editable while Draft)
   overrideReason: data.overrideReason || "", // required once amount !== computedAmount
 
-  status:       data.status       || "Draft",
+  status:       data.status       || "Confirmed",
   statusReason: data.statusReason || "", // required for Voided / Waived
 
   paymentMethod:   data.paymentMethod   || "", // set once settled — see PENALTY_PAYMENT_METHODS
@@ -69,8 +75,12 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   paidAmount:      data.paidAmount      ?? 0,  // may be < amount if partially covered by deposit
   paidAt:          data.paidAt          || null,
 
-  createdBy:   data.createdBy   || null, // staff/driver uid who drafted it
-  confirmedBy: data.confirmedBy || null, // supervisor+ uid who confirmed it
+  // confirmedBy/confirmedAt are set equal to createdBy/createdAt at
+  // creation time now — kept as separate fields (rather than removed)
+  // since older documents written before this change have a real gap
+  // between the two, and callers/reports may still rely on both existing.
+  createdBy:   data.createdBy   || null, // staff/driver uid who created it
+  confirmedBy: data.confirmedBy || null,
   confirmedAt: data.confirmedAt || null,
 
   createdAt: data.createdAt || null,

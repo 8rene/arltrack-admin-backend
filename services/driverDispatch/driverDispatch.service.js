@@ -1,13 +1,14 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
-import { updateBooking, markBookingDroppedOff } from "../../services/booking/booking.service.js";
+import { updateBooking, markBookingDroppedOff, markDeviceChecked, settleDeposit, getReturnChecklist } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
 import { getPhaseChecklist } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
 import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+import { createPenalty } from "../penalty/penalty.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -594,14 +595,14 @@ export const driverRemindInspection = async (bookingDocID, driverID, phase) => {
 /** Driver-triggered drop-off — ownership-checked, then the same rules as the staff dropoff endpoint. */
 export const driverDropoff = async (bookingDocID, driverID) => {
   await assertOwnsBooking(bookingDocID, driverID);
-  await markBookingDroppedOff(bookingDocID);
+  await markBookingDroppedOff(bookingDocID, driverID);
   return { id: bookingDocID };
 };
 
 /** Driver-triggered return — ownership-checked, then the same gated updateBooking staff use. */
 export const driverReturn = async (bookingDocID, driverID) => {
   await assertOwnsBooking(bookingDocID, driverID);
-  await updateBooking(bookingDocID, { status: "completed" });
+  await updateBooking(bookingDocID, { status: "completed" }, driverID);
   return { id: bookingDocID };
 };
 
@@ -627,4 +628,44 @@ export const driverMarkRefundIssued = async (bookingDocID, driverID) => {
   const bID = booking.bookingID || bookingDocID;
   await markRefundIssued(bID, driverID);
   return { id: bookingDocID };
+};
+
+/** Driver's own Return checklist — same read-only checks staff see, ownership-checked first. */
+export const driverReturnChecklist = async (bookingDocID, driverID) => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  return getReturnChecklist(bookingDocID);
+};
+
+/** Driver settling the security deposit at drop-off — deducts penalties and confirms the handback to the customer. */
+export const driverSettleDeposit = async (bookingDocID, driverID, body = {}) => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  return settleDeposit(bookingDocID, { method: body.method, referenceNumber: body.referenceNumber }, driverID);
+};
+
+/** Driver recording the required GPS device check for their own trip. */
+export const driverDeviceCheck = async (bookingDocID, driverID, note = "") => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  await markDeviceChecked(bookingDocID, note, driverID);
+  return { id: bookingDocID };
+};
+
+/**
+ * Driver charging a penalty on their own trip. Same createPenalty staff use
+ * (confirmed immediately, customer + staff notified, audit-logged) — the
+ * only addition is the ownership check, so a driver can't charge a booking
+ * that isn't theirs through the general POST /api/penalties route's reach.
+ * bookingID here is the booking DOC id from the URL, resolved to the
+ * business bookingID the penalty service keys on.
+ */
+export const driverCreatePenalty = async (bookingDocID, driverID, body = {}) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+  return createPenalty({
+    bookingID: bID,
+    lineItems: body.lineItems,
+    computedAmount: body.computedAmount ?? 0,
+    amount: body.amount,
+    overrideReason: body.overrideReason || "",
+    createdBy: driverID,
+  });
 };

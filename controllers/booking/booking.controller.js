@@ -1,4 +1,4 @@
-import { getAllBookings, updateBooking, markBookingDroppedOff, markDeviceChecked, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
+import { getAllBookings, updateBooking, markBookingDroppedOff, markDeviceChecked, settleDeposit, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
 import { deleteBookingWithCascade } from "../../services/booking/bookingDelete.service.js";
 
 export const listBookings = async (req, res) => {
@@ -68,6 +68,19 @@ export const deviceCheck = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] deviceCheck error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// ── Settle the security deposit at drop-off (deduct penalties, confirm handback) ──
+export const settleDepositHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { method, referenceNumber } = req.body || {};
+    const result = await settleDeposit(id, { method, referenceNumber }, req.user?.email || req.user?.uid || null);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[BOOKINGS] settleDeposit error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

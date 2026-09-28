@@ -1,10 +1,7 @@
 import {
   getLateFeePreview,
   getBookingPenalties,
-  getDraftQueue,
-  postDraftPenalty,
-  patchDraftPenalty,
-  postConfirmPenalty,
+  postCreatePenalty,
   patchVoidOrWaivePenalty,
   postDepositReceived,
   postWaiveDeposit,
@@ -15,23 +12,24 @@ import {
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// Staff (any role that can operate the front desk) can draft and view.
-// Only Supervisor+ can confirm, void/waive, record/waive a deposit, or
-// settle a booking — matches the "supervisor decides, staff drafts" split
-// from the design.
+// Staff (any role that can operate the front desk) can create a penalty
+// and view — creating one confirms it immediately and notifies the
+// customer, there's no Draft queue for a supervisor to review first
+// anymore (see penalty.service.js's createPenalty for what replaced that
+// review step). Only Supervisor+ can void/waive, record/waive a deposit,
+// or settle a booking.
 const staff      = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR, roles.DRIVER];
 const supervisor = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 
 export const registerPenaltyRoutes = (app) => {
-  app.get ("/api/penalties",                              verifyToken, requireRole(staff), getAllPenaltiesHandler);
+  // Every penalty in the system — supervisor and above only. A Driver's own
+  // trips are covered by the booking-scoped routes below instead.
+  app.get ("/api/penalties",                              verifyToken, requireRole(supervisor), getAllPenaltiesHandler);
   app.get ("/api/penalties/late-fee-preview/:bookingID", verifyToken, requireRole(staff), getLateFeePreview);
   app.get ("/api/penalties/booking/:bookingID",           verifyToken, requireRole(staff), getBookingPenalties);
-  app.get ("/api/penalties/queue",                        verifyToken, requireRole(staff), getDraftQueue);
 
-  app.post ("/api/penalties",                    verifyToken, requireRole(staff), postDraftPenalty);
-  app.patch("/api/penalties/:penaltyID",          verifyToken, requireRole(staff), patchDraftPenalty);
-  app.post ("/api/penalties/:penaltyID/confirm",  verifyToken, requireRole(supervisor), postConfirmPenalty);
-  app.patch("/api/penalties/:penaltyID/status",   verifyToken, requireRole(supervisor), patchVoidOrWaivePenalty);
+  app.post ("/api/penalties",                   verifyToken, requireRole(staff),      postCreatePenalty);
+  app.patch("/api/penalties/:penaltyID/status", verifyToken, requireRole(supervisor), patchVoidOrWaivePenalty);
 
   app.post("/api/penalties/deposit/received", verifyToken, requireRole(staff),      postDepositReceived);
   app.post("/api/penalties/deposit/waive",    verifyToken, requireRole(supervisor), postWaiveDeposit);

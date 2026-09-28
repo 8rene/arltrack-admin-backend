@@ -1,6 +1,7 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver,
   getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverReturn, driverCollectBalance, driverConfirmPayment, driverMarkRefundIssued, driverRemindInspection,
+  driverReturnChecklist, driverDeviceCheck, driverCreatePenalty, driverSettleDeposit,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
 export const getBoard = async (req, res) => {
@@ -150,6 +151,47 @@ export const myRefundIssued = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[DRIVER DISPATCH] my-refund-issued error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+export const myReturnChecklist = async (req, res) => {
+  try {
+    const data = await driverReturnChecklist(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] my-return-checklist error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+export const myDeviceCheck = async (req, res) => {
+  try {
+    const result = await driverDeviceCheck(req.params.id, req.user.uid, req.body?.note);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] my-device-check error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+export const myCreatePenalty = async (req, res) => {
+  try {
+    const result = await driverCreatePenalty(req.params.id, req.user.uid, req.body);
+    if (result.error) return res.status(400).json({ success: false, message: result.error });
+    return res.status(201).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] my-create-penalty error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+export const mySettleDeposit = async (req, res) => {
+  try {
+    const result = await driverSettleDeposit(req.params.id, req.user.uid, req.body);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] my-settle-deposit error:", error);
     return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };

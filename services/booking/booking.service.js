@@ -43,6 +43,16 @@ const EMPTY_PAYMENT_INFO = {
   paymentMethod: "—", totalFee: 0, rentalFee: 0, serviceFee: 0, extraFee: 0,
   amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentStage: "—", discountAmount: 0,
   refundDue: 0, refundIssued: false,
+  // Deposit / penalty breakdown — same "what should actually come back to
+  // the customer" math as settleBooking() in penalty.service.js (deposit
+  // held minus every unpaid Confirmed penalty, still-negative-allowed).
+  // Read-only here, just a live preview for staff before Return actually
+  // runs settlement — mirrors the same fields the driver's My Trips
+  // Payments button already gets via driverDispatch.service.js, so a
+  // supervisor confirming/collecting payment on Car Tracking while a
+  // booking is still ongoing can see the rightful return amount instead
+  // of only finding out once Return triggers the real deduction.
+  depositAmount: 0, depositStatus: "—", confirmedPenaltyTotal: 0, amountToReturn: 0,
 };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT_INFO;
@@ -56,6 +66,18 @@ const resolvePaymentInfo = async (bookingID) => {
     const { amountPaid, balance, payType, refundDue } = computeAmounts(data);
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
+
+    const deposit = data.deposit || null;
+    const depositAmount = deposit?.amount || 0;
+    const depositStatus = deposit?.status || "—";
+    const penalties = await listPenaltiesForBooking(bookingID);
+    const confirmedPenaltyTotal = penalties
+      .filter((p) => p.status === "Confirmed")
+      .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
+    // Can go negative — that's the customer owing more than the deposit
+    // covers, same as settleBooking()'s `net`.
+    const amountToReturn = depositAmount - confirmedPenaltyTotal;
+
     return {
       paymentMethod: data.paymentMethod || "—",
       totalFee:      data.amount        ?? 0,
@@ -73,6 +95,7 @@ const resolvePaymentInfo = async (bookingID) => {
       discountAmount: Number(data.discountAmount) || 0,
       refundDue,
       refundIssued: !!data.refundIssued,
+      depositAmount, depositStatus, confirmedPenaltyTotal, amountToReturn,
     };
   } catch { return EMPTY_PAYMENT_INFO; }
 };
@@ -290,6 +313,12 @@ export const getAllBookings = async (statusFilter) => {
       discountAmount:   payInfo.discountAmount,
       paymentStatus,
       paymentStage,
+      refundDue:        payInfo.refundDue,
+      refundIssued:     payInfo.refundIssued,
+      depositAmount:         payInfo.depositAmount,
+      depositStatus:         payInfo.depositStatus,
+      confirmedPenaltyTotal: payInfo.confirmedPenaltyTotal,
+      amountToReturn:        payInfo.amountToReturn,
       customerName:     userMap[b.userID]?.customerName || "—",
       phone:            userMap[b.userID]?.phone || "—",
       // No driverID at all (e.g. self-drive, or a chauffeur booking not yet
@@ -325,6 +354,83 @@ export const getAllBookings = async (statusFilter) => {
       afterInspection:    afterDocsMap[bID] ?? { photos: false, parts: false, complete: false },
     };
   });
+};
+
+// ─────────────────────────────────────────────
+// Deposit/penalty position for a booking, read-only. Shared by the Return
+// gate, settleDeposit and the Return checklist so both always agree.
+//   unpaidTotal            confirmed penalties not yet paid
+//   depositAvailable       the held deposit, only while it is unsettled
+//   outstandingAfterDeposit what the customer would still owe after the
+//                          deposit is applied (0 = fully covered)
+//   amountToReturn         signed: deposit minus penalties (negative = owed)
+// ─────────────────────────────────────────────
+const getDepositPosition = async (bID) => {
+  const [paymentSnap, penalties] = await Promise.all([
+    db.collection("payments").where("bookingID", "==", bID).limit(1).get(),
+    listPenaltiesForBooking(bID),
+  ]);
+  const deposit = paymentSnap.empty ? null : (paymentSnap.docs[0].data().deposit || null);
+  const unpaidTotal = penalties
+    .filter((p) => p.status === "Confirmed")
+    .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
+  const alreadySettled = !!deposit?.settlement?.status;
+  const depositAvailable = deposit?.status === "Held" && !alreadySettled ? (deposit.amount || 0) : 0;
+  return {
+    penalties, deposit, unpaidTotal, alreadySettled,
+    depositStatus: deposit?.status || "—",
+    depositAvailable,
+    outstandingAfterDeposit: Math.max(0, unpaidTotal - depositAvailable),
+    amountToReturn: depositAvailable - unpaidTotal,
+  };
+};
+
+/**
+ * Settle the security deposit at drop-off: deducts every confirmed unpaid
+ * penalty from the held deposit (oldest first) and records the handback of
+ * whatever is left, in one transaction (see settleBooking). Callable by the
+ * driver (own trip) or a supervisor once the vehicle is dropped off — the
+ * point is that whoever is physically with the customer can close out the
+ * deposit without waiting for the after-trip inspection. A penalty raised
+ * after this stays a normal unpaid penalty.
+ */
+export const settleDeposit = async (docID, { method, referenceNumber = "" } = {}, performedBy = null) => {
+  const bookingDoc = await db.collection("bookings").doc(docID).get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+  const bID = booking.bookingID || docID;
+
+  if (booking.status?.toLowerCase() !== "ongoing") {
+    throw new Error(`Cannot settle the deposit: booking status is "${booking.status}", not "ongoing".`);
+  }
+  const session = await getSessionByBookingID(bID);
+  if (!session?.data?.droppedOffTime) {
+    throw new Error("Mark the vehicle dropped off before settling the deposit.");
+  }
+
+  const pos = await getDepositPosition(bID);
+  if (!pos.deposit || pos.deposit.status !== "Held") {
+    throw new Error(`There is no held security deposit to settle (deposit status: ${pos.depositStatus}).`);
+  }
+  if (pos.alreadySettled) throw new Error("This booking's deposit has already been settled.");
+  if (pos.amountToReturn > 0 && !method) {
+    throw new Error("Choose how the deposit is being returned to the customer.");
+  }
+
+  const res = await settleBooking({
+    bookingID: bID, actorUid: performedBy,
+    returnMethod: method || null, returnReferenceNumber: referenceNumber,
+  });
+  if (res?.error) throw new Error(res.error);
+
+  createAuditLog({
+    action: "update", userID: performedBy, bookingID: bID,
+    description: res.net > 0
+      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} returned via ${method}.`
+      : `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ${res.outstandingAfterDeposit > 0 ? `₱${res.outstandingAfterDeposit} still owed by the customer` : "nothing to return"}.`,
+  }).catch((err) => console.error("[AuditLog] Deposit settle log failed:", err.message));
+
+  return res;
 };
 
 export const updateBooking = async (docID, updates, performedBy = null) => {
@@ -433,25 +539,6 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
-  // ── Penalty validation: cannot mark completed/returned while any
-  // penalty on this booking is still a Draft (awaiting confirm/void/waive)
-  // or a Confirmed penalty still has an outstanding balance. Deliberately
-  // no override here — a supervisor has to resolve or explicitly pay off
-  // every open line item before Return will go through. ──
-  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    const bID = bookingID || docID;
-    const penalties = await listPenaltiesForBooking(bID);
-    const openDraft   = penalties.filter((p) => p.status === "Draft");
-    const openUnpaid  = penalties.filter((p) => p.status === "Confirmed" && (p.paidAmount || 0) < (p.amount || 0));
-    if (openDraft.length || openUnpaid.length) {
-      throw new Error(
-        "Cannot mark returned: this booking still has unresolved penalties " +
-        `(${openDraft.length} awaiting confirm/void/waive, ${openUnpaid.length} confirmed but not yet paid). ` +
-        "Resolve every penalty on this booking first."
-      );
-    }
-  }
-
   // ── Device-check validation: cannot mark completed/returned until staff
   // have confirmed the GPS device status on this car at return (see
   // markDeviceChecked below). This is a required note, not an actual
@@ -462,6 +549,23 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     if (!bookingData.deviceCheckedAt) {
       throw new Error(
         "Cannot mark returned: the GPS device check hasn't been recorded for this booking yet."
+      );
+    }
+  }
+
+  // ── Deposit gate: if a security deposit is being held, it must already
+  // have been settled (penalties deducted, remainder handed back) — that
+  // happens at drop-off via settleDeposit(), while the customer/driver are
+  // still together, NOT here. This gate deliberately does not block on
+  // money still owed: a penalty found during inspection after the deposit
+  // was returned just stays an unpaid penalty (Mark Paid / customer pays
+  // online) instead of leaving the car stuck "ongoing". ──
+  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+    const pos = await getDepositPosition(bookingID || docID);
+    if (pos.deposit?.status === "Held" && !pos.alreadySettled) {
+      throw new Error(
+        "Cannot mark returned: the security deposit hasn't been settled yet. " +
+        "Settle it first (deduct any penalties and confirm the deposit handed back)."
       );
     }
   }
@@ -481,31 +585,6 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
   filtered.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
   await db.collection("bookings").doc(docID).update(filtered);
-
-  // Deduct every confirmed, unpaid penalty from the held deposit now that
-  // Return has actually gone through — settleBooking() itself still
-  // refuses if a draft penalty somehow slipped through or the deposit was
-  // already settled, so this is a safety net, not the only guard. Best
-  // effort: the booking has already been marked returned above (that part
-  // is done and correct regardless), so a settlement hiccup here gets
-  // logged for a supervisor to sort out manually via the Penalties page
-  // rather than un-completing a booking that's already physically returned.
-  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    const bID = bookingID || docID;
-    // depositReturnMethod/-ReferenceNumber only matter when a refund is
-    // actually owed to the customer (net > 0) — the Return confirm panel
-    // asks for these up front so settleBooking never has to guess a
-    // method for money that's actually changing hands. If nothing owed,
-    // these are simply unused inside settleBooking.
-    settleBooking({
-      bookingID: bID,
-      actorUid: performedBy,
-      returnMethod: updates.depositReturnMethod || "InStore",
-      returnReferenceNumber: updates.depositReturnReferenceNumber || "",
-    }).catch((err) =>
-      console.error(`[Booking] settleBooking failed for ${bID} after Return:`, err.message)
-    );
-  }
 
   // The booking has moved on, so any "driver is waiting on the inspection"
   // reminder for it is stale: pickup clears the pickup one, and once the
@@ -756,37 +835,37 @@ export const getReturnChecklist = async (docID) => {
   const booking = bookingDoc.data();
   const bID = booking.bookingID || docID;
 
-  const [session, afterChecklist, penalties, paymentSnap] = await Promise.all([
+  const [session, afterChecklist, pos] = await Promise.all([
     getSessionByBookingID(bID),
     getPhaseChecklist(bID, "after"),
-    listPenaltiesForBooking(bID),
-    db.collection("payments").where("bookingID", "==", bID).limit(1).get(),
+    getDepositPosition(bID),
   ]);
-  const depositHeld = paymentSnap.empty ? null : (paymentSnap.docs[0].data().deposit?.amount ?? null);
 
-  const draftPenalties = penalties.filter((p) => p.status === "Draft");
-  const unpaidPenalties = penalties.filter((p) => p.status === "Confirmed" && (p.paidAmount || 0) < (p.amount || 0));
+  const droppedOff = !!session?.data?.droppedOffTime;
+  const holdsDeposit = pos.deposit?.status === "Held" && !pos.alreadySettled;
+  const settlement = pos.deposit?.settlement?.status ? pos.deposit.settlement : null;
 
   const items = [
     {
       key: "droppedOff",
       label: "Vehicle dropped off",
-      complete: !!session?.data?.droppedOffTime,
-      detail: session?.data?.droppedOffTime ? null : "Nobody has marked the vehicle physically dropped off yet.",
+      complete: droppedOff,
+      detail: droppedOff ? null : "Nobody has marked the vehicle physically dropped off yet.",
+    },
+    {
+      key: "depositSettled",
+      label: "Security deposit settled",
+      // Nothing to settle when no deposit is held (none recorded / waived).
+      complete: !holdsDeposit,
+      detail: holdsDeposit
+        ? (droppedOff ? "Deduct any penalties and confirm the deposit handed back." : "Mark the vehicle dropped off first, then settle the deposit.")
+        : null,
     },
     {
       key: "inspection",
       label: "After-trip vehicle inspection",
       complete: !!afterChecklist.complete,
       detail: afterChecklist.complete ? null : `Still missing ${describeMissingInspection(afterChecklist)}.`,
-    },
-    {
-      key: "penalties",
-      label: "Penalties resolved",
-      complete: draftPenalties.length === 0 && unpaidPenalties.length === 0,
-      detail: (draftPenalties.length || unpaidPenalties.length)
-        ? `${draftPenalties.length} awaiting confirm/void/waive, ${unpaidPenalties.length} confirmed but not yet paid.`
-        : null,
     },
     {
       key: "deviceCheck",
@@ -799,10 +878,20 @@ export const getReturnChecklist = async (docID) => {
   return {
     bookingID: bID,
     canReturn: items.every((i) => i.complete),
+    canSettle: droppedOff && holdsDeposit,
     items,
     driverID: booking.driverID || null,
-    depositHeld,
-    penalties,
+    depositStatus: pos.depositStatus,
+    depositHeld: pos.deposit?.amount ?? null,
+    depositSettled: !!settlement,
+    // Before settlement: deposit minus penalties (negative = customer owes).
+    // After settlement: what was actually returned / is still owed.
+    penaltyTotal: settlement ? settlement.confirmedPenaltyTotal : pos.unpaidTotal,
+    amountToReturn: settlement ? settlement.net : pos.amountToReturn,
+    // Still-unpaid penalty money right now (includes penalties raised after settling).
+    stillOwed: pos.unpaidTotal > pos.depositAvailable ? pos.unpaidTotal - pos.depositAvailable : 0,
+    outstandingAfterDeposit: Math.max(0, pos.unpaidTotal - pos.depositAvailable),
+    penalties: pos.penalties,
   };
 };
 
