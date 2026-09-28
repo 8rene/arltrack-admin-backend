@@ -95,6 +95,13 @@ export const markSessionActive = async (bookingSessionID, carID) => {
 
   try {
     const sessionDoc = await sessionRef.get();
+    // Stamp the ACTUAL pickup moment once. pickupTime on this doc is only the
+    // scheduled time from booking; the history flush needs the real start so
+    // an early pickup (before the scheduled date) doesn't look at the wrong
+    // Sheets date-tabs and come back empty.
+    if (!sessionDoc.exists || !sessionDoc.data().activatedAt) {
+      updates.activatedAt = admin.firestore.FieldValue.serverTimestamp();
+    }
     const existingZones = sessionDoc.exists ? (sessionDoc.data().geofenceZones || []) : [];
     if (existingZones.length === 0) {
       const carDoc = await db.collection("cars").doc(carID).get();

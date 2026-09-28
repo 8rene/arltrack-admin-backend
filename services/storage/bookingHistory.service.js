@@ -30,10 +30,27 @@ export const flushBookingHistory = async (bookingSessionID) => {
   // at or after the real event, so "now" is always a safe upper bound —
   // never let the scheduled returnTime pull the end of the range earlier
   // than today.
-  const pickup = data.pickupTime?.toDate?.() || (data.pickupTime ? new Date(data.pickupTime) : new Date());
-  const scheduledEnd = data.returnTime?.toDate?.() || (data.returnTime ? new Date(data.returnTime) : new Date());
-  const now = new Date();
-  const end = scheduledEnd > now ? scheduledEnd : now;
+  const toDate = (v) => v?.toDate?.() || (v ? new Date(v) : null);
+  const scheduledPickup = toDate(data.pickupTime) || new Date();
+  // The same problem in the other direction: pickupTime is only the SCHEDULED
+  // start. If the car was actually picked up EARLIER (e.g. a booking for Oct 23
+  // handed over on Sep 28), every real ping lands on a date BEFORE the scheduled
+  // one, so reading only from the scheduled date finds nothing and the archive
+  // comes out empty ("No data found in this archive"). Start from the earliest
+  // real moment we know of: when the session was actually activated, or — for
+  // sessions activated before that field existed — when it was dropped off /
+  // last archived / last pinged.
+  const realMoments = [data.activatedAt, data.droppedOffTime, data.lastArchivedAt, data.currentPosition?.date]
+    .map(toDate)
+    .filter((d) => d && !isNaN(d.getTime()));
+  const pickup = new Date(Math.min(scheduledPickup.getTime(), ...realMoments.map((d) => d.getTime())));
+  // Flushing always happens at or after the real event, and no ping can be
+  // dated in the future — so "now" is the true upper bound. Using the
+  // SCHEDULED returnTime here (as before) would make an early-picked-up trip
+  // read one Sheets tab per day all the way out to its scheduled end, most of
+  // them tabs that don't exist yet — wasted Sheets reads that slow down Return
+  // and can hit the Sheets API quota.
+  const end = new Date();
   const dateStrings = datesBetweenPHT(pickup, end);
 
   const rows = await fetchSessionRows(data.carID, bookingSessionID, dateStrings);
