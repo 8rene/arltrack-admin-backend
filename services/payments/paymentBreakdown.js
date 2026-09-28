@@ -88,9 +88,23 @@ const getPaymentBreakdown = (payment) => {
   // behaviour kept: it settles the whole amount.
   let balanceInPerson = 0;
   if (p.balanceCollected) {
-    balanceInPerson = Math.max(0, amount - amountPaid);
-    amountPaid = amount;
-    balance    = 0;
+    const rec = p.balanceCollectedAmount;
+    if (rec !== undefined && rec !== null && Number.isFinite(Number(rec)) && Number(rec) >= 0) {
+      // What staff ACTUALLY took in person (collectRemainingBalance stores it
+      // net of any discount already given at that moment). Counting the whole
+      // `amount` as paid here made a discount given BEFORE the balance was
+      // collected look like it had to be handed back — the customer had
+      // already paid the reduced balance. Any discount is applied below,
+      // exactly once.
+      balanceInPerson = Math.min(Number(rec), Math.max(0, amount - amountPaid));
+      amountPaid += balanceInPerson;
+      balance     = amount - amountPaid;
+    } else {
+      // Older records without the collected amount: legacy behaviour kept.
+      balanceInPerson = Math.max(0, amount - amountPaid);
+      amountPaid = amount;
+      balance    = 0;
+    }
   }
 
   // Flat-peso staff discount: comes off the balance first, any excess spills

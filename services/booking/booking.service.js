@@ -572,16 +572,14 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
-  // ── Device-check validation: cannot mark completed/returned until staff
-  // have confirmed the GPS device status on this car at return (see
-  // markDeviceChecked below). This is a required note, not an actual
-  // gpsDevice unassignment — the device itself normally stays mounted
-  // on the car between rentals; this just records that someone actually
-  // looked at it before the car goes back out. ──
+  // ── GPS gate: cannot mark completed/returned while a GPS device is still
+  // assigned to this car. Unassign it first on the GPS Setup page. ──
   if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    if (!bookingData.deviceCheckedAt) {
+    const stillAssigned = await getDevicesStillAssigned(bookingData.carID);
+    if (stillAssigned.length > 0) {
       throw new Error(
-        "Cannot mark returned: the GPS device check hasn't been recorded for this booking yet."
+        `Cannot mark returned: GPS device ${describeAssignedDevices(stillAssigned)} is still assigned to this car. ` +
+        "Unassign it on the GPS Setup page first."
       );
     }
   }
@@ -813,7 +811,25 @@ export const markBookingDroppedOff = async (docID, performedBy = null) => {
 };
 
 // ─────────────────────────────────────────────
-// Device-check requirement at Return. This is a required NOTE, not an
+// GPS-unassigned requirement at Return. Before a booking can be marked
+// returned, the tracker must have been detached from the car (GPS Setup
+// page → Unassign). Returns the gpsDevice docs still assigned to this
+// car — an empty array means the car is clear to return. The `assigned`
+// filter is done in JS so this needs no composite Firestore index.
+// ─────────────────────────────────────────────
+const getDevicesStillAssigned = async (carID) => {
+  if (!carID) return [];
+  const snap = await db.collection("gpsDevice").where("carID", "==", carID).get();
+  return snap.docs.map((d) => d.data()).filter((d) => d.assigned === true);
+};
+
+const describeAssignedDevices = (devices) =>
+  devices.map((d) => d.gpsName || d.gpsDeviceID).join(", ");
+
+// ─────────────────────────────────────────────
+// (Legacy) Device-check note at Return — no longer required for Return,
+// superseded by the GPS-unassigned check above. Kept so old clients that
+// still call the endpoint don't break. This is a required NOTE, not an
 // actual GPS device unassignment — it does not touch the gpsDevice
 // collection at all (a real unassign is a separate, deliberate action on
 // the GPS Devices page, and unassigning there detaches the tracker from
@@ -868,10 +884,11 @@ export const getReturnChecklist = async (docID) => {
   const booking = bookingDoc.data();
   const bID = booking.bookingID || docID;
 
-  const [session, afterChecklist, pos] = await Promise.all([
+  const [session, afterChecklist, pos, assignedDevices] = await Promise.all([
     getSessionByBookingID(bID),
     getPhaseChecklist(bID, "after"),
     getDepositPosition(bID),
+    getDevicesStillAssigned(booking.carID),
   ]);
 
   const droppedOff = !!session?.data?.droppedOffTime;
@@ -901,10 +918,12 @@ export const getReturnChecklist = async (docID) => {
       detail: afterChecklist.complete ? null : `Still missing ${describeMissingInspection(afterChecklist)}.`,
     },
     {
-      key: "deviceCheck",
-      label: "GPS device check",
-      complete: !!booking.deviceCheckedAt,
-      detail: booking.deviceCheckedAt ? null : "The GPS device hasn't been checked for this booking yet.",
+      key: "gpsUnassigned",
+      label: "GPS device unassigned",
+      complete: assignedDevices.length === 0,
+      detail: assignedDevices.length === 0
+        ? null
+        : `${describeAssignedDevices(assignedDevices)} is still assigned to this car. Unassign it on the GPS Setup page first.`,
     },
   ];
 

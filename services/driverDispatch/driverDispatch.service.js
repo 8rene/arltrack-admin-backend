@@ -494,6 +494,10 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
   const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
+  // Inspection records may have been saved under the booking's business
+  // bookingID or its doc id — check both.
+  const docKeys = {};
+  bookings.forEach((b) => { docKeys[b.bookingID || b.id] = [...new Set([b.bookingID, b.id].filter(Boolean))]; });
 
   const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries, reminderCooldowns] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
@@ -502,8 +506,8 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
     // Same helper + same key (bookingID || doc id) as booking.service.js's
     // getAllBookings, so Car Tracking and My Trips agree on "inspection done".
-    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(id, "before") : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
-    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(id, "after")  : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(docKeys[id] || id, "before") : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(docKeys[id] || id, "after")  : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
     // Remaining "Remind Staff" cooldown per booking/phase (seconds, so the
     // driver's own clock can't skew the countdown).
     withDocs ? getReminderCooldowns(bookingIDs) : Promise.resolve({}),

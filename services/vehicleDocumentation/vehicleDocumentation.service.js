@@ -172,18 +172,25 @@ export const getVehicleDocsByBooking = async (bookingID) => {
 const photosComplete = (doc) => !!(doc && doc.frontViewUrl && doc.sideViewUrl && doc.backViewUrl);
 
 /** { photos, parts, complete } for one phase of one booking. */
+// `bookingID` may be one key or an array of keys (the booking's business
+// bookingID AND its Firestore doc id) — records saved under either one count.
 export const getPhaseChecklist = async (bookingID, phase) => {
-  const empty = { photos: false, parts: false, complete: false };
-  if (!bookingID || !DOC_COLLECTIONS[phase]) return empty;
+  const empty = { photos: false, parts: false, complete: false, photoSlots: { front: false, side: false, back: false } };
+  const keys = [...new Set([].concat(bookingID).filter(Boolean))].slice(0, 10);
+  if (!keys.length || !DOC_COLLECTIONS[phase]) return empty;
+
+  const byKey = (col) => (keys.length === 1 ? col.where("bookingID", "==", keys[0]) : col.where("bookingID", "in", keys));
 
   const [docsSnap, invSnap] = await Promise.all([
-    db.collection(DOC_COLLECTIONS[phase]).where("bookingID", "==", bookingID).get(),
-    db.collection(INVENTORY_COLLECTION[phase]).where("bookingID", "==", bookingID).limit(1).get(),
+    byKey(db.collection(DOC_COLLECTIONS[phase])).get(),
+    byKey(db.collection(INVENTORY_COLLECTION[phase])).limit(1).get(),
   ]);
 
-  const photos = photosComplete(mergeDocs(docsSnap));
+  const doc = mergeDocs(docsSnap);
+  const photoSlots = { front: !!doc?.frontViewUrl, side: !!doc?.sideViewUrl, back: !!doc?.backViewUrl };
+  const photos = photosComplete(doc);
   const parts  = !invSnap.empty;
-  return { photos, parts, complete: photos && parts };
+  return { photos, parts, complete: photos && parts, photoSlots };
 };
 
 /** Both phases at once — { before, after }, each { photos, parts, complete }. */
