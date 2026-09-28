@@ -32,9 +32,14 @@ const payTypeOf = (payment) => {
 };
 
 // How much the first payment is worth for each payment type.
-const upfrontOf = (payType, amount, depositFee) => {
+// securityDeposit (refundable, included in `amount`) is always paid in full up
+// front; 0 for older payments, which gives the original plain 50%.
+const upfrontOf = (payType, amount, depositFee, securityDeposit = 0) => {
   if (payType === "Full") return amount;
-  if (payType === "Downpayment" || payType === "Partial") return Math.floor(amount / 2); // == computePaymentSplit().payNow
+  if (payType === "Downpayment" || payType === "Partial") {
+    const sec = Math.min(Math.max(0, securityDeposit), amount);
+    return sec + Math.floor((amount - sec) / 2); // == computePaymentSplit().payNow
+  }
   return depositFee; // legacy flat deposit
 };
 
@@ -62,7 +67,7 @@ const getPaymentBreakdown = (payment) => {
   }
 
   const isConfirmed = status === "paid" || status === "approved";
-  const upfront     = upfrontOf(payType, amount, depositFee);
+  const upfront     = upfrontOf(payType, amount, depositFee, num(p.securityDeposit));
   const owedAfterUpfront = Math.max(0, amount - upfront);
 
   // First payment. NOT capped to `amount` on purpose: the original computeAmounts

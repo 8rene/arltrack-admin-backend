@@ -295,6 +295,12 @@ export const recordDepositReceived = async ({ paymentID, method, referenceNumber
   const payment = await getPaymentDoc(paymentID);
   if (!payment) return { error: "Payment not found." };
 
+  // The deposit is now charged with the booking's own payment and recorded
+  // as Held automatically when that payment settles — don't double-collect.
+  if (["Held", "Settled"].includes(payment.data.deposit?.status)) {
+    return { error: "A security deposit is already recorded for this booking." };
+  }
+
   const settings = await getSystemSettings();
   const amount = Number(settings.securityDepositAmount ?? 1000);
 
@@ -472,12 +478,34 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
 // order, same as the deposit deduction above. No user-doc rollup to
 // update anymore — the customer side queries `penalties` live instead.
 export const recordShortfallPayment = async ({ userID, amount, method, referenceNumber = "", performedBy, penaltyID = null }) => {
+  amount = Number(amount);
   if (!(amount > 0)) return { error: "amount must be greater than 0." };
 
   const unpaid = await listUnpaidPenaltiesForUser(userID);
+
+  // Never accept more than what is actually owed. Before this, an amount
+  // above the balance was quietly clipped (the extra was just dropped) while
+  // the UI still said "Payment recorded" — so staff could think they'd
+  // taken more than the system credited. Now it's rejected outright.
+  //
+  // The limit is the customer's TOTAL unpaid penalties, not just the clicked
+  // one: a payment with a penaltyID pays that penalty first and the rest
+  // spills onto their other unpaid penalties (below), so anything up to the
+  // total can genuinely be applied — and nothing above it can.
+  const owedOn = (p) => Math.max(0, (p.amount || 0) - (p.paidAmount || 0));
+  const limit = unpaid.reduce((sum, p) => sum + owedOn(p), 0);
+  if (limit <= 0) return { error: "This customer has no unpaid penalties." };
+  if (penaltyID && !unpaid.some((p) => p.penaltyID === penaltyID)) {
+    return { error: "That penalty has nothing left to pay — it's already settled, waived or voided." };
+  }
+  if (amount > limit) {
+    return { error: `Amount can't be more than what the customer owes in penalties (\u20b1${limit}).` };
+  }
+
   // If staff clicked Mark Paid on a specific penalty, that one is paid
-  // first; anything left over spills onto the customer's other unpaid
-  // penalties oldest-first. Without penaltyID it's oldest-first only.
+  // first; anything left over (never more than the limit above) spills onto
+  // the customer's other unpaid penalties oldest-first. Without penaltyID
+  // it's oldest-first only.
   const byAge = (a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0);
   const ordered = [...unpaid].sort(byAge);
   if (penaltyID) {

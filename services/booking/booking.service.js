@@ -41,6 +41,7 @@ export const resolveVehicleName = async (carID) => {
 // which has b.status handy — see getAllBookings below).
 const EMPTY_PAYMENT_INFO = {
   paymentMethod: "—", totalFee: 0, rentalFee: 0, serviceFee: 0, extraFee: 0,
+  driversFee: 0, gatewayFee: 0, securityDeposit: 0, deposit: null,
   amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentStage: "—", discountAmount: 0,
   refundDue: 0, refundIssued: false,
   // Deposit / penalty breakdown — same "what should actually come back to
@@ -53,6 +54,7 @@ const EMPTY_PAYMENT_INFO = {
   // booking is still ongoing can see the rightful return amount instead
   // of only finding out once Return triggers the real deduction.
   depositAmount: 0, depositStatus: "—", confirmedPenaltyTotal: 0, amountToReturn: 0,
+  depositSettled: false, depositDeducted: 0,
 };
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT_INFO;
@@ -74,9 +76,20 @@ const resolvePaymentInfo = async (bookingID) => {
     const confirmedPenaltyTotal = penalties
       .filter((p) => p.status === "Confirmed")
       .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
-    // Can go negative — that's the customer owing more than the deposit
-    // covers, same as settleBooking()'s `net`.
-    const amountToReturn = depositAmount - confirmedPenaltyTotal;
+    // Before settlement this is a live preview: deposit minus every unpaid
+    // Confirmed penalty, still-negative-allowed (same as settleBooking()'s
+    // `net`). AFTER settlement the deposit has already paid those penalties
+    // out, so they now read as paid and the unpaid total falls to 0 —
+    // recomputing would show the FULL deposit as "to return" again. So once
+    // settled, report what actually happened instead: anything still unpaid
+    // right now is owed by the customer (negative), otherwise it's the
+    // amount that was handed back (settlement.net).
+    const settlement = deposit?.settlement?.status ? deposit.settlement : null;
+    const depositSettled = !!settlement;
+    const depositDeducted = settlement ? depositAmount - Math.max(0, settlement.net || 0) : 0;
+    const amountToReturn = settlement
+      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, settlement.net || 0))
+      : depositAmount - confirmedPenaltyTotal;
 
     return {
       paymentMethod: data.paymentMethod || "—",
@@ -84,6 +97,19 @@ const resolvePaymentInfo = async (bookingID) => {
       rentalFee:     data.rentalFee     ?? 0,
       serviceFee:    data.serviceFee    ?? 0,
       extraFee:      data.extraFee      ?? 0,
+      driversFee:    data.driversFee    ?? 0,
+      gatewayFee:    data.gatewayFee    ?? 0,
+      // Refundable deposit charged as part of `amount` (0 on older bookings).
+      securityDeposit: Number(data.securityDeposit) || 0,
+      // The REAL security deposit (payments.deposit, written by
+      // penalty.service.js's recordDepositReceived/waiveDeposit) — a light
+      // read-only summary, not the raw object (it carries Firestore
+      // timestamps). null = never recorded yet. Not the legacy depositFee.
+      deposit: data.deposit ? {
+        amount:         Number(data.deposit.amount) || 0,
+        status:         data.deposit.status || "",
+        returnedAmount: Number(data.deposit.returned?.amount) || 0,
+      } : null,
       amountPaid,
       balance,
       payType,
@@ -96,6 +122,7 @@ const resolvePaymentInfo = async (bookingID) => {
       refundDue,
       refundIssued: !!data.refundIssued,
       depositAmount, depositStatus, confirmedPenaltyTotal, amountToReturn,
+      depositSettled, depositDeducted,
     };
   } catch { return EMPTY_PAYMENT_INFO; }
 };
@@ -307,6 +334,10 @@ export const getAllBookings = async (statusFilter) => {
       rentalFee:        payInfo.rentalFee,
       serviceFee:       payInfo.serviceFee,
       extraFee:         payInfo.extraFee,
+      driversFee:       payInfo.driversFee,
+      gatewayFee:       payInfo.gatewayFee,
+      deposit:          payInfo.deposit,
+      securityDeposit:  payInfo.securityDeposit,
       amountPaid:       payInfo.amountPaid,
       balance:          payInfo.balance,
       payType:          payInfo.payType,
@@ -319,6 +350,8 @@ export const getAllBookings = async (statusFilter) => {
       depositStatus:         payInfo.depositStatus,
       confirmedPenaltyTotal: payInfo.confirmedPenaltyTotal,
       amountToReturn:        payInfo.amountToReturn,
+      depositSettled:        payInfo.depositSettled,
+      depositDeducted:       payInfo.depositDeducted,
       customerName:     userMap[b.userID]?.customerName || "—",
       phone:            userMap[b.userID]?.phone || "—",
       // No driverID at all (e.g. self-drive, or a chauffeur booking not yet

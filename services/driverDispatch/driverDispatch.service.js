@@ -57,6 +57,7 @@ const EMPTY_PAYMENT = {
   // Deposit / penalty breakdown — populated for the ongoing-trip Payments
   // button; 0/false for a trip with no payment doc yet.
   depositAmount: 0, depositStatus: "—", confirmedPenaltyTotal: 0, amountToReturn: 0,
+  depositSettled: false, depositDeducted: 0,
 };
 const EMPTY_CHECKLIST = { photos: false, parts: false, complete: false };
 const resolvePaymentInfo = async (bookingID) => {
@@ -88,15 +89,27 @@ const resolvePaymentInfo = async (bookingID) => {
       (sum, p) => sum + Math.max(0, (p.data().amount || 0) - (p.data().paidAmount || 0)),
       0
     );
-    // Can go negative — that's the customer owing more than the deposit
-    // covers, same as settleBooking()'s `net`.
-    const amountToReturn = depositAmount - confirmedPenaltyTotal;
+    // Before settlement this is a live preview: deposit minus every unpaid
+    // Confirmed penalty, still-negative-allowed (same as settleBooking()'s
+    // `net`). AFTER settlement the deposit has already paid those penalties
+    // out, so they now read as paid and the unpaid total falls to 0 —
+    // recomputing would show the FULL deposit as "to return" again. So once
+    // settled, report what actually happened instead: anything still unpaid
+    // right now is owed by the customer (negative), otherwise it's the
+    // amount that was handed back (settlement.net).
+    const settlement = deposit?.settlement?.status ? deposit.settlement : null;
+    const depositSettled = !!settlement;
+    const depositDeducted = settlement ? depositAmount - Math.max(0, settlement.net || 0) : 0;
+    const amountToReturn = settlement
+      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, settlement.net || 0))
+      : depositAmount - confirmedPenaltyTotal;
 
     return {
       totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus,
       discountAmount: Number(data.discountAmount) || 0,
       refundDue, refundIssued: !!data.refundIssued,
       depositAmount, depositStatus, confirmedPenaltyTotal, amountToReturn,
+      depositSettled, depositDeducted,
     };
   } catch { return EMPTY_PAYMENT; }
 };

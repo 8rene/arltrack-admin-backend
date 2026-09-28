@@ -245,7 +245,9 @@ export const generateReport = async (period, selection = {}) => {
 
   paySnap.forEach((doc) => {
     const p = doc.data();
-    const amount   = Number(p.amount)     || 0;
+    // The refundable security deposit rides inside p.amount but isn't revenue —
+    // report on the net (0 for older payments, so nothing changes for them).
+    const amount   = Math.max(0, (Number(p.amount) || 0) - (Number(p.securityDeposit) || 0));
     const mop      = (p.methodOfPayment || "").toLowerCase();
     let amountPaid = 0;
 
