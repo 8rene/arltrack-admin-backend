@@ -110,6 +110,19 @@ const fetchRefundRequest = async (bookingID) => {
   return { docRef: doc.ref, data: doc.data() };
 };
 
+/**
+ * Fetches every penalty linked to a bookingID (a booking can have many).
+ * Returns an array of { docRef, data } (may be empty).
+ */
+const fetchPenalties = async (bookingID) => {
+  const snap = await db
+    .collection("penalties")
+    .where("bookingID", "==", bookingID)
+    .get();
+
+  return snap.docs.map((doc) => ({ docRef: doc.ref, data: doc.data() }));
+};
+
 // ─────────────────────────────────────────────────────────────
 // Archive writers
 // ─────────────────────────────────────────────────────────────
@@ -237,6 +250,29 @@ const archiveRefundRequest = async (refundRequestDocID, refundRequestData, archi
   return archiveRef.id;
 };
 
+/**
+ * Writes a single penalty archive document (viewer: PenaltyArchivePage).
+ * Returns the new penaltyArchivesId.
+ */
+const archivePenalty = async (penaltyDocID, penaltyData, archivedBy = "admin") => {
+  const archiveRef = db.collection("penaltyArchives").doc(); // auto-ID
+
+  const archiveDoc = {
+    penaltyArchivesId : archiveRef.id,
+    penaltyID         : penaltyData.penaltyID ?? penaltyDocID,
+    originalId        : penaltyDocID,
+    archiveDate       : admin.firestore.FieldValue.serverTimestamp(),
+    archivedAt        : admin.firestore.FieldValue.serverTimestamp(),
+    archivedBy,
+    // ── spread all original penalty fields ──
+    ...penaltyData,
+  };
+
+  await archiveRef.set(archiveDoc);
+  console.log(`[ARCHIVE] Penalty archived → penaltyArchives/${archiveRef.id}`);
+  return archiveRef.id;
+};
+
 // ─────────────────────────────────────────────────────────────
 // Main exported function
 // ─────────────────────────────────────────────────────────────
@@ -259,13 +295,15 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   const reviewResults = await fetchReviews(bookingID);
   const sessionResult = await fetchBookingSession(bookingID);
   const refundRequestResult = await fetchRefundRequest(bookingID);
+  const penaltyResults = await fetchPenalties(bookingID);
 
   console.log(
     `[DELETE] Booking ${bookingDocID} | ` +
     `payment: ${paymentResult ? "found" : "none"} | ` +
     `reviews: ${reviewResults.length} | ` +
     `session: ${sessionResult ? "found" : "none"} | ` +
-    `refundRequest: ${refundRequestResult ? "found" : "none"}`
+    `refundRequest: ${refundRequestResult ? "found" : "none"} | ` +
+    `penalties: ${penaltyResults.length}`
   );
 
   // ── 2. Archive phase (must all succeed before any delete) ─────────────────
@@ -274,6 +312,7 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   let bookingSessionArchivesID = null;
   let refundArchivesID = null;
   const reviewsArchivesIDs = [];
+  const penaltyArchivesIDs = [];
 
   try {
     // 2a. Archive booking
@@ -314,6 +353,12 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
         archivedBy
       );
     }
+
+    // 2f. Archive every penalty (if any) — a booking can have several.
+    for (const { docRef: penaltyRef, data: penaltyData } of penaltyResults) {
+      const id = await archivePenalty(penaltyRef.id, penaltyData, archivedBy);
+      penaltyArchivesIDs.push(id);
+    }
   } catch (archiveError) {
     // If any archive write fails, stop immediately — nothing has been deleted yet.
     console.error("[DELETE] Archive phase failed — aborting, source data is safe:", archiveError);
@@ -351,6 +396,11 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       batch.delete(refundRequestResult.docRef);
     }
 
+    // 3f. Delete penalties
+    for (const { docRef: penaltyRef } of penaltyResults) {
+      batch.delete(penaltyRef);
+    }
+
     await batch.commit();
     console.log(`[DELETE] Batch delete committed for booking ${bookingDocID}`);
   } catch (deleteError) {
@@ -377,6 +427,8 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     bookingSessionArchivesID,
     refundArchivesID,
     reviewsArchivesIDs,
+    penaltyArchivesIDs,
+    penaltiesArchivedCount : penaltyResults.length,
     reviewsArchivedCount : reviewResults.length,
     sessionArchived       : Boolean(sessionResult),
     refundRequestArchived : Boolean(refundRequestResult),
@@ -384,6 +436,7 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       `Booking ${bookingDocID} and ${paymentResult ? 1 : 0} payment(s), ` +
       `${reviewResults.length} review(s), ` +
       `${sessionResult ? 1 : 0} session, ` +
-      `${refundRequestResult ? 1 : 0} refund request archived and deleted successfully.`,
+      `${refundRequestResult ? 1 : 0} refund request, ` +
+      `${penaltyResults.length} penalt${penaltyResults.length === 1 ? "y" : "ies"} archived and deleted successfully.`,
   };
 };

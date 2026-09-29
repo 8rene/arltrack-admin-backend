@@ -26,6 +26,7 @@ import { registerSessionLogArchiveRoutes }     from "./routes/archives/sessionLo
 import { registerPaymentsArchiveRoutes }       from "./routes/archives/paymentsArchiveRoutes.js";
 import { registerBookingArchiveRoutes }        from "./routes/archives/bookingArchiveRoutes.js";
 import { registerTransactionLogArchiveRoutes } from "./routes/archives/transactionLogArchiveRoutes.js";
+import { registerPenaltyArchiveRoutes }       from "./routes/archives/penaltyArchiveRoutes.js";
 import { registerRefundArchiveRoutes }         from "./routes/archives/refundArchiveRoutes.js"; // ← NEW
 import { registerAuditLogsArchiveRoutes }      from "./routes/archives/auditLogsArchiveRoutes.js";
 import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsArchiveRoutes.js";
@@ -86,6 +87,7 @@ registerSessionLogArchiveRoutes(app);
 registerPaymentsArchiveRoutes(app);
 registerBookingArchiveRoutes(app);
 registerTransactionLogArchiveRoutes(app);
+registerPenaltyArchiveRoutes(app);
 registerRefundArchiveRoutes(app);      // ← NEW
 registerAuditLogsArchiveRoutes(app);
 registerReviewsArchiveRoutes(app);
