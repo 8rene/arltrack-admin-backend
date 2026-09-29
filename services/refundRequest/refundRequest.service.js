@@ -491,6 +491,100 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
 // already with the customer by then, and cancelBookingForRefund() below
 // won't cancel anything past "upcoming" anyway).
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// REWORKED to follow approveRefundRequest()'s setup (claim/lock → plan →
+// PayMongo parts → save → cancel → notify), so a fleet batch can no longer
+// leave a half-done refund behind:
+//
+//   • The refundRequests doc is created FIRST (deterministic id per booking,
+//     status "Pending" + approvalLockedAt) in a transaction, BEFORE PayMongo is
+//     called. A double-submit gets a clean 409, and the doc always exists for
+//     the refund webhook / staff to find — no orphaned PayMongo refunds.
+//   • If the FIRST PayMongo part fails nothing moved → the placeholder doc is
+//     deleted and a retry starts clean. If a LATER part fails, the doc is saved
+//     as "Failed" with the parts that went through (same as approve).
+//   • Retrying after the refund went through but the booking cancel failed
+//     RESUMES (cancel + notify) instead of hitting the misleading "customer's
+//     side" 409 — the doc is already "Approved".
+//   • paymentID falls back to the payment doc id (Firestore rejects undefined,
+//     which used to throw AFTER PayMongo had already refunded).
+//   • No "_staff" total transaction log any more — the refund webhook logs each
+//     PayMongo part and markManualRefundIssued() logs the manual part, so the
+//     old total log double-counted the ledger. Same as approve.
+//
+// Returns { outcome, bookingID, amount, onlineAmount, manualAmount,
+// manualRefund, bookingCancelled } exactly as before.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Everything AFTER the money is committed: cancel the booking, tell the
+// customer/driver, audit. Safe to run twice (customerNotified gates the
+// notifications) — this is also what a retry runs when the first attempt died
+// between "refund saved" and "booking cancelled".
+const finishStaffRefund = async (r) => {
+  let cancel;
+  try {
+    cancel = await cancelBookingForRefund(r.bookingID, `Cancelled by staff: ${r.reason}`);
+  } catch (e) {
+    throw fail(`The refund for ${r.bookingID} went through, but cancelling the booking failed: ${e.message}. Retry to finish — the refund will NOT be sent again.`, 502);
+  }
+
+  if (!r.customerNotified) {
+    const manualAmount = Number(r.manualAmount) || 0;
+    const onlineAmount = Number(r.onlineAmount) || 0;
+
+    await notifyCustomer(
+      r.userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Processed",
+      manualAmount > 0
+        ? `Your booking was cancelled: ${r.reason}. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff.`
+        : `Your booking was cancelled: ${r.reason}. Your payment of ${peso(r.amount)} is being refunded through PayMongo.`
+    );
+
+    const { email: customerEmail, name: customerName } = await resolveCustomerContact(r.userID);
+    if (customerEmail) {
+      sendRefundEmail({
+        toEmail: customerEmail,
+        toName: customerName,
+        bookingID: r.bookingID,
+        amount: r.amount,
+        manualAmount,
+        reason: r.reason,
+      }).catch((err) => console.error("[REFUND] staff refund email failed:", err.message));
+    }
+
+    if (cancel.cancelled && cancel.driverID) {
+      createNotification({
+        type: "refund_request", refID: r.refundRequestID, refCollection: "refundRequests",
+        title: "Booking cancelled",
+        message: `A booking you were assigned to (${r.bookingID}) was cancelled by staff: ${r.reason}.`,
+        userID: cancel.driverID,
+      }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
+    }
+
+    auditSafe({
+      action: "update",
+      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(r.amount)} refunded — car status change: ${r.reason}.`,
+      userID: r.processedBy || null,
+      bookingID: r.bookingID,
+      paymentID: r.paymentID,
+      refundRequestID: r.refundRequestID,
+    });
+
+    await db.collection("refundRequests").doc(r.refundRequestID)
+      .update({ customerNotified: true, updatedAt: new Date() })
+      .catch((err) => console.error("[REFUND] failed to stamp customerNotified:", err.message));
+  }
+
+  return {
+    outcome: "refunded",
+    bookingID: r.bookingID,
+    amount: r.amount,
+    onlineAmount: r.onlineAmount,
+    manualAmount: r.manualAmount,
+    manualRefund: r.manualRefund || null,
+    bookingCancelled: cancel.cancelled,
+  };
+};
+
 export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   if (!bookingID) throw fail("bookingID is required.", 400);
   if (!reason || !reason.trim()) throw fail("A reason is required.", 400);
@@ -502,28 +596,45 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
     throw fail(`This booking is "${booking.status}", not upcoming — it can't be refunded through this flow.`, 409);
   }
 
+  // One deterministic doc per booking — this is what makes the claim below a
+  // real lock and lets a retry find what the previous attempt already did.
+  const refundRequestID = `staff_${String(bookingID).replace(/[^A-Za-z0-9_-]/g, "_")}`;
+  const reqRef = db.collection("refundRequests").doc(refundRequestID);
+
+  // ── Retry of an attempt that already got past PayMongo ──
+  const existingSnap = await reqRef.get();
+  if (existingSnap.exists) {
+    const e = existingSnap.data();
+    if (["Approved", "Refunded"].includes(e.status) && e.outcome === "refunded") {
+      return finishStaffRefund({ ...e, refundRequestID }); // money already moved — just finish the cancel
+    }
+    if (e.status === "Failed") {
+      throw fail(
+        `A previous refund attempt for ${bookingID} failed part-way at PayMongo (${(e.parts || []).filter((p) => p.paymongoRefundID).length} part(s) already refunded). Finish it manually from the Refund Requests page — retrying here would refund those parts again.`,
+        409
+      );
+    }
+    // status "Pending": an earlier attempt crashed before PayMongo finished; the claim below re-checks the lock.
+  }
+
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   if (paymentSnap.empty) throw fail("No payment record found for this booking.", 404);
   const paymentRef = paymentSnap.docs[0].ref;
   const payment = paymentSnap.docs[0].data();
+  const paymentID = payment.paymentID || paymentSnap.docs[0].id; // never undefined — Firestore rejects it
   const payStatus = lower(payment.status);
 
   // Data mismatch: payment's already Refunded, booking never got cancelled
   // to match. Nothing left to refund — just close the booking out.
   if (payStatus === "refunded") {
-    return staffCancelWithNoRefund(bookingID, booking, payment, reason, staffUserID, "already_refunded");
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "already_refunded");
   }
 
-  // The CUSTOMER already submitted their own refund request for this same
-  // payment (POST /api/refunds on the customer backend) and it's still
-  // sitting Pending or Approved, waiting on the normal admin review — that
-  // request doesn't touch payment.status until an admin actually approves
-  // it, so without this check this batch would sail right past it and fire
-  // a second, completely independent PayMongo refund on the same money.
-  // Stop here instead — the existing one on the Refund Requests page is
-  // the one that should be resolved, not raced by this one.
-  const openCustomerRequest = await findOpenRefundRequest(payment.paymentID);
-  if (openCustomerRequest) {
+  // The customer already has their own request open for this payment — resolve
+  // that one instead of racing it with a second PayMongo refund. (Our own
+  // placeholder doesn't count.)
+  const openCustomerRequest = await findOpenRefundRequest(paymentID);
+  if (openCustomerRequest && openCustomerRequest.id !== refundRequestID) {
     throw fail(
       `A refund request (${openCustomerRequest.status}) is already open for this booking from the customer's side — resolve it from the Refund Requests page first, then retry.`,
       409
@@ -537,148 +648,148 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
 
   // Genuinely nothing collected (still Pending, etc.) — cancel only.
   if (totalToRefund === 0) {
-    return staffCancelWithNoRefund(bookingID, booking, payment, reason, staffUserID, "nothing_owed");
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "nothing_owed");
   }
 
   if (!["paid", "approved"].includes(payStatus)) {
     throw fail(`This payment is "${payment.status}" with ${peso(totalToRefund)} apparently owed — needs manual review before this can be refunded automatically.`, 409);
   }
 
-  const now = new Date();
-  const refundRequestRef = db.collection("refundRequests").doc();
-  const refundRequestID = refundRequestRef.id;
-
-  let parts = [];
-  for (const part of plan.parts) {
-    try {
-      const paymongoRefundID = await createPaymongoRefund({
-        paymongoPaymentID: part.paymongoPaymentID,
-        amount: part.amount,
-        reason,
-      });
-      parts.push({ kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID, status: "pending" });
-    } catch (e) {
-      // Nothing (or only an earlier part) went out — safe to just fail
-      // the whole thing here rather than leave a half-written record,
-      // since (unlike approveRefundRequest) there's no existing Pending
-      // doc a retry needs to find its way back to.
-      auditSafe({
-        action: "update",
-        description: `Staff refund for booking ${bookingID} failed at PayMongo for the ${part.kind} part (${e.message})${parts.length > 0 ? ` after ${parts.length} earlier part(s) already went through — needs manual follow-up` : ""}.`,
-        userID: staffUserID,
-        bookingID,
-        paymentID: payment.paymentID,
-      });
-      throw fail(
-        parts.length > 0
-          ? `Part of the refund went through at PayMongo, but the ${part.kind} refund failed: ${e.message}. Please finish this one manually from the Refund Requests page.`
-          : `Refund failed: ${e.message}`,
-        502
-      );
-    }
-  }
-
   const onlineAmount = plan.total - plan.manualAmount;
-  // The cash/manual bucket now also carries any outstanding discount
-  // spillover, since PayMongo has no way to return that part either.
+  // The cash/manual bucket also carries any outstanding discount spillover,
+  // since PayMongo has no way to return that part either.
   const manualAmount = plan.manualAmount + outstandingDiscountRefund;
-  const manualRefund = manualAmount > 0
-    ? { amount: manualAmount, issued: false, issuedBy: null, issuedAt: null, method: null }
-    : null;
 
-  await refundRequestRef.set({
-    refundRequestID,
-    bookingID,
-    paymentID: payment.paymentID,
-    userID,
-    reason,
-    notes: "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.",
-    source: "staff",
-    outcome: "refunded",
-    amount: totalToRefund,
-    onlineAmount,
-    manualAmount,
-    parts,
-    paymongoRefundID: parts[0]?.paymongoRefundID || null,
-    paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
-    manualRefund,
-    status: "Approved",
-    processedBy: staffUserID,
-    processedAt: now,
-    customerNotified: true,
-    createdAt: now,
-    updatedAt: now,
+  // ── 1. claim: create the doc BEFORE touching PayMongo, one at a time ──
+  const claimedAt = new Date();
+  await db.runTransaction(async (t) => {
+    const snap = await t.get(reqRef);
+    if (snap.exists) {
+      const r = snap.data();
+      if (r.status !== "Pending") throw fail(`Refund for this booking is already ${r.status}.`, 409);
+      if (isLocked(r)) throw fail("This booking's refund is already being processed. Refresh in a moment.", 409);
+      t.update(reqRef, { approvalLockedAt: claimedAt });
+    } else {
+      t.set(reqRef, {
+        refundRequestID,
+        bookingID,
+        paymentID,
+        userID,
+        reason,
+        notes: "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.",
+        source: "staff",
+        outcome: "refunded",
+        amount: totalToRefund,
+        onlineAmount,
+        manualAmount,
+        status: "Pending",
+        parts: [],
+        paymongoRefundID: null,
+        paymongoRefundIDs: [],
+        manualRefund: null,
+        processedBy: null,
+        processedAt: null,
+        rejectReason: null,
+        customerNotified: false,
+        approvalLockedAt: claimedAt,
+        createdAt: claimedAt,
+        updatedAt: claimedAt,
+      });
+    }
   });
 
-  // Resolve any outstanding discount spillover now that it's folded into
-  // this refund, so correctIssuedDiscount() doesn't also try to pay it.
-  await paymentRef.update({
-    updatedAt: now,
-    ...(outstandingDiscountRefund > 0 ? { refundIssued: true } : {}),
-  });
+  const parts = [];
+  let approvedSaved = false; // once true the doc is "Approved" and must never be deleted
+  try {
+    // ── 2. PayMongo refunds, one per online charge ──
+    for (const part of plan.parts) {
+      try {
+        const paymongoRefundID = await createPaymongoRefund({
+          paymongoPaymentID: part.paymongoPaymentID,
+          amount: part.amount,
+          reason,
+        });
+        parts.push({ kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID, status: "pending" });
+      } catch (e) {
+        if (parts.length === 0) {
+          // Nothing went out — drop the placeholder so a retry starts clean.
+          await reqRef.delete().catch(() => {});
+          auditSafe({
+            action: "update",
+            description: `Staff refund for booking ${bookingID} failed at PayMongo for the ${part.kind} part (${e.message}). Nothing was refunded.`,
+            userID: staffUserID, bookingID, paymentID,
+          });
+          const err = fail(`Refund failed: ${e.message}`, 502);
+          err.handled = true;
+          throw err;
+        }
+        // An earlier part is ALREADY refunded at PayMongo and can't be undone —
+        // record exactly what happened and mark Failed (same as approve).
+        const failedAt = new Date();
+        await reqRef.update({
+          status: "Failed",
+          parts: [...parts, { kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID: null, status: "failed", error: e.message }],
+          paymongoRefundID: parts[0].paymongoRefundID,
+          paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
+          processedBy: staffUserID || null,
+          processedAt: failedAt,
+          updatedAt: failedAt,
+          approvalLockedAt: null,
+        });
+        auditSafe({
+          action: "update",
+          description: `Staff refund ${refundRequestID}: the ${part.kind} refund failed at PayMongo (${e.message}) AFTER ${parts.length} earlier part(s) had already been refunded — needs manual follow-up.`,
+          userID: staffUserID, bookingID, paymentID, refundRequestID,
+        });
+        const err = fail(`Part of the refund went through at PayMongo, but the ${part.kind} refund failed: ${e.message}. Marked Failed — please finish the remainder manually from the Refund Requests page.`, 502);
+        err.handled = true;
+        throw err;
+      }
+    }
 
-  const cancel = await cancelBookingForRefund(bookingID, `Cancelled by staff: ${reason}`);
-
-  const { email: customerEmail, name: customerName } = await resolveCustomerContact(userID);
-
-  await notifyCustomer(
-    userID, bookingID, "refund_approved", "Booking Cancelled — Refund Processed",
-    manualRefund
-      ? `Your booking was cancelled: ${reason}. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff.`
-      : `Your booking was cancelled: ${reason}. Your payment of ${peso(totalToRefund)} is being refunded through PayMongo.`
-  );
-
-  if (customerEmail) {
-    sendRefundEmail({
-      toEmail: customerEmail,
-      toName: customerName,
-      bookingID,
+    // ── 3. approved — PayMongo has the refunds; the webhook finishes them ──
+    const manualRefund = manualAmount > 0
+      ? { amount: manualAmount, issued: false, issuedBy: null, issuedAt: null, method: null }
+      : null;
+    const now = new Date();
+    await reqRef.update({
+      status: "Approved",
       amount: totalToRefund,
+      onlineAmount,
       manualAmount,
-      reason,
-    }).catch((err) => console.error("[REFUND] staff refund email failed:", err.message));
+      parts,
+      paymongoRefundID: parts[0]?.paymongoRefundID || null,
+      paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
+      manualRefund,
+      processedBy: staffUserID || null,
+      processedAt: now,
+      updatedAt: now,
+      approvalLockedAt: null,
+    });
+    approvedSaved = true;
+
+    // Discount spillover is folded into this refund now, so
+    // correctIssuedDiscount() must not also try to pay it later.
+    await paymentRef.update({
+      updatedAt: now,
+      ...(outstandingDiscountRefund > 0 ? { refundIssued: true } : {}),
+    });
+
+    // ── 4. cancel the booking + notify (also what a retry re-runs) ──
+    return await finishStaffRefund({
+      refundRequestID, bookingID, paymentID, userID, reason,
+      amount: totalToRefund, onlineAmount, manualAmount, manualRefund,
+      processedBy: staffUserID || null, customerNotified: false,
+    });
+  } catch (err) {
+    // Unexpected failure (not one handled above): never leave the lock held.
+    if (!err.handled && !approvedSaved) {
+      if (parts.length === 0) await reqRef.delete().catch(() => {});          // nothing moved — retry starts clean
+      else await reqRef.update({ approvalLockedAt: null }).catch(() => {});  // parts went out but weren't saved yet
+    }
+    // approvedSaved: doc is already "Approved" — a retry resumes the cancel/notify.
+    throw err;
   }
-
-  if (cancel.driverID) {
-    createNotification({
-      type: "refund_request", refID: refundRequestID, refCollection: "refundRequests",
-      title: "Booking cancelled",
-      message: `A booking you were assigned to (${bookingID}) was cancelled by staff: ${reason}.`,
-      userID: cancel.driverID,
-    }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
-  }
-
-  createTransactionLog({
-    bookingID,
-    paymentID: payment.paymentID,
-    refundRequestID,
-    userID,
-    type: "Refund",
-    amount: totalToRefund,
-    status: "Refunded",
-    description: `${peso(totalToRefund)} refunded for booking ${bookingID} — staff cancelled it while changing the car's status: ${reason}.`,
-    performedBy: staffUserID,
-    logID: `${refundRequestID}_staff`,
-  });
-
-  auditSafe({
-    action: "update",
-    description: `Refund ${refundRequestID}: booking ${bookingID} cancelled and ${peso(totalToRefund)} refunded — car status change: ${reason}.`,
-    userID: staffUserID,
-    bookingID,
-    paymentID: payment.paymentID,
-    refundRequestID,
-  });
-
-  return {
-    outcome: "refunded",
-    bookingID,
-    amount: totalToRefund,
-    onlineAmount,
-    manualAmount,
-    manualRefund,
-    bookingCancelled: cancel.cancelled,
-  };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

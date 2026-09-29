@@ -21,7 +21,7 @@ import {
   getCarBookingsForStatusChange,
 } from "../../services/fleet/fleet.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
-import { consumeOtp } from "../otp/otp.controller.js";
+import { consumeOtp, peekOtp } from "../otp/otp.controller.js";
 import { staffRefundBooking } from "../../services/refundRequest/refundRequest.service.js";
 
 // Statuses that need a reason + OTP + a clean bookings check before they can
@@ -162,14 +162,22 @@ export const changeCarStatus = async (req, res) => {
     const cleanReason = (statusReason || "").trim();
     if (!cleanReason) return res.status(400).json({ success: false, message: "A reason is required." });
     if (!otp) return res.status(400).json({ success: false, message: "Verification code is required." });
-    const otpResult = await consumeOtp(req.user?.email, otp);
-    if (!otpResult.ok) return res.status(otpResult.status).json({ success: false, message: otpResult.message });
+    // Only PEEK here (verify without burning). The code is spent below, after
+    // the whole batch succeeded — otherwise one failed refund used up the code
+    // and staff had to request + type a new one on every retry.
+    const otpResult = await peekOtp(req.user?.email, otp);
+    // `code` lets Fleet.jsx tell "the verification code is no good" (expired,
+    // used up, locked out) apart from every other failure. The code is
+    // checked BEFORE any refund runs, so nothing has happened yet when this
+    // fires — the frontend sends staff back to get a fresh code instead of
+    // leaving them on a dead-end error.
+    if (!otpResult.ok) return res.status(otpResult.status).json({ success: false, code: "OTP_INVALID", message: otpResult.message });
 
     const { upcoming } = await getOpenBookingsForCar(carID);
     const refundResults = [];
     for (const booking of upcoming) {
       try {
-        const r = await staffRefundBooking(booking.bookingID, cleanReason, req.user?.uid || null);
+        const r = await staffRefundBooking(booking.bookingID, cleanReason, req.user?.userID || req.user?.uid || null);
         refundResults.push({ bookingID: booking.bookingID, outcome: r.outcome, amount: r.amount, manualAmount: r.manualAmount });
       } catch (e) {
         refundResults.push({ bookingID: booking.bookingID, outcome: "failed", amount: 0, error: e.message });
@@ -184,6 +192,9 @@ export const changeCarStatus = async (req, res) => {
     }
 
     const data = await updateCarStatus(carID, status, cleanReason);
+
+    // Everything succeeded — now burn the code so it can't be replayed.
+    await consumeOtp(req.user?.email, otp).catch((err) => console.error("[FLEET] consumeOtp after success failed:", err));
 
     createAuditLog({
       action: "update",

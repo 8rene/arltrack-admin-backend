@@ -201,6 +201,52 @@ const toJsDate = (v) => (v?.toDate ? v.toDate() : v ? new Date(v) : null);
 
 const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
 
+// Raw Firestore Timestamps don't survive res.json() — the Admin SDK
+// serializes them as { _seconds, _nanoseconds }, which the frontend can't
+// turn back into a date (no .toDate(), and new Date({...}) is Invalid Date).
+// That's why Start/End showed "—" in the Fleet status-change modals. Every
+// Timestamp on a booking doc is converted to an ISO string here instead, so
+// the frontend always receives something new Date(...) understands.
+const toISO = (v) => {
+  if (!v) return null;
+  if (typeof v.toDate === "function") return v.toDate().toISOString();
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "object" && typeof v._seconds === "number") return new Date(v._seconds * 1000).toISOString();
+  if (typeof v === "string" || typeof v === "number") { const d = new Date(v); return isNaN(d) ? null : d.toISOString(); }
+  return null;
+};
+
+// Booking doc → JSON-safe copy: every Timestamp-shaped field becomes an ISO
+// string, everything else passes through untouched.
+const serializeBooking = (b) => {
+  const out = {};
+  for (const [k, v] of Object.entries(b)) {
+    const isTs = v && typeof v === "object" && (typeof v.toDate === "function" || typeof v._seconds === "number" || v instanceof Date);
+    out[k] = isTs ? toISO(v) : v;
+  }
+  return out;
+};
+
+// Vehicle label for the confirm modal ("Mitsubishi L300"), same
+// car → model → brand walk the Payments page uses.
+const resolveCarLabel = async (carDocID) => {
+  try {
+    const carDoc = await db.collection("cars").doc(carDocID).get();
+    if (!carDoc.exists) return null;
+    const { modelID, platenumber, plateNumber } = carDoc.data();
+    let label = null;
+    if (modelID) {
+      const modelDoc = await db.collection("model").doc(modelID).get();
+      if (modelDoc.exists) {
+        const { brandID, modelName } = modelDoc.data();
+        const brandDoc = brandID ? await db.collection("brand").doc(brandID).get() : null;
+        label = [brandDoc?.exists ? brandDoc.data().brandName : "", modelName].filter(Boolean).join(" ") || null;
+      }
+    }
+    return { label, plateNumber: platenumber || plateNumber || null };
+  } catch { return null; }
+};
+
 // Bookings on this car that staff already cancelled through THIS flow
 // (tagged by the "Cancelled by staff: " prefix cancelBookingForRefund
 // writes into cancellationReason), scoped to today-or-later starts only —
@@ -231,7 +277,7 @@ export const getResolvedBookingsForCar = async (carID) => {
   return Promise.all(
     candidates.map(async (b) => {
       const outcome = await getStaffRefundOutcome(b.bookingID);
-      return { bookingID: b.bookingID, startDateTime: b.startDateTime, endDateTime: b.endDateTime, ...outcome };
+      return { bookingID: b.bookingID, startDateTime: toISO(b.startDateTime), endDateTime: toISO(b.endDateTime), ...outcome };
     })
   );
 };
@@ -244,6 +290,7 @@ export const getResolvedBookingsForCar = async (carID) => {
 // on a retry after a partial batch failure.
 export const getCarBookingsForStatusChange = async (carID) => {
   const { upcoming, ongoing } = await getOpenBookingsForCar(carID);
+  const carInfo = await resolveCarLabel(carID);
 
   // paymentDetails carries the full picture (discounts, the deposit/balance
   // timeline, payment stage, customer name) — same shape the main Payments
@@ -253,15 +300,21 @@ export const getCarBookingsForStatusChange = async (carID) => {
   // that can drift out of sync with what Payments.jsx itself shows.
   const upcomingWithPreview = await Promise.all(
     upcoming.map(async (b) => ({
-      ...b,
+      ...serializeBooking(b),
+      vehicleLabel: carInfo?.label || null,
+      plateNumber: carInfo?.plateNumber || null,
       refundPreview: await getBookingRefundPreview(b.bookingID).catch(() => ({ total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false })),
       paymentDetails: await getPaymentDetailsByBookingID(b.bookingID).catch(() => null),
     }))
   );
 
+  // Ongoing bookings were previously sent raw too — same Timestamp problem
+  // for their date range, so they get serialized as well.
+  const ongoingSerialized = ongoing.map(serializeBooking);
+
   const resolved = await getResolvedBookingsForCar(carID);
 
-  return { upcoming: upcomingWithPreview, ongoing, resolved };
+  return { upcoming: upcomingWithPreview, ongoing: ongoingSerialized, resolved };
 };
 
 // ─────────────────────────────────────────────
