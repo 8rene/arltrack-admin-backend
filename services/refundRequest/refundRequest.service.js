@@ -105,15 +105,20 @@ export const getAllRefundRequests = async (status) => {
 // match) so the UI can show it distinctly instead of a confusing ₱0 button.
 export const getBookingRefundPreview = async (bookingID) => {
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
-  if (paymentSnap.empty) return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false };
+  // No payment doc at all → nothing to refund; confirming just cancels the booking.
+  if (paymentSnap.empty) return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false, noPayment: true, existingRequest: null };
   const payment = paymentSnap.docs[0].data();
   if (lower(payment.status) === "refunded") {
-    return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: true };
+    return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: true, noPayment: false, existingRequest: null };
   }
+  // The customer already filed their own request — confirming from the fleet
+  // flow approves THAT request (see staffRefundBooking) instead of stopping.
+  const open = await findOpenRefundRequest(payment.paymentID || paymentSnap.docs[0].id).catch(() => null);
+  const existingRequest = open ? { id: open.id, status: open.status } : null;
   const plan = computeRefundPlan(payment);
   const outstandingDiscountRefund = payment.discountAmount > 0 && !payment.refundIssued ? plan.breakdown.refundDue : 0;
   const total = plan.total + outstandingDiscountRefund;
-  return { total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount + outstandingDiscountRefund, alreadyRefunded: false };
+  return { total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount + outstandingDiscountRefund, alreadyRefunded: false, noPayment: false, existingRequest };
 };
 
 // What actually happened the last time staff ran a refund/cancel against
@@ -131,7 +136,14 @@ export const getStaffRefundOutcome = async (bookingID) => {
     .where("bookingID", "==", bookingID)
     .where("source", "==", "staff")
     .get();
-  if (snap.empty) return { outcome: null, amount: 0 };
+  if (snap.empty) {
+    // A customer-submitted request that staff approved through the fleet flow
+    // isn't source:"staff" — still report it so the "Already resolved" list
+    // shows a real outcome instead of a bare "Resolved".
+    const anySnap = await db.collection("refundRequests").where("bookingID", "==", bookingID).get();
+    const done = anySnap.docs.map((d) => d.data()).find((r) => ["Approved", "Refunded"].includes(r.status));
+    return done ? { outcome: "refunded", amount: done.amount || 0 } : { outcome: null, amount: 0 };
+  }
   const docs = snap.docs.map((d) => d.data());
   docs.sort((a, b) => {
     const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
@@ -251,7 +263,7 @@ export const resolveCustomerContact = async (userID) => {
 // PayMongo part has settled (customer backend's refund webhook) AND any manual
 // portion is marked issued.
 // ─────────────────────────────────────────────────────────────────────────────
-export const approveRefundRequest = async (refundRequestID, adminUserID) => {
+export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason } = {}) => {
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
 
   // ── 1. claim ──
@@ -343,7 +355,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID) => {
     // Decision: the booking is cancelled at APPROVAL. Staff have decided this trip
     // isn't happening, so the car is released straight away; a PayMongo hiccup is
     // a technical retry, not a reason to keep the trip alive.
-    const cancel = await cancelBookingForRefund(refundRequest.bookingID, "Cancelled: refund approved.");
+    const cancel = await cancelBookingForRefund(refundRequest.bookingID, cancelReason || "Cancelled: refund approved.");
 
     await notifyCustomer(
       refundRequest.userID, refundRequest.bookingID, "refund_approved", "Refund Approved",
@@ -408,7 +420,9 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     reason,
     notes: outcome === "already_refunded"
       ? "Staff-initiated: payment was already refunded earlier; booking cancelled to match."
-      : "Staff-initiated: nothing had been paid; booking cancelled, no refund needed.",
+      : outcome === "no_payment"
+        ? "Staff-initiated: no payment record was found for this booking; booking cancelled, nothing to refund."
+        : "Staff-initiated: nothing had been paid; booking cancelled, no refund needed.",
     source: "staff",
     outcome,
     amount: 0,
@@ -430,7 +444,9 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     userID, bookingID, "refund_approved", "Booking Cancelled",
     outcome === "already_refunded"
       ? `Your booking was cancelled: ${reason}. This booking's payment had already been refunded, so no new refund was needed.`
-      : `Your booking was cancelled: ${reason}.`
+      : outcome === "no_payment"
+        ? `Your booking was cancelled: ${reason}. No payment had been recorded for it, so there is nothing to refund.`
+        : `Your booking was cancelled: ${reason}.`
   );
 
   if (cancel.driverID) {
@@ -446,7 +462,9 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     action: "update",
     description: outcome === "already_refunded"
       ? `Booking ${bookingID} cancelled — its payment was already refunded earlier but the booking itself hadn't been. Car status change: ${reason}.`
-      : `Booking ${bookingID} cancelled — nothing had been paid, so nothing to refund. Car status change: ${reason}.`,
+      : outcome === "no_payment"
+        ? `Booking ${bookingID} cancelled — no payment record was found for it, so nothing to refund. Car status change: ${reason}.`
+        : `Booking ${bookingID} cancelled — nothing had been paid, so nothing to refund. Car status change: ${reason}.`,
     userID: staffUserID,
     bookingID,
     paymentID: payment?.paymentID || null,
@@ -618,7 +636,11 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   }
 
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
-  if (paymentSnap.empty) throw fail("No payment record found for this booking.", 404);
+  // No payment record at all → nothing to refund, so cancel the booking
+  // instead of stopping the whole status change on it.
+  if (paymentSnap.empty) {
+    return staffCancelWithNoRefund(bookingID, booking, { paymentID: null, userID: booking.userID || null }, reason, staffUserID, "no_payment");
+  }
   const paymentRef = paymentSnap.docs[0].ref;
   const payment = paymentSnap.docs[0].data();
   const paymentID = payment.paymentID || paymentSnap.docs[0].id; // never undefined — Firestore rejects it
@@ -635,10 +657,43 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   // placeholder doesn't count.)
   const openCustomerRequest = await findOpenRefundRequest(paymentID);
   if (openCustomerRequest && openCustomerRequest.id !== refundRequestID) {
-    throw fail(
-      `A refund request (${openCustomerRequest.status}) is already open for this booking from the customer's side — resolve it from the Refund Requests page first, then retry.`,
-      409
-    );
+    const cancelReason = `Cancelled by staff: ${reason}`;
+
+    // Still waiting on review → approve it right here (same PayMongo + cancel +
+    // notify path as the Refund Requests page), instead of stopping the batch.
+    if (openCustomerRequest.status === "Pending") {
+      const approved = await approveRefundRequest(openCustomerRequest.id, staffUserID, { cancelReason });
+      return {
+        outcome: "refunded",
+        approvedExisting: true,
+        bookingID,
+        amount: approved.amount,
+        onlineAmount: approved.onlineAmount,
+        manualAmount: approved.manualAmount,
+        manualRefund: approved.manualRefund || null,
+        bookingCancelled: approved.bookingCancelled,
+      };
+    }
+
+    // Already "Approved" but the booking is still upcoming → the refund itself
+    // went through earlier and only the cancel is missing. Finish just that;
+    // never refund again.
+    const cancel = await cancelBookingForRefund(bookingID, cancelReason);
+    auditSafe({
+      action: "update",
+      description: `Booking ${bookingID} cancelled — its customer refund request ${openCustomerRequest.id} was already approved. Car status change: ${reason}.`,
+      userID: staffUserID, bookingID, paymentID, refundRequestID: openCustomerRequest.id,
+    });
+    return {
+      outcome: "refunded",
+      approvedExisting: true,
+      bookingID,
+      amount: openCustomerRequest.amount || 0,
+      onlineAmount: openCustomerRequest.onlineAmount || 0,
+      manualAmount: openCustomerRequest.manualAmount || 0,
+      manualRefund: openCustomerRequest.manualRefund || null,
+      bookingCancelled: cancel.cancelled,
+    };
   }
 
   const userID = payment.userID || booking.userID || null;

@@ -178,7 +178,7 @@ export const changeCarStatus = async (req, res) => {
     for (const booking of upcoming) {
       try {
         const r = await staffRefundBooking(booking.bookingID, cleanReason, req.user?.userID || req.user?.uid || null);
-        refundResults.push({ bookingID: booking.bookingID, outcome: r.outcome, amount: r.amount, manualAmount: r.manualAmount });
+        refundResults.push({ bookingID: booking.bookingID, outcome: r.outcome, amount: r.amount, manualAmount: r.manualAmount, approvedExisting: !!r.approvedExisting });
       } catch (e) {
         refundResults.push({ bookingID: booking.bookingID, outcome: "failed", amount: 0, error: e.message });
         // Stop here — anything already resolved above is real and stays
