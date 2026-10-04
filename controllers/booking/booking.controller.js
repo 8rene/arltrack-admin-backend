@@ -1,5 +1,6 @@
 import { getAllBookings, updateBooking, markBookingDroppedOff, markDeviceChecked, settleDeposit, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
 import { deleteBookingWithCascade } from "../../services/booking/bookingDelete.service.js";
+import { adminCancelBooking, getAdminBookingRefundPreview } from "../../services/refundRequest/refundRequest.service.js";
 
 export const listBookings = async (req, res) => {
   try {
@@ -120,5 +121,37 @@ export const deleteBooking = async (req, res) => {
   } catch (error) {
     console.error("[BOOKINGS] delete error:", error);
     return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// ── Admin: refund + cancel (or cancel only) an upcoming / to-pay booking ──
+// GET  /api/bookings/:id/refund-preview            → what a refund would return
+// POST /api/bookings/:id/refund-cancel { reason, refund: true|false }
+export const refundPreview = async (req, res) => {
+  try {
+    const data = await getAdminBookingRefundPreview(req.params.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[BOOKINGS] refundPreview error:", error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+export const refundAndCancel = async (req, res) => {
+  try {
+    const { reason, refund } = req.body || {};
+    const adminUserID = req.user?.userID || req.user?.uid || null;
+    const data = await adminCancelBooking(req.params.id, { reason, refund: refund !== false }, adminUserID);
+    const message = data.outcome === "cancelled_no_refund"
+      ? "Booking cancelled. No refund was issued."
+      : data.manualAmount > 0
+        ? "Booking cancelled and refund sent to PayMongo. Part of it must be handed back in person — mark it as returned on the Refund Requests page."
+        : data.amount > 0
+          ? "Booking cancelled and refund sent to PayMongo. Final status updates once PayMongo confirms."
+          : "Booking cancelled. Nothing had been paid, so there was nothing to refund.";
+    return res.status(200).json({ success: true, message, data });
+  } catch (error) {
+    console.error("[BOOKINGS] refundAndCancel error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };

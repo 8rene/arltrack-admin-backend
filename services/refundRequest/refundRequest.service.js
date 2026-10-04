@@ -403,7 +403,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 // just no PayMongo call, no email (nothing happened to their money worth
 // emailing about), and no transaction log (that ledger is money-movement
 // only — the audit log below is what records this instead).
-const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staffUserID, outcome) => {
+const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staffUserID, outcome, contextLabel = "car status change") => {
   const userID = payment?.userID || booking.userID || null;
   const now = new Date();
 
@@ -461,10 +461,10 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
   auditSafe({
     action: "update",
     description: outcome === "already_refunded"
-      ? `Booking ${bookingID} cancelled — its payment was already refunded earlier but the booking itself hadn't been. Car status change: ${reason}.`
+      ? `Booking ${bookingID} cancelled — its payment was already refunded earlier but the booking itself hadn't been. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
       : outcome === "no_payment"
-        ? `Booking ${bookingID} cancelled — no payment record was found for it, so nothing to refund. Car status change: ${reason}.`
-        : `Booking ${bookingID} cancelled — nothing had been paid, so nothing to refund. Car status change: ${reason}.`,
+        ? `Booking ${bookingID} cancelled — no payment record was found for it, so nothing to refund. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
+        : `Booking ${bookingID} cancelled — nothing had been paid, so nothing to refund. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`,
     userID: staffUserID,
     bookingID,
     paymentID: payment?.paymentID || null,
@@ -580,7 +580,7 @@ const finishStaffRefund = async (r) => {
 
     auditSafe({
       action: "update",
-      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(r.amount)} refunded — car status change: ${r.reason}.`,
+      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(r.amount)} refunded — ${r.contextLabel || "car status change"}: ${r.reason}.`,
       userID: r.processedBy || null,
       bookingID: r.bookingID,
       paymentID: r.paymentID,
@@ -603,14 +603,18 @@ const finishStaffRefund = async (r) => {
   };
 };
 
-export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
+export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = {}) => {
+  const contextLabel = opts.contextLabel || "car status change";
+  const startNotes = opts.notes || "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.";
   if (!bookingID) throw fail("bookingID is required.", 400);
   if (!reason || !reason.trim()) throw fail("A reason is required.", 400);
 
   const bookingSnap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
   if (bookingSnap.empty) throw fail("Booking not found.", 404);
   const booking = bookingSnap.docs[0].data();
-  if (lower(booking.status) !== "upcoming") {
+  // "to pay" is allowed too (admin Bookings page): it has no money collected, so it
+  // just falls through to the nothing-owed / no-payment cancel paths below.
+  if (!["upcoming", "to pay"].includes(lower(booking.status))) {
     throw fail(`This booking is "${booking.status}", not upcoming — it can't be refunded through this flow.`, 409);
   }
 
@@ -624,7 +628,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   if (existingSnap.exists) {
     const e = existingSnap.data();
     if (["Approved", "Refunded"].includes(e.status) && e.outcome === "refunded") {
-      return finishStaffRefund({ ...e, refundRequestID }); // money already moved — just finish the cancel
+      return finishStaffRefund({ ...e, refundRequestID, contextLabel }); // money already moved — just finish the cancel
     }
     if (e.status === "Failed") {
       throw fail(
@@ -639,7 +643,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   // No payment record at all → nothing to refund, so cancel the booking
   // instead of stopping the whole status change on it.
   if (paymentSnap.empty) {
-    return staffCancelWithNoRefund(bookingID, booking, { paymentID: null, userID: booking.userID || null }, reason, staffUserID, "no_payment");
+    return staffCancelWithNoRefund(bookingID, booking, { paymentID: null, userID: booking.userID || null }, reason, staffUserID, "no_payment", contextLabel);
   }
   const paymentRef = paymentSnap.docs[0].ref;
   const payment = paymentSnap.docs[0].data();
@@ -649,7 +653,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
   // Data mismatch: payment's already Refunded, booking never got cancelled
   // to match. Nothing left to refund — just close the booking out.
   if (payStatus === "refunded") {
-    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "already_refunded");
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "already_refunded", contextLabel);
   }
 
   // The customer already has their own request open for this payment — resolve
@@ -681,7 +685,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
     const cancel = await cancelBookingForRefund(bookingID, cancelReason);
     auditSafe({
       action: "update",
-      description: `Booking ${bookingID} cancelled — its customer refund request ${openCustomerRequest.id} was already approved. Car status change: ${reason}.`,
+      description: `Booking ${bookingID} cancelled — its customer refund request ${openCustomerRequest.id} was already approved. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`,
       userID: staffUserID, bookingID, paymentID, refundRequestID: openCustomerRequest.id,
     });
     return {
@@ -703,7 +707,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
 
   // Genuinely nothing collected (still Pending, etc.) — cancel only.
   if (totalToRefund === 0) {
-    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "nothing_owed");
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "nothing_owed", contextLabel);
   }
 
   if (!["paid", "approved"].includes(payStatus)) {
@@ -731,7 +735,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
         paymentID,
         userID,
         reason,
-        notes: "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.",
+        notes: startNotes,
+        contextLabel,
         source: "staff",
         outcome: "refunded",
         amount: totalToRefund,
@@ -833,7 +838,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID) => {
     // ── 4. cancel the booking + notify (also what a retry re-runs) ──
     return await finishStaffRefund({
       refundRequestID, bookingID, paymentID, userID, reason,
-      amount: totalToRefund, onlineAmount, manualAmount, manualRefund,
+      amount: totalToRefund, onlineAmount, manualAmount, manualRefund, contextLabel,
       processedBy: staffUserID || null, customerNotified: false,
     });
   } catch (err) {
@@ -997,4 +1002,88 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
   }
 
   return { ...refundRequest, status: "Rejected", rejectReason: rejectReason || null };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN "Refund & Cancel" / "Cancel only" from the Bookings page.
+//
+// Keyed by the booking's Firestore doc id (what Bookings.jsx has on each row).
+// Only bookings that haven't started ("to pay"/"upcoming") — same rule as
+// cancelBookingForRefund(). An ongoing trip that the customer wants to end goes
+// through the cancellation-request flow instead.
+//
+//   refund: true  → staffRefundBooking(): PayMongo refund(s) for every online
+//                   charge, cash/in-person part queued as a manual hand-back,
+//                   booking → "cancelled", bookingSession closed, customer
+//                   notified + emailed, audit logged. Full refund, no fee.
+//   refund: false → cancel only; money is NOT returned (audit says how much
+//                   was kept). Blocked while a customer refund request is open
+//                   so the two can't contradict each other.
+// ─────────────────────────────────────────────────────────────────────────────
+const loadBookingByDocID = async (docID) => {
+  const ref = db.collection("bookings").doc(docID);
+  const snap = await ref.get();
+  if (!snap.exists) throw fail("Booking not found.", 404);
+  const booking = snap.data();
+  return { ref, booking, bookingID: booking.bookingID || docID };
+};
+
+export const getAdminBookingRefundPreview = async (docID) => {
+  const { booking, bookingID } = await loadBookingByDocID(docID);
+  const status = lower(booking.status);
+  const eligible = ["to pay", "upcoming"].includes(status);
+  const preview = await getBookingRefundPreview(bookingID);
+  return { bookingID, status: booking.status, eligible, ...preview };
+};
+
+export const adminCancelBooking = async (docID, { refund = true, reason } = {}, adminUserID = null) => {
+  const cleanReason = String(reason || "").trim();
+  if (!cleanReason) throw fail("A reason is required.", 400);
+
+  const { booking, bookingID } = await loadBookingByDocID(docID);
+  if (!["to pay", "upcoming"].includes(lower(booking.status))) {
+    throw fail(`This booking is "${booking.status}". Only "to pay" or "upcoming" bookings can be cancelled here — an ongoing trip needs a cancellation request.`, 409);
+  }
+
+  if (refund) {
+    return staffRefundBooking(bookingID, cleanReason, adminUserID, {
+      contextLabel: "admin cancellation",
+      notes: "Admin-initiated: booking cancelled and refunded from the Bookings page.",
+    });
+  }
+
+  // ── cancel only, no refund ──
+  const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  let retained = 0;
+  if (!paymentSnap.empty) {
+    const payment = paymentSnap.docs[0].data();
+    const paymentID = payment.paymentID || paymentSnap.docs[0].id;
+    const open = await findOpenRefundRequest(paymentID).catch(() => null);
+    if (open) {
+      throw fail("The customer has an open refund request for this booking. Approve or reject it from the Refund Requests page first.", 409);
+    }
+    if (lower(payment.status) !== "refunded") retained = computeRefundPlan(payment).total;
+  }
+
+  const cancel = await cancelBookingForRefund(bookingID, `Cancelled by admin: ${cleanReason}`);
+  if (!cancel.cancelled) throw fail(`Booking could not be cancelled (status is "${cancel.status || booking.status}").`, 409);
+
+  await notifyCustomer(
+    booking.userID, bookingID, "refund_approved", "Booking Cancelled",
+    `Your booking was cancelled: ${cleanReason}.${retained > 0 ? " No refund was issued for this cancellation." : ""}`
+  );
+  if (cancel.driverID) {
+    createNotification({
+      type: "refund_request", refID: bookingID, refCollection: "bookings",
+      title: "Booking cancelled",
+      message: `A booking you were assigned to (${bookingID}) was cancelled by an admin: ${cleanReason}.`,
+      userID: cancel.driverID,
+    }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
+  }
+  auditSafe({
+    action: "update",
+    description: `Booking ${bookingID} cancelled by admin WITHOUT a refund${retained > 0 ? ` (${peso(retained)} retained)` : ""}: ${cleanReason}.`,
+    userID: adminUserID, bookingID,
+  });
+  return { outcome: "cancelled_no_refund", bookingID, amount: 0, retainedAmount: retained, bookingCancelled: true };
 };

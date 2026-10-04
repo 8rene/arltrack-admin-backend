@@ -1,4 +1,4 @@
-import { listBookings, editBooking, deleteBooking, markDroppedOff, deviceCheck, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation } from "../../controllers/booking/booking.controller.js";
+import { listBookings, editBooking, deleteBooking, markDroppedOff, deviceCheck, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel } from "../../controllers/booking/booking.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -18,5 +18,9 @@ export const registerBookingRoutes = (app) => {
   app.get("/api/bookings/:id/return-checklist", verifyToken, requireRole(allowed), returnChecklist);
   app.patch("/api/bookings/:id/cancellation/approve", verifyToken, requireRole(allowed), approveCancellation);
   app.patch("/api/bookings/:id/cancellation/reject",  verifyToken, requireRole(allowed), rejectCancellation);
+  // Money-moving, so Admin/Owner only (Supervisors can still approve a customer's
+  // own refund request from the Refund Requests page).
+  app.get("/api/bookings/:id/refund-preview", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundPreview);
+  app.post("/api/bookings/:id/refund-cancel", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAndCancel);
   app.delete("/api/bookings/:id",verifyToken, requireRole(allowed), deleteBooking);
 };
