@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { resolveNotification, createNotification } from "../notification/notification.service.js";
+import { ROLE_IDS } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { computeRefundPlan } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
@@ -263,7 +264,7 @@ export const resolveCustomerContact = async (userID) => {
 // PayMongo part has settled (customer backend's refund webhook) AND any manual
 // portion is marked issued.
 // ─────────────────────────────────────────────────────────────────────────────
-export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason } = {}) => {
+export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason, skipDriverNotify = false } = {}) => {
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
 
   // ── 1. claim ──
@@ -365,7 +366,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     );
 
     // A driver already assigned to this booking shouldn't find out secondhand.
-    if (cancel.cancelled && cancel.driverID) {
+    if (cancel.cancelled && cancel.driverID && !skipDriverNotify) {
       createNotification({
         type: "refund_request", refID: refundRequestID, refCollection: "refundRequests",
         title: "Booking cancelled — refund approved",
@@ -403,7 +404,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 // just no PayMongo call, no email (nothing happened to their money worth
 // emailing about), and no transaction log (that ledger is money-movement
 // only — the audit log below is what records this instead).
-const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staffUserID, outcome, contextLabel = "car status change") => {
+const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staffUserID, outcome, contextLabel = "car status change", skipDriverNotify = false) => {
   const userID = payment?.userID || booking.userID || null;
   const now = new Date();
 
@@ -449,7 +450,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
         : `Your booking was cancelled: ${reason}.`
   );
 
-  if (cancel.driverID) {
+  if (cancel.driverID && !skipDriverNotify) {
     createNotification({
       type: "refund_request", refID: bookingID, refCollection: "bookings",
       title: "Booking cancelled",
@@ -569,7 +570,7 @@ const finishStaffRefund = async (r) => {
       }).catch((err) => console.error("[REFUND] staff refund email failed:", err.message));
     }
 
-    if (cancel.cancelled && cancel.driverID) {
+    if (cancel.cancelled && cancel.driverID && !r.skipDriverNotify) {
       createNotification({
         type: "refund_request", refID: r.refundRequestID, refCollection: "refundRequests",
         title: "Booking cancelled",
@@ -605,6 +606,7 @@ const finishStaffRefund = async (r) => {
 
 export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = {}) => {
   const contextLabel = opts.contextLabel || "car status change";
+  const skipDriverNotify = !!opts.skipDriverNotify; // the caller (admin Bookings flow) notifies driver + staff itself
   const startNotes = opts.notes || "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.";
   if (!bookingID) throw fail("bookingID is required.", 400);
   if (!reason || !reason.trim()) throw fail("A reason is required.", 400);
@@ -628,7 +630,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   if (existingSnap.exists) {
     const e = existingSnap.data();
     if (["Approved", "Refunded"].includes(e.status) && e.outcome === "refunded") {
-      return finishStaffRefund({ ...e, refundRequestID, contextLabel }); // money already moved — just finish the cancel
+      return finishStaffRefund({ ...e, refundRequestID, contextLabel, skipDriverNotify }); // money already moved — just finish the cancel
     }
     if (e.status === "Failed") {
       throw fail(
@@ -643,7 +645,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   // No payment record at all → nothing to refund, so cancel the booking
   // instead of stopping the whole status change on it.
   if (paymentSnap.empty) {
-    return staffCancelWithNoRefund(bookingID, booking, { paymentID: null, userID: booking.userID || null }, reason, staffUserID, "no_payment", contextLabel);
+    return staffCancelWithNoRefund(bookingID, booking, { paymentID: null, userID: booking.userID || null }, reason, staffUserID, "no_payment", contextLabel, skipDriverNotify);
   }
   const paymentRef = paymentSnap.docs[0].ref;
   const payment = paymentSnap.docs[0].data();
@@ -653,7 +655,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   // Data mismatch: payment's already Refunded, booking never got cancelled
   // to match. Nothing left to refund — just close the booking out.
   if (payStatus === "refunded") {
-    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "already_refunded", contextLabel);
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "already_refunded", contextLabel, skipDriverNotify);
   }
 
   // The customer already has their own request open for this payment — resolve
@@ -666,7 +668,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     // Still waiting on review → approve it right here (same PayMongo + cancel +
     // notify path as the Refund Requests page), instead of stopping the batch.
     if (openCustomerRequest.status === "Pending") {
-      const approved = await approveRefundRequest(openCustomerRequest.id, staffUserID, { cancelReason });
+      const approved = await approveRefundRequest(openCustomerRequest.id, staffUserID, { cancelReason, skipDriverNotify });
       return {
         outcome: "refunded",
         approvedExisting: true,
@@ -707,7 +709,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
 
   // Genuinely nothing collected (still Pending, etc.) — cancel only.
   if (totalToRefund === 0) {
-    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "nothing_owed", contextLabel);
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "nothing_owed", contextLabel, skipDriverNotify);
   }
 
   if (!["paid", "approved"].includes(payStatus)) {
@@ -838,7 +840,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     // ── 4. cancel the booking + notify (also what a retry re-runs) ──
     return await finishStaffRefund({
       refundRequestID, bookingID, paymentID, userID, reason,
-      amount: totalToRefund, onlineAmount, manualAmount, manualRefund, contextLabel,
+      amount: totalToRefund, onlineAmount, manualAmount, manualRefund, contextLabel, skipDriverNotify,
       processedBy: staffUserID || null, customerNotified: false,
     });
   } catch (err) {
@@ -1028,6 +1030,49 @@ const loadBookingByDocID = async (docID) => {
   return { ref, booking, bookingID: booking.bookingID || docID };
 };
 
+// Tells everyone who needs to know that an admin cancelled a booking:
+//   • the assigned driver — ONLY if the booking has one (chauffeur bookings);
+//     the user doc is checked first so a stale/deleted driverID is skipped
+//   • every other Owner / Admin / Supervisor — so the team isn't surprised by
+//     a booking vanishing. The person who did it is left out.
+// Best-effort: a failed notification never fails the cancellation itself.
+const notifyAdminCancellation = async ({ docID, bookingID, driverID, customerUserID, reason, actorID, refundedAmount = 0, retainedAmount = 0 }) => {
+  const money = refundedAmount > 0 ? ` ${peso(refundedAmount)} refunded.`
+              : retainedAmount > 0 ? ` No refund issued (${peso(retainedAmount)} kept).`
+              : "";
+
+  if (driverID) {
+    try {
+      const driverDoc = await db.collection("user").doc(driverID).get();
+      if (driverDoc.exists) {
+        await createNotification({
+          type: "booking_cancelled", refID: docID, refCollection: "bookings",
+          title: "Trip cancelled",
+          message: `Booking ${bookingID}, which you were assigned to, was cancelled by an admin: ${reason}. You no longer need to do this trip.`,
+          userID: driverID,
+        });
+      }
+    } catch (err) { console.error("[REFUND] Failed to notify assigned driver:", err.message); }
+  }
+
+  try {
+    const [staffSnap, { name: customerName }] = await Promise.all([
+      db.collection("user").where("roleID", "in", [ROLE_IDS.OWNER, ROLE_IDS.ADMIN, ROLE_IDS.SUPERVISOR]).get(),
+      resolveCustomerContact(customerUserID),
+    ]);
+    await Promise.all(
+      staffSnap.docs
+        .filter((d) => d.id !== actorID)
+        .map((d) => createNotification({
+          type: "booking_cancelled", refID: docID, refCollection: "bookings",
+          title: "Booking cancelled by admin",
+          message: `Booking ${bookingID} (${customerName}) was cancelled: ${reason}.${money}`,
+          userID: d.id,
+        }).catch((err) => console.error("[REFUND] Failed to notify staff member:", err.message)))
+    );
+  } catch (err) { console.error("[REFUND] Failed to notify staff:", err.message); }
+};
+
 export const getAdminBookingRefundPreview = async (docID) => {
   const { booking, bookingID } = await loadBookingByDocID(docID);
   const status = lower(booking.status);
@@ -1046,10 +1091,18 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
   }
 
   if (refund) {
-    return staffRefundBooking(bookingID, cleanReason, adminUserID, {
+    const result = await staffRefundBooking(bookingID, cleanReason, adminUserID, {
       contextLabel: "admin cancellation",
       notes: "Admin-initiated: booking cancelled and refunded from the Bookings page.",
+      skipDriverNotify: true, // notified once, below, together with the rest of the team
     });
+    if (result.bookingCancelled) {
+      await notifyAdminCancellation({
+        docID, bookingID, driverID: booking.driverID || null, customerUserID: booking.userID,
+        reason: cleanReason, actorID: adminUserID, refundedAmount: result.amount || 0,
+      });
+    }
+    return result;
   }
 
   // ── cancel only, no refund ──
@@ -1072,14 +1125,10 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
     booking.userID, bookingID, "refund_approved", "Booking Cancelled",
     `Your booking was cancelled: ${cleanReason}.${retained > 0 ? " No refund was issued for this cancellation." : ""}`
   );
-  if (cancel.driverID) {
-    createNotification({
-      type: "refund_request", refID: bookingID, refCollection: "bookings",
-      title: "Booking cancelled",
-      message: `A booking you were assigned to (${bookingID}) was cancelled by an admin: ${cleanReason}.`,
-      userID: cancel.driverID,
-    }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
-  }
+  await notifyAdminCancellation({
+    docID, bookingID, driverID: booking.driverID || cancel.driverID || null, customerUserID: booking.userID,
+    reason: cleanReason, actorID: adminUserID, retainedAmount: retained,
+  });
   auditSafe({
     action: "update",
     description: `Booking ${bookingID} cancelled by admin WITHOUT a refund${retained > 0 ? ` (${peso(retained)} retained)` : ""}: ${cleanReason}.`,

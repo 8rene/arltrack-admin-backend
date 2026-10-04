@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff } from "../../services/booking/bookingSession.service.js";
+import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
 import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { resolveInspectionReminders } from "../../services/inspectionReminders/inspectionReminders.service.js";
@@ -486,6 +486,22 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   });
 
+  // ── Map-picked location: { address, lat, lng } from the admin map picker (same
+  // shape the customer's picker produces). The text goes on bookings.location as
+  // before; the coordinates move the destination geofence zone on the session. ──
+  let pickedLocation = null;
+  const lc = updates.locationCoords;
+  if (lc && typeof lc === "object") {
+    const lat = Number(lc.lat), lng = Number(lc.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      throw new Error("Invalid map coordinates for location.");
+    }
+    const address = String(lc.address || filtered.location || "").trim();
+    if (!address) throw new Error("A location address is required.");
+    pickedLocation = { address, lat, lng };
+    filtered.location = address;
+  }
+
   // ── Payment validation: cannot mark picked-up/ongoing if payment is not yet approved/paid ──
   if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
     const bID = bookingID || docID;
@@ -615,7 +631,22 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
 
   filtered.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
+  // Move the destination geofence zone BEFORE saving the booking, so a failure here
+  // surfaces to the admin instead of leaving the text and the pin out of sync.
+  if (pickedLocation) {
+    await updateSessionDestination(bookingID || docID, bookingData.location, pickedLocation);
+  }
+
   await db.collection("bookings").doc(docID).update(filtered);
+
+  if (filtered.location !== undefined && filtered.location !== bookingData.location) {
+    createAuditLog({
+      action: "update",
+      userID: performedBy,
+      bookingID: bookingID || docID,
+      description: `Changed location on booking ${bookingID || docID} from "${bookingData.location || "—"}" to "${filtered.location || "—"}"${pickedLocation ? " (pin moved on map)" : ""}.`,
+    }).catch((err) => console.error("[AuditLog] Location edit log failed:", err.message));
+  }
 
   // The booking has moved on, so any "driver is waiting on the inspection"
   // reminder for it is stale: pickup clears the pickup one, and once the

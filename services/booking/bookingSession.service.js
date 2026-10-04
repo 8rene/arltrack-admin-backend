@@ -98,6 +98,36 @@ export const getSessionById = async (bookingSessionID) => {
   return doc.exists ? { ref: doc.ref, data: doc.data() } : null;
 };
 
+/**
+ * Move a booking's destination geofence zone to new coordinates.
+ *
+ * The customer backend writes geofenceZones as [Pickup, <destination>, ...extra
+ * stops], with the destination zone labelled by the destination text (the same
+ * text stored on bookings.location). So the zone is found by its old label, falling
+ * back to slot 1 when slot 0 is the "Pickup" zone. If neither matches, the zone is
+ * appended instead — a destination edit never overwrites a pickup/extra-stop zone.
+ * Keeps the zone's existing radius. Returns false when the booking has no session.
+ */
+export const updateSessionDestination = async (bookingID, oldLabel, { address, lat, lng }) => {
+  const session = await getSessionByBookingID(bookingID);
+  if (!session) return false;
+
+  const zones = Array.isArray(session.data.geofenceZones) ? [...session.data.geofenceZones] : [];
+  const norm = (s) => (s || "").trim().toLowerCase();
+
+  let idx = norm(oldLabel) && norm(oldLabel) !== "pickup"
+    ? zones.findIndex((z) => z && norm(z.label) === norm(oldLabel))
+    : -1;
+  if (idx === -1 && zones.length >= 2 && norm(zones[0]?.label) === "pickup") idx = 1;
+
+  const radius = zones[idx]?.radius ?? zones[0]?.radius ?? 500;
+  const next = { label: address, lat, lng, radius };
+  if (idx === -1) zones.push(next); else zones[idx] = next;
+
+  await session.ref.update({ geofenceZones: zones });
+  return true;
+};
+
 /** Look a session up by the bookingID FK — used when a booking's status changes. */
 export const getSessionByBookingID = async (bookingID) => {
   const snap = await SESSIONS().where("bookingID", "==", bookingID).limit(1).get();
