@@ -32,6 +32,22 @@ export const getActiveSessionByCar = async (carID) => {
   return { ref: doc.ref, data: doc.data() };
 };
 
+// ── Live-ping variant: remembers "this car has NO active session" briefly ────
+// A parked car pings every few seconds and each ping would otherwise run this
+// query just to learn "nothing to do". Only the negative answer is cached (an
+// active session is always re-read so its alert state is never stale), and
+// markSessionActive clears it on the same instance so a trip start isn't missed.
+const NO_ACTIVE_TTL_MS = 15_000;
+const noActiveUntil = new Map(); // carID -> expiry ms
+export const getActiveSessionByCarCached = async (carID) => {
+  const until = noActiveUntil.get(carID);
+  if (until && Date.now() < until) return null;
+  const session = await getActiveSessionByCar(carID);
+  if (!session) noActiveUntil.set(carID, Date.now() + NO_ACTIVE_TTL_MS);
+  else noActiveUntil.delete(carID);
+  return session;
+};
+
 /** All sessions currently active — this is what the nightly cron iterates. */
 export const getAllActiveSessions = async () => {
   const snap = await SESSIONS().where("status", "==", "active").get();
@@ -57,6 +73,23 @@ export const getSessionsByCar = async (carID) => {
     return bt - at;
   });
   return sessions;
+};
+
+/**
+ * Traceback only needs the session around ONE date, not the car's whole
+ * history. Newest few sessions that started on/before the end of that date
+ * (a car's trips don't overlap, so the match is among them). Needs a
+ * composite index (carID asc, pickupTime desc) — if it's missing, or this
+ * returns nothing, callers fall back to the full getSessionsByCar read.
+ */
+export const getRecentSessionsByCarUpTo = async (carID, endOfDate, limit = 4) => {
+  const snap = await SESSIONS()
+    .where("carID", "==", carID)
+    .where("pickupTime", "<=", admin.firestore.Timestamp.fromDate(endOfDate))
+    .orderBy("pickupTime", "desc")
+    .limit(limit)
+    .get();
+  return snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
 };
 
 /** Look a session up directly by its own primary key. */
@@ -86,6 +119,7 @@ export const getSessionByBookingID = async (bookingID) => {
  * caller already applies around this whole call.
  */
 export const markSessionActive = async (bookingSessionID, carID) => {
+  noActiveUntil.delete(carID);
   const sessionRef = SESSIONS().doc(bookingSessionID);
   const updates = {
     carID,

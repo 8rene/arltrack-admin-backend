@@ -41,7 +41,7 @@ import { registerDriverDispatchRoutes }        from "./routes/driverDispatch/dri
 import { registerSystemSettingsRoutes }       from "./routes/systemSettings/systemSettings.routes.js"; // ← NEW
 import { registerLocationOptionsRoutes }       from "./routes/locationOptions/locationOptions.routes.js"; // ← NEW
 import { registerPenaltyRoutes }               from "./routes/penalty/penalty.routes.js"; // ← NEW
-import { seedCacheFromFirestore }            from "./services/gps/gps.service.js";
+
 
 const app = express();
 
@@ -107,7 +107,9 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  await seedCacheFromFirestore();
+  // seedCacheFromFirestore() removed: it read the whole gpsLocations
+  // collection on every (serverless) cold start, and nothing reads that
+  // in-memory cache — the live map is served from gpsLocation via /api/gps.
   // both watchers removed — see comment above the imports
 });
 

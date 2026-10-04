@@ -85,15 +85,27 @@ async function getCodingRules() {
 
 // Same holiday check as the customer backend's booking-time path — a public
 // holiday suspends coding entirely for that calendar day.
+// Cached per calendar day (1h TTL so a newly-added holiday is still picked
+// up) — this runs on every live ping of a car on a trip, and the answer only
+// changes at most once a day.
+const holidayCache = new Map(); // dayStart ms -> { value, at }
+const HOLIDAY_TTL_MS = 60 * 60 * 1000;
 async function isHolidayAt(atInstant) {
   const dayStart = new Date(atInstant); dayStart.setHours(0, 0, 0, 0);
   const dayEnd   = new Date(atInstant); dayEnd.setHours(23, 59, 59, 999);
+  const key = dayStart.getTime();
+  const hit = holidayCache.get(key);
+  if (hit && Date.now() - hit.at < HOLIDAY_TTL_MS) return hit.value;
+
   const snap = await db.collection("holidays")
     .where("holidayDate", ">=", dayStart)
     .where("holidayDate", "<=", dayEnd)
     .limit(1)
     .get();
-  return !snap.empty;
+  const value = !snap.empty;
+  if (holidayCache.size > 30) holidayCache.clear();
+  holidayCache.set(key, { value, at: Date.now() });
+  return value;
 }
 
 function parseRuleTime(t) {

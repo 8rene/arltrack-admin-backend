@@ -6,7 +6,7 @@
 
 import admin from "firebase-admin";
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { getActiveSessionByCar } from "../../services/booking/bookingSession.service.js";
+import { getActiveSessionByCarCached } from "../../services/booking/bookingSession.service.js";
 import { checkGeofence } from "./geofence.service.js";
 import { resolveCodingRestriction } from "./coding.service.js";
 import { appendCarPing } from "../sheets/sheets.service.js";
@@ -35,7 +35,7 @@ const getPlateNumber = async (carID) => {
  *   backlog happened to flush. Defaults to receive time if the caller didn't have one.
  */
 export const processLivePing = async (carID, lat, lng, speed = 0, offline = false, recordedAt = new Date()) => {
-  const session = await getActiveSessionByCar(carID);
+  const session = await getActiveSessionByCarCached(carID);
   if (!session) return; // no active trip on this car — nothing more to do
 
   const { ref, data } = session;

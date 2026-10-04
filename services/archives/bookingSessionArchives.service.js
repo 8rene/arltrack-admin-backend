@@ -31,6 +31,16 @@ export const getAllBookingSessionArchives = async () => {
 // alone would silently lose all geofence/alert/status context for that
 // date — see gps.controller.js's getCarTraceback). Same shape ({ ref, data })
 // as getSessionsByCar so callers don't need to branch on which one matched. ──
+export const getRecentSessionArchivesByCarUpTo = async (carID, endOfDate, limit = 4) => {
+  const snap = await db.collection("bookingSessionArchives")
+    .where("carID", "==", carID)
+    .where("pickupTime", "<=", admin.firestore.Timestamp.fromDate(endOfDate))
+    .orderBy("pickupTime", "desc")
+    .limit(limit)
+    .get();
+  return snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
+};
+
 export const getSessionArchivesByCar = async (carID) => {
   const snap = await db.collection("bookingSessionArchives").where("carID", "==", carID).get();
   const sessions = snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));

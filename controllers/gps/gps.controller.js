@@ -1,8 +1,15 @@
 import { saveLocation } from "../../services/gps/gps.service.js";
+import {
+  getLiveLocationsCached,
+  getCachedDevice, setCachedDevice,
+  getCachedLocDocId, setCachedLocDocId, clearLocDocId,
+  clearGpsDeviceCaches,
+  shouldSkipLocationWrite, markLocationWritten,
+} from "../../services/gps/gpsLookupCache.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { getSessionsByCar, getActiveSessionByCar } from "../../services/booking/bookingSession.service.js";
-import { getSessionArchivesByCar } from "../../services/archives/bookingSessionArchives.service.js";
+import { getSessionsByCar, getActiveSessionByCar, getRecentSessionsByCarUpTo } from "../../services/booking/bookingSession.service.js";
+import { getSessionArchivesByCar, getRecentSessionArchivesByCarUpTo } from "../../services/archives/bookingSessionArchives.service.js";
 import { fetchCarRowsForDate } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
 import { isWithinPhilippines } from "../../utils/gps/philippinesBounds.js";
@@ -51,56 +58,97 @@ export const receiveLocation = async (req, res) => {
     }
   }
 
+  // A parked tracker re-sends the same fix every few seconds; skip the
+  // Firestore writes for those (heartbeat + movement still go through).
+  const skipWrite = shouldSkipLocationWrite(device_id, latVal, lngVal, speedVal, offlineVal);
+
   let data;
   try {
-    data = await saveLocation(device_id, lat, lng, recordedAt);
+    data = await saveLocation(device_id, lat, lng, recordedAt, { persist: !skipWrite });
   } catch (err) {
     console.error("[GPS] saveLocation failed:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to save location." });
   }
 
+  // ── gpsDevice: who is this device + which car is it on? ─────────────────
+  // Cached for ~60s (cleared on any device add/assign/unassign/edit/delete)
+  // so a ping doesn't re-run the same `where` query every few seconds.
+  let dev = getCachedDevice(device_id);
   try {
-    const deviceSnap = await db.collection("gpsDevice")
-      .where("gpsDeviceID", "==", device_id).limit(1).get();
-
-    if (!deviceSnap.empty) {
-      await deviceSnap.docs[0].ref.update({
-        lastLocation: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
-        updatedAt: admin.firestore.Timestamp.fromDate(recordedAt),
-      });
-
-      const assignedCarID = deviceSnap.docs[0].data().carID;
-      if (assignedCarID) {
-        processLivePing(assignedCarID, parseFloat(lat), parseFloat(lng), speedVal, offlineVal, recordedAt).catch((err) =>
-          console.error("[GPS] processLivePing failed (raw ping was still saved):", err.message)
-        );
-      }
+    if (!dev) {
+      const deviceSnap = await db.collection("gpsDevice")
+        .where("gpsDeviceID", "==", device_id).limit(1).get();
+      dev = deviceSnap.empty
+        ? { docId: null, carID: null }
+        : { docId: deviceSnap.docs[0].id, carID: deviceSnap.docs[0].data().carID || null };
+      setCachedDevice(device_id, dev);
     }
 
-    const locSnap = await db.collection("gpsLocation")
-      .where("gpsDeviceID", "==", device_id).limit(1).get();
+    if (dev.docId && !skipWrite) {
+      try {
+        await db.collection("gpsDevice").doc(dev.docId).update({
+          lastLocation: { latitude: latVal, longitude: lngVal },
+          updatedAt: admin.firestore.Timestamp.fromDate(recordedAt),
+        });
+      } catch (err) {
+        clearGpsDeviceCaches(); // doc may have been deleted/replaced — re-lookup next ping
+        console.error("[GPS] gpsDevice update failed:", err.message);
+      }
+    }
+  } catch (err) {
+    console.error("[GPS] gpsDevice lookup failed:", err.message);
+  }
 
-    if (!locSnap.empty) {
-      await locSnap.docs[0].ref.update({
-        latitude:   parseFloat(lat),
-        longtitude: parseFloat(lng), // preserving existing typo in DB
+  // Trip logic (geofence / coding / Sheets log) must see EVERY ping, so it is
+  // never skipped — only the redundant location-doc writes above/below are.
+  if (dev?.carID) {
+    processLivePing(dev.carID, latVal, lngVal, speedVal, offlineVal, recordedAt).catch((err) =>
+      console.error("[GPS] processLivePing failed (raw ping was still saved):", err.message)
+    );
+  }
+
+  // ── gpsLocation: the doc the live map reads ─────────────────────────────
+  if (!skipWrite) {
+    try {
+      const locPayload = {
+        latitude:   latVal,
+        longtitude: lngVal, // preserving existing typo in DB
         speed:      speedVal,
         offline:    offlineVal,
         updatedAt:  admin.firestore.Timestamp.fromDate(recordedAt),
-      });
-    } else {
-      await db.collection("gpsLocation").add({
-        gpsDeviceID: device_id,
-        latitude:    parseFloat(lat),
-        longtitude:  parseFloat(lng), // preserving existing typo in DB
-        speed:       speedVal,
-        offline:     offlineVal,
-        updatedAt:   admin.firestore.Timestamp.fromDate(recordedAt),
-        createdAt:   admin.firestore.FieldValue.serverTimestamp(), // doc creation bookkeeping — receive time is correct here
-      });
+      };
+
+      let updated = false;
+      const cachedLocId = getCachedLocDocId(device_id);
+      if (cachedLocId) {
+        try {
+          await db.collection("gpsLocation").doc(cachedLocId).update(locPayload);
+          updated = true;
+        } catch (err) {
+          clearLocDocId(device_id); // stale id — fall through to the query path
+        }
+      }
+
+      if (!updated) {
+        const locSnap = await db.collection("gpsLocation")
+          .where("gpsDeviceID", "==", device_id).limit(1).get();
+
+        if (!locSnap.empty) {
+          await locSnap.docs[0].ref.update(locPayload);
+          setCachedLocDocId(device_id, locSnap.docs[0].id);
+        } else {
+          const ref = await db.collection("gpsLocation").add({
+            gpsDeviceID: device_id,
+            ...locPayload,
+            createdAt:   admin.firestore.FieldValue.serverTimestamp(), // doc creation bookkeeping — receive time is correct here
+          });
+          setCachedLocDocId(device_id, ref.id);
+        }
+      }
+      markLocationWritten(device_id, latVal, lngVal, speedVal, offlineVal);
+    } catch (err) {
+      console.error("[GPS] Firestore update failed:", err.message);
     }
-  } catch (err) {
-    console.error("[GPS] Firestore update failed:", err.message);
   }
 
   return res.json({ status: "ok", data });
@@ -154,8 +202,11 @@ export const getDeviceLocation = async (req, res) => {
 /** GET /api/gps  — Frontend reads ALL devices that have a stored location */
 export const getAllDeviceLocations = async (req, res) => {
   try {
+    // Shared ~15s cache: no matter how many staff have the map open (or how
+    // often they poll), Firestore is read at most about once per window.
+    const data = await getLiveLocationsCached(async () => {
     const snap = await db.collection("gpsLocation").get();
-    const data = snap.docs
+    return snap.docs
       .map(d => {
         const doc = d.data();
         const lat = parseFloat(doc.latitude)   || doc.lastLocation?.latitude  || null;
@@ -175,6 +226,7 @@ export const getAllDeviceLocations = async (req, res) => {
         };
       })
       .filter(Boolean);
+    });
 
     return res.json({ status: "ok", data });
   } catch (err) {
@@ -205,6 +257,7 @@ export const getAllGpsDevices = async (req, res) => {
 
 /** POST /api/gps/devices  — Add a new GPS device (assigned = false by default) */
 export const addGpsDevice = async (req, res) => {
+  clearGpsDeviceCaches(); // device/assignment is changing — drop cached lookups
   try {
     const snap  = await db.collection("gpsDevice").get();
     const count = snap.size + 1;
@@ -230,6 +283,7 @@ export const addGpsDevice = async (req, res) => {
 
 /** PUT /api/gps/devices/:id/unassign  — Detach a car from a GPS device */
 export const unassignDeviceFromCar = async (req, res) => {
+  clearGpsDeviceCaches(); // device/assignment is changing — drop cached lookups
   const { id } = req.params;
 
   try {
@@ -272,6 +326,7 @@ export const unassignDeviceFromCar = async (req, res) => {
 
 /** PATCH /api/gps/devices/:id  — Rename a GPS device */
 export const updateGpsDevice = async (req, res) => {
+  clearGpsDeviceCaches(); // device/assignment is changing — drop cached lookups
   const { id }      = req.params;
   const { gpsName } = req.body;
 
@@ -302,6 +357,7 @@ export const updateGpsDevice = async (req, res) => {
 
 /** DELETE /api/gps/devices/:id  — Permanently remove a GPS device */
 export const deleteGpsDevice = async (req, res) => {
+  clearGpsDeviceCaches(); // device/assignment is changing — drop cached lookups
   const { id } = req.params;
 
   try {
@@ -320,6 +376,7 @@ export const deleteGpsDevice = async (req, res) => {
   }
 };
 export const assignCarToDevice = async (req, res) => {
+  clearGpsDeviceCaches(); // device/assignment is changing — drop cached lookups
   const { id }    = req.params;
   const { carID } = req.body;
 
@@ -547,8 +604,20 @@ export const getCarTraceback = async (req, res) => {
         return datesBetweenPHT(pickup, end).includes(date);
       });
 
-      const sessions = await getSessionsByCar(carId);
-      let match = findMatch(sessions);
+      // Bounded lookup first (a few reads); only if it errors (e.g. index not
+      // built yet) or finds nothing do we fall back to reading every session.
+      const endOfDate = new Date(`${date}T23:59:59.999+08:00`); // PHT end of day
+      let match = null;
+      let recent = null; // null = bounded lookup unavailable (error); [] = ran, found nothing
+      try {
+        recent = await getRecentSessionsByCarUpTo(carId, endOfDate);
+        match = findMatch(recent);
+      } catch (e) {
+        console.warn("[GPS] bounded session lookup failed, using full read:", e.message);
+      }
+      // Trips on one car don't overlap, so if the newest few sessions up to
+      // that date don't cover it, no session does — no need to read them all.
+      if (!match && (recent === null || recent.length === 0)) match = findMatch(await getSessionsByCar(carId));
       let isArchived = false;
 
       // Live bookingSessions doc is deleted once its booking gets archived
@@ -557,8 +626,14 @@ export const getCarTraceback = async (req, res) => {
       // are never touched by archiving) but all context around them would
       // silently vanish. Check the preserved archive copy instead.
       if (!match) {
-        const archivedSessions = await getSessionArchivesByCar(carId);
-        match = findMatch(archivedSessions);
+        let recentArch = null;
+        try {
+          recentArch = await getRecentSessionArchivesByCarUpTo(carId, endOfDate);
+          match = findMatch(recentArch);
+        } catch (e) {
+          console.warn("[GPS] bounded archive lookup failed, using full read:", e.message);
+        }
+        if (!match && (recentArch === null || recentArch.length === 0)) match = findMatch(await getSessionArchivesByCar(carId));
         isArchived = !!match;
       }
 
