@@ -6,7 +6,7 @@ import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { computeRefundPlan } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
-import { sendRefundEmail } from "../email/email.service.js";
+import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -218,6 +218,16 @@ const notifyCustomer = (userID, bookingID, type, title, message) => {
   if (!userID) return Promise.resolve();
   return createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID })
     .catch((err) => console.error(`[REFUND] failed to notify customer (${type}):`, err.message));
+};
+// Emails the customer that their booking was cancelled with no money returned.
+// Best-effort — a missing address or a send failure never fails the cancellation.
+const emailCustomerCancelled = async (userID, bookingID, reason, refundNote = "") => {
+  try {
+    const { email, name } = await resolveCustomerContact(userID);
+    if (!email) return;
+    sendCancellationEmail({ toEmail: email, toName: name, bookingID, reason, refundNote })
+      .catch((err) => console.error("[REFUND] cancellation email failed:", err.message));
+  } catch (err) { console.error("[REFUND] cancellation email lookup failed:", err.message); }
 };
 
 // resolve customer email + display name for the refund email — mirrors
@@ -442,12 +452,18 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
   const cancel = await cancelBookingForRefund(bookingID, `Cancelled by staff: ${reason}`);
 
   await notifyCustomer(
-    userID, bookingID, "refund_approved", "Booking Cancelled",
+    userID, bookingID, "booking_cancelled", "Booking Cancelled",
     outcome === "already_refunded"
       ? `Your booking was cancelled: ${reason}. This booking's payment had already been refunded, so no new refund was needed.`
       : outcome === "no_payment"
         ? `Your booking was cancelled: ${reason}. No payment had been recorded for it, so there is nothing to refund.`
         : `Your booking was cancelled: ${reason}.`
+  );
+  emailCustomerCancelled(
+    userID, bookingID, reason,
+    outcome === "already_refunded" ? "This booking's payment had already been refunded earlier, so no new refund was needed."
+    : outcome === "no_payment"     ? "No payment had been recorded for this booking, so there is nothing to refund."
+    : "Nothing had been paid for this booking, so there is nothing to refund."
   );
 
   if (cancel.driverID && !skipDriverNotify) {
@@ -1122,8 +1138,12 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
   if (!cancel.cancelled) throw fail(`Booking could not be cancelled (status is "${cancel.status || booking.status}").`, 409);
 
   await notifyCustomer(
-    booking.userID, bookingID, "refund_approved", "Booking Cancelled",
+    booking.userID, bookingID, "booking_cancelled", "Booking Cancelled",
     `Your booking was cancelled: ${cleanReason}.${retained > 0 ? " No refund was issued for this cancellation." : ""}`
+  );
+  emailCustomerCancelled(
+    booking.userID, bookingID, cleanReason,
+    retained > 0 ? "No refund was issued for this cancellation." : ""
   );
   await notifyAdminCancellation({
     docID, bookingID, driverID: booking.driverID || cancel.driverID || null, customerUserID: booking.userID,

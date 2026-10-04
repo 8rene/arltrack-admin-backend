@@ -481,7 +481,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
   const allowed = ["location", "startDateTime", "endDateTime", "notesAdmin", "notesUser", "status"];
   const filtered = {};
   allowed.forEach((k) => {
-    if (updates[k] !== undefined) {
+    if (updates[k] !== undefined && !(k === "status" && !updates[k])) { // "" status = "no change"
       filtered[k] = k === "status" ? updates[k].toLowerCase() : updates[k];
     }
   });
