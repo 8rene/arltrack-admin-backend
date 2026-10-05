@@ -21,24 +21,14 @@ export const PaymentsArchive = {
   gatewayFeeRate: 0,    // % of gatewayFeeBase
   gatewayFeeBase: 0,    // rental + extra + driver's + service fee + security deposit
 
-  // PayMongo's OWN transaction fee (what PayMongo keeps, NOT the gateway fee
-  // the customer paid). Written only by the customer backend when an online
-  // payment settles (utils/payments/paymongoFee.util.js) or by
-  // customer-backend/scripts/backfillPaymongoFees.js. Admin only reads these.
-  // Absent on cash payments and on payments settled before fee tracking.
-  depositPaymongoFee: null,       // fee on the deposit-phase charge
-  depositPaymongoFeeVat: null,    // VAT portion of that fee (estimate)
-  depositPaymongoNet: null,       // net received for that charge
-  depositPaymongoTaxes: null,
-  balancePaymongoFee: null,       // same four, for the online balance charge
-  balancePaymongoFeeVat: null,
-  balancePaymongoNet: null,
-  balancePaymongoTaxes: null,
-  paymongoFeeTotal: null,         // deposit + balance fee
-  paymongoFeeVatTotal: null,
-  paymongoNetTotal: null,
-  paymongoFeeVatIsEstimate: true, // true until PayMongo reports VAT explicitly
-  paymongoFeeRecordedAt: null,
+  // PayMongo's OWN fee (what PayMongo keeps; NOT the gateway fee the customer
+  // paid). Written by the customer backend when an online payment settles, or
+  // by its backfillPaymongoFees.js script. Admin only reads these. Absent on
+  // cash payments and on payments settled before fee tracking.
+  // Sales margin = gatewayFee - paymongoFeeTotal.
+  depositPaymongoFee: null,   // fee on the deposit-phase online charge
+  balancePaymongoFee: null,   // fee on the online balance charge (Partial only)
+  paymongoFeeTotal: null,     // deposit + balance
   // (All payment fields above are copied verbatim from the live payment doc
   // on archive and written back on restore.)
   status: "",              // "Paid" | "Pending" | "Refunded"

@@ -9,6 +9,24 @@ export const Payment = {
   rentalFee: 0,
   serviceFee: 0,
   extraFee: 0,
+  driversFee: 0,        // chauffeur fee (0 when self-drive)
+  gatewayFee: 0,        // payment-gateway fee charged to the customer (peso amount)
+  securityDeposit: 0,   // refundable deposit, already inside `amount`
+
+  // Percentage fees, snapshotted at booking time so a later Settings change
+  // never alters an existing booking. 0 on bookings made before percent fees.
+  serviceFeeRate: 0,    // % of the RENTAL FEE only
+  gatewayFeeRate: 0,    // % of gatewayFeeBase
+  gatewayFeeBase: 0,    // rental + extra + driver's + service fee + security deposit
+
+  // PayMongo's OWN fee (what PayMongo keeps; NOT the gateway fee the customer
+  // paid). Written by the customer backend when an online payment settles, or
+  // by its backfillPaymongoFees.js script. Admin only reads these. Absent on
+  // cash payments and on payments settled before fee tracking.
+  // Sales margin = gatewayFee - paymongoFeeTotal.
+  depositPaymongoFee: null,   // fee on the deposit-phase online charge
+  balancePaymongoFee: null,   // fee on the online balance charge (Partial only)
+  paymongoFeeTotal: null,     // deposit + balance
   status: "",         // "Paid" | "Pending" | "Refunded"
   discountAmount: 0,
   discountReason: "",

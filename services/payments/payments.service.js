@@ -233,9 +233,6 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
       deposit: payment.depositPaymongoFee ?? null,
       balance: payment.balancePaymongoFee ?? null,
       total:   payment.paymongoFeeTotal ?? null,
-      vatTotal: payment.paymongoFeeVatTotal ?? null,   // ESTIMATE of the VAT inside the fee
-      vatIsEstimate: payment.paymongoFeeVatIsEstimate !== false,
-      netTotal: payment.paymongoNetTotal ?? null,      // what PayMongo pays out after its fee
     },
 
     // ── how it was actually paid (previously stored but never shown) ──
