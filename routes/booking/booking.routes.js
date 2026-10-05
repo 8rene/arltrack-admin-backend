@@ -1,4 +1,4 @@
-import { listBookings, editBooking, deleteBooking, markDroppedOff, deviceCheck, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel } from "../../controllers/booking/booking.controller.js";
+import { listBookings, editBooking, deleteBooking, markDroppedOff, deviceCheck, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -22,5 +22,7 @@ export const registerBookingRoutes = (app) => {
   // own refund request from the Refund Requests page).
   app.get("/api/bookings/:id/refund-preview", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundPreview);
   app.post("/api/bookings/:id/refund-cancel", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAndCancel);
+  // No-show after the pickup time: deposit kept, everything else refunded (see refundRequest.service.js → markBookingNoShow).
+  app.post("/api/bookings/:id/no-show", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), markNoShow);
   app.delete("/api/bookings/:id",verifyToken, requireRole(allowed), deleteBooking);
 };

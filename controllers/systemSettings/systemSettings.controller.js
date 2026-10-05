@@ -15,7 +15,7 @@ export const getPricing = async (req, res) => {
 };
 
 // PUT /api/settings/pricing
-// Body: any subset of { serviceFee, gatewayFee, extraFeeOutsideArea,
+// Body: any subset of { serviceFeePercent, gatewayFeePercent, extraFeeOutsideArea,
 //   driversFeeBaseArea, driversFeeOutsideArea, baseAreaKeywords, billingBlockHours }
 export const updatePricing = async (req, res) => {
   try {

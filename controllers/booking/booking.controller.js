@@ -1,6 +1,6 @@
 import { getAllBookings, updateBooking, markBookingDroppedOff, markDeviceChecked, settleDeposit, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
 import { deleteBookingWithCascade } from "../../services/booking/bookingDelete.service.js";
-import { adminCancelBooking, getAdminBookingRefundPreview } from "../../services/refundRequest/refundRequest.service.js";
+import { adminCancelBooking, getAdminBookingRefundPreview, markBookingNoShow } from "../../services/refundRequest/refundRequest.service.js";
 
 export const listBookings = async (req, res) => {
   try {
@@ -134,6 +134,23 @@ export const refundPreview = async (req, res) => {
   } catch (error) {
     console.error("[BOOKINGS] refundPreview error:", error);
     return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/bookings/:id/no-show { reason? }
+// Upcoming booking whose pickup time has passed: deposit kept, everything else refunded.
+export const markNoShow = async (req, res) => {
+  try {
+    const { reason } = req.body || {};
+    const adminUserID = req.user?.userID || req.user?.uid || null;
+    const data = await markBookingNoShow(req.params.id, { reason }, adminUserID);
+    const message = data.amount > 0
+      ? `Marked as a no-show. The deposit was kept and ${Number(data.amount).toLocaleString()} was refunded${data.manualAmount > 0 ? " — part of it must be handed back in person (mark it returned on the Refund Requests page)" : ""}.`
+      : "Marked as a no-show. The customer only paid the non-refundable deposit, so there is nothing to refund.";
+    return res.status(200).json({ success: true, message, data });
+  } catch (error) {
+    console.error("[BOOKINGS] markNoShow error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };
 

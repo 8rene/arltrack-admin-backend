@@ -140,7 +140,7 @@ const sendTransactionalEmail = async ({ label, dedicatedTemplateID, toEmail, toN
   }
 };
 
-export const sendRefundEmail = async ({ toEmail, toName, bookingID, amount, manualAmount = 0, reason }) => {
+export const sendRefundEmail = async ({ toEmail, toName, bookingID, amount, manualAmount = 0, depositForfeited = 0, reason }) => {
   const peso = (n) => `₱${Number(n || 0).toLocaleString()}`;
   const displayName = toName || toEmail.split("@")[0];
   const hasManual = manualAmount > 0;
@@ -156,6 +156,9 @@ export const sendRefundEmail = async ({ toEmail, toName, bookingID, amount, manu
       (hasManual
         ? `${peso(amount - manualAmount)} has been returned through PayMongo, and ${peso(manualAmount)} will be handed back to you by our staff.\n\n`
         : `This has been returned through PayMongo.\n\n`) +
+      (depositForfeited > 0
+        ? `As our cancellation policy states, your ${peso(depositForfeited)} deposit is non-refundable and has been kept.\n\n`
+        : "") +
       `We're sorry for the inconvenience.\n\n` +
       `Best regards,\nARL Car Rental Team`,
   });

@@ -4,13 +4,20 @@ import admin from "firebase-admin";
 const COLLECTION = "systemSettings";
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
-// Defaults mirror the current hardcoded constants in
-// customer-backend/utils/pricing.js, so the very first read (before anyone
-// has saved anything from the admin panel) returns the same numbers the
-// system already charges today — nothing changes until someone edits it.
+// Defaults mirror the fallback constants in customer-backend/utils/pricing.js,
+// so the very first read (before anyone has saved anything from the admin
+// panel) returns the same numbers the system charges.
+//
+// serviceFeePercent / gatewayFeePercent are PERCENTAGES (0-100), not pesos:
+//   service fee = serviceFeePercent % of the RENTAL FEE only (no extra fee,
+//                 driver's fee or security deposit)
+//   gateway fee = gatewayFeePercent % of everything else on the booking
+//                 (rental + extra + driver's fee + service fee + security deposit)
+// They replace the old flat serviceFee / gatewayFee pesos. Bookings already
+// made keep the peso amounts they were charged (stored on each payment).
 const DEFAULTS = {
-  serviceFee: 50,
-  gatewayFee: 53,
+  serviceFeePercent: 5,
+  gatewayFeePercent: 5,
   extraFeeOutsideArea: 500,
   driversFeeBaseArea: 1000,
   driversFeeOutsideArea: 1500,
@@ -33,9 +40,11 @@ const DEFAULTS = {
   lateFeeGraceMinutes: 30,     // subtracted before rounding up to the next hour
 };
 
+// Percentage fields: must be a number between 0 and 100.
+const PERCENT_FIELDS = ["serviceFeePercent", "gatewayFeePercent"];
+
 const NUMERIC_FIELDS = [
-  "serviceFee",
-  "gatewayFee",
+  ...PERCENT_FIELDS,
   "extraFeeOutsideArea",
   "driversFeeBaseArea",
   "driversFeeOutsideArea",
@@ -106,6 +115,9 @@ export const updateSystemSettings = async (payload, actor) => {
     if (!Number.isFinite(num) || num < 0) {
       throw new Error(`${field} must be a number >= 0.`);
     }
+    if (PERCENT_FIELDS.includes(field) && num > 100) {
+      throw new Error(`${field} must be a percentage between 0 and 100.`);
+    }
     update[field] = num;
   }
 
@@ -155,7 +167,10 @@ export const updateSystemSettings = async (payload, actor) => {
     throw new Error("No valid fields to update.");
   }
 
-  const { systemSettingsID, createdAt, ...rest } = current;
+  // serviceFee / gatewayFee (flat pesos) are legacy — superseded by the
+  // percent fields above. Drop them so new snapshots don't carry two sources
+  // of truth for the same fee.
+  const { systemSettingsID, createdAt, serviceFee: _legacyServiceFee, gatewayFee: _legacyGatewayFee, ...rest } = current;
 
   const ref = await db.collection(COLLECTION).add({
     ...rest,

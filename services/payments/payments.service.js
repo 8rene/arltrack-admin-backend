@@ -216,7 +216,27 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     proofUrl: payment.proofUrl || "",
     rentalFee: Number(payment.rentalFee) || 0,
     extraFee: Number(payment.extraFee) || 0,
+    driversFee: Number(payment.driversFee) || 0,
     serviceFee: Number(payment.serviceFee) || 0,
+    gatewayFee: Number(payment.gatewayFee) || 0,
+    securityDeposit: Number(payment.securityDeposit) || 0,
+    // % rates + the base the gateway fee was computed on (saved at booking time)
+    serviceFeeRate: Number(payment.serviceFeeRate) || 0,
+    gatewayFeeRate: Number(payment.gatewayFeeRate) || 0,
+    gatewayFeeBase: Number(payment.gatewayFeeBase) || 0,
+
+    // PayMongo's OWN transaction fee for this booking's online charge(s), as reported
+    // by PayMongo (not the gateway fee charged to the customer): one entry per online
+    // charge plus the running total across both. null = not recorded (cash payment, or
+    // paid before fee tracking started; see customer-backend/scripts/backfillPaymongoFees.js).
+    paymongoFee: {
+      deposit: payment.depositPaymongoFee ?? null,
+      balance: payment.balancePaymongoFee ?? null,
+      total:   payment.paymongoFeeTotal ?? null,
+      vatTotal: payment.paymongoFeeVatTotal ?? null,   // ESTIMATE of the VAT inside the fee
+      vatIsEstimate: payment.paymongoFeeVatIsEstimate !== false,
+      netTotal: payment.paymongoNetTotal ?? null,      // what PayMongo pays out after its fee
+    },
 
     // ── how it was actually paid (previously stored but never shown) ──
     paymongoChannel: payment.paymongoChannel || null,       // gcash | paymaya | qrph

@@ -3,7 +3,7 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { resolveNotification, createNotification } from "../notification/notification.service.js";
 import { ROLE_IDS } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
-import { computeRefundPlan } from "../payments/paymentBreakdown.js";
+import { computeRefundPlan, getRefundPolicy, resolvePickupAt, getDepositAmount } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
@@ -53,6 +53,54 @@ const resolveCustomerName = async (userID) => {
 const fail = (message, status) => { const err = new Error(message); err.status = status; return err; };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 48-hour refund policy (see paymentBreakdown.js → getRefundPolicy).
+//
+// A customer's request carries a policy SNAPSHOT (policyTier, pickupAt,
+// requestedAt …) written by the customer backend at the moment they asked. The
+// tier is always judged from THAT moment — never from when staff approve — so a
+// request made 50 hours before pickup and approved 40 hours before is still a
+// full refund.
+//
+// Requests without a snapshot (created before the policy existed, or opened
+// automatically for a payment that arrived after cancellation) are refunded in
+// full: the customer was never shown a forfeit for them.
+// ─────────────────────────────────────────────────────────────────────────────
+const policyForRequest = (request, payment, { waiveForfeit = false } = {}) => {
+  if (!request || !request.policyTier) return null;
+  return getRefundPolicy(payment, {
+    pickupAt: request.pickupAt,
+    requestedAt: request.requestedAt || request.createdAt,
+    waiveForfeit,
+  });
+};
+
+// After a refund is committed, the held security deposit is no longer "Held":
+// it was either KEPT (forfeit > 0 → "Forfeited") or returned to the customer
+// inside the refund ("Refunded"). Without this the deposit would still look
+// Held and could be offered for return/settlement a second time.
+const markDepositAfterRefund = async (paymentRef, payment, forfeit) => {
+  const dep = payment && payment.deposit;
+  if (!dep || dep.status !== "Held") return;
+  const now = new Date();
+  try {
+    await paymentRef.update(forfeit > 0
+      ? { "deposit.status": "Forfeited", "deposit.forfeitedAmount": forfeit, "deposit.forfeitedAt": now, updatedAt: now }
+      : { "deposit.status": "Refunded", "deposit.refundedAt": now, updatedAt: now });
+  } catch (err) {
+    console.error("[REFUND] failed to update the deposit status:", err.message);
+  }
+};
+
+// Looks a booking up by Firestore doc id OR by its bookingID field.
+const findBooking = async (id) => {
+  if (!id) return null;
+  const direct = await db.collection("bookings").doc(id).get();
+  if (direct.exists) return direct.data();
+  const q = await db.collection("bookings").where("bookingID", "==", id).limit(1).get();
+  return q.empty ? null : q.docs[0].data();
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // List refund requests, newest first. Optional status filter.
 //
 // Pending requests also carry a planPreview — what approving would do RIGHT NOW
@@ -75,11 +123,17 @@ export const getAllRefundRequests = async (status) => {
         try {
           const pSnap = await db.collection("payments").where("paymentID", "==", data.paymentID).limit(1).get();
           if (!pSnap.empty) {
-            const plan = computeRefundPlan(pSnap.docs[0].data());
+            const payment = pSnap.docs[0].data();
+            const policy = policyForRequest(data, payment);
+            const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0 });
             row.planPreview = {
               total: plan.total,
               onlineAmount: plan.total - plan.manualAmount,
               manualAmount: plan.manualAmount,
+              grossPaid: plan.grossPaid,
+              forfeit: plan.forfeit,                       // deposit kept under the 48-hour policy
+              tier: policy ? policy.tier : null,           // "full" | "late" | "no_show" | null (no policy snapshot)
+              hoursBeforePickup: policy ? policy.hoursBeforePickup : null,
               parts: plan.parts.map((p) => ({ kind: p.kind, amount: p.amount })),
             };
           }
@@ -274,7 +328,7 @@ export const resolveCustomerContact = async (userID) => {
 // PayMongo part has settled (customer backend's refund webhook) AND any manual
 // portion is marked issued.
 // ─────────────────────────────────────────────────────────────────────────────
-export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason, skipDriverNotify = false } = {}) => {
+export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason, skipDriverNotify = false, waiveForfeit = false, waiveReason = "" } = {}) => {
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
 
   // ── 1. claim ──
@@ -299,8 +353,27 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     if (payStatus === "refunded") throw fail("This payment has already been refunded.", 409);
     if (!["paid", "approved"].includes(payStatus)) throw fail(`This payment is "${payment.status}" — only a paid payment can be refunded.`, 400);
 
-    const plan = computeRefundPlan(payment);
-    if (plan.total <= 0) throw fail("There is nothing to refund on this payment.", 400);
+    // ── 48-hour policy: the tier comes from when the customer ASKED, not now ──
+    if (waiveForfeit && !String(waiveReason || "").trim()) throw fail("A reason is required to waive the deposit forfeit.", 400);
+    const policy  = policyForRequest(refundRequest, payment, { waiveForfeit });
+    const forfeit = policy ? policy.forfeit : 0;
+
+    // A rental that has already started (or finished) can't be refunded by
+    // approving a request — the car has been used.
+    const bookingNow = await findBooking(refundRequest.bookingID);
+    if (bookingNow && ["ongoing", "completed"].includes(lower(bookingNow.status))) {
+      throw fail(`This booking is already ${bookingNow.status} — a refund can't be approved for a rental that has started. Reject the request instead.`, 409);
+    }
+
+    const plan = computeRefundPlan(payment, { forfeit });
+    if (plan.total <= 0) {
+      throw fail(
+        forfeit > 0
+          ? `Nothing to refund: the customer's payment only covers the ${peso(forfeit)} non-refundable deposit (requested ${policy.tier === "no_show" ? "after the pickup time" : "under 48 hours before pickup"}). Reject this request, or waive the forfeit.`
+          : "There is nothing to refund on this payment.",
+        400
+      );
+    }
 
     // ── 3. PayMongo refunds, one per online charge ──
     const parts = [];
@@ -352,6 +425,11 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       amount: plan.total,
       onlineAmount,
       manualAmount: plan.manualAmount,
+      grossPaid: plan.grossPaid,
+      depositForfeited: forfeit,
+      forfeitWaived: !!(policy && policy.waived),
+      forfeitWaivedAmount: policy && policy.waived ? policy.waivedAmount : 0,
+      forfeitWaivedReason: policy && policy.waived ? String(waiveReason).trim() : null,
       parts,
       paymongoRefundID: parts[0]?.paymongoRefundID || null,      // legacy single-id field
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key
@@ -363,6 +441,8 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       approvalLockedAt: null,
     });
 
+    await markDepositAfterRefund(paymentSnap.docs[0].ref, payment, forfeit);
+
     // Decision: the booking is cancelled at APPROVAL. Staff have decided this trip
     // isn't happening, so the car is released straight away; a PayMongo hiccup is
     // a technical retry, not a reason to keep the trip alive.
@@ -370,9 +450,10 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 
     await notifyCustomer(
       refundRequest.userID, refundRequest.bookingID, "refund_approved", "Refund Approved",
-      manualRefund
+      (manualRefund
         ? `Your refund of ${peso(plan.total)} has been approved. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(plan.manualAmount)} will be handed back to you by our staff.`
-        : `Your refund of ${peso(plan.total)} has been approved and is being processed by PayMongo.`
+        : `Your refund of ${peso(plan.total)} has been approved and is being processed by PayMongo.`)
+      + (forfeit > 0 ? ` Your ${peso(forfeit)} deposit was kept under our 48-hour cancellation policy.` : "")
     );
 
     // A driver already assigned to this booking shouldn't find out secondhand.
@@ -387,7 +468,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 
     auditSafe({
       action: "update",
-      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""}). Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
+      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
       userID: adminUserID,
       bookingID: refundRequest.bookingID,
       paymentID: refundRequest.paymentID,
@@ -399,7 +480,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     resolveNotification("refund_request", refundRequestID)
       .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));
 
-    return { ...refundRequest, status: "Approved", amount: plan.total, onlineAmount, manualAmount: plan.manualAmount, parts, manualRefund, bookingCancelled: cancel.cancelled };
+    return { ...refundRequest, status: "Approved", amount: plan.total, onlineAmount, manualAmount: plan.manualAmount, grossPaid: plan.grossPaid, depositForfeited: forfeit, parts, manualRefund, bookingCancelled: cancel.cancelled };
   } catch (err) {
     await releaseLock(); // safe even if an update above already cleared it
     throw err;
@@ -414,7 +495,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 // just no PayMongo call, no email (nothing happened to their money worth
 // emailing about), and no transaction log (that ledger is money-movement
 // only — the audit log below is what records this instead).
-const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staffUserID, outcome, contextLabel = "car status change", skipDriverNotify = false) => {
+const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staffUserID, outcome, contextLabel = "car status change", skipDriverNotify = false, extra = {}) => {
   const userID = payment?.userID || booking.userID || null;
   const now = new Date();
 
@@ -429,13 +510,16 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     paymentID: payment?.paymentID || null,
     userID,
     reason,
-    notes: outcome === "already_refunded"
+    notes: outcome === "deposit_forfeited"
+      ? "Staff-initiated: marked as a no-show; the payment only covered the non-refundable deposit, so nothing is refunded."
+      : outcome === "already_refunded"
       ? "Staff-initiated: payment was already refunded earlier; booking cancelled to match."
       : outcome === "no_payment"
         ? "Staff-initiated: no payment record was found for this booking; booking cancelled, nothing to refund."
         : "Staff-initiated: nothing had been paid; booking cancelled, no refund needed.",
     source: "staff",
     outcome,
+    ...extra,
     amount: 0,
     onlineAmount: 0,
     manualAmount: 0,
@@ -453,7 +537,9 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
 
   await notifyCustomer(
     userID, bookingID, "booking_cancelled", "Booking Cancelled",
-    outcome === "already_refunded"
+    outcome === "deposit_forfeited"
+      ? `Your booking was cancelled: ${reason}. Your payment only covered the non-refundable deposit, so there is nothing to refund.`
+      : outcome === "already_refunded"
       ? `Your booking was cancelled: ${reason}. This booking's payment had already been refunded, so no new refund was needed.`
       : outcome === "no_payment"
         ? `Your booking was cancelled: ${reason}. No payment had been recorded for it, so there is nothing to refund.`
@@ -461,7 +547,8 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
   );
   emailCustomerCancelled(
     userID, bookingID, reason,
-    outcome === "already_refunded" ? "This booking's payment had already been refunded earlier, so no new refund was needed."
+    outcome === "deposit_forfeited" ? "Your payment only covered the non-refundable deposit, so there is nothing to refund."
+    : outcome === "already_refunded" ? "This booking's payment had already been refunded earlier, so no new refund was needed."
     : outcome === "no_payment"     ? "No payment had been recorded for this booking, so there is nothing to refund."
     : "Nothing had been paid for this booking, so there is nothing to refund."
   );
@@ -477,7 +564,9 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
 
   auditSafe({
     action: "update",
-    description: outcome === "already_refunded"
+    description: outcome === "deposit_forfeited"
+      ? `Booking ${bookingID} cancelled as a no-show — the payment only covered the non-refundable deposit, so nothing to refund. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
+      : outcome === "already_refunded"
       ? `Booking ${bookingID} cancelled — its payment was already refunded earlier but the booking itself hadn't been. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
       : outcome === "no_payment"
         ? `Booking ${bookingID} cancelled — no payment record was found for it, so nothing to refund. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
@@ -569,9 +658,10 @@ const finishStaffRefund = async (r) => {
 
     await notifyCustomer(
       r.userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Processed",
-      manualAmount > 0
+      (manualAmount > 0
         ? `Your booking was cancelled: ${r.reason}. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff.`
-        : `Your booking was cancelled: ${r.reason}. Your payment of ${peso(r.amount)} is being refunded through PayMongo.`
+        : `Your booking was cancelled: ${r.reason}. Your payment of ${peso(r.amount)} is being refunded through PayMongo.`)
+      + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
     );
 
     const { email: customerEmail, name: customerName } = await resolveCustomerContact(r.userID);
@@ -582,6 +672,7 @@ const finishStaffRefund = async (r) => {
         bookingID: r.bookingID,
         amount: r.amount,
         manualAmount,
+        depositForfeited: Number(r.depositForfeited) || 0,
         reason: r.reason,
       }).catch((err) => console.error("[REFUND] staff refund email failed:", err.message));
     }
@@ -624,6 +715,9 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   const contextLabel = opts.contextLabel || "car status change";
   const skipDriverNotify = !!opts.skipDriverNotify; // the caller (admin Bookings flow) notifies driver + staff itself
   const startNotes = opts.notes || "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.";
+  // true only for a no-show: the customer's deposit is kept and the rest refunded.
+  // Every other staff cancellation is the business's doing → full refund, no forfeit.
+  const forfeitDeposit = !!opts.forfeitDeposit;
   if (!bookingID) throw fail("bookingID is required.", 400);
   if (!reason || !reason.trim()) throw fail("A reason is required.", 400);
 
@@ -684,7 +778,9 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     // Still waiting on review → approve it right here (same PayMongo + cancel +
     // notify path as the Refund Requests page), instead of stopping the batch.
     if (openCustomerRequest.status === "Pending") {
-      const approved = await approveRefundRequest(openCustomerRequest.id, staffUserID, { cancelReason, skipDriverNotify });
+      // Staff are forcing this cancellation, so the customer's 48-hour forfeit (if their
+      // request carries one) is waived — they get everything back.
+      const approved = await approveRefundRequest(openCustomerRequest.id, staffUserID, { cancelReason, skipDriverNotify, waiveForfeit: true, waiveReason: cancelReason });
       return {
         outcome: "refunded",
         approvedExisting: true,
@@ -719,9 +815,21 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   }
 
   const userID = payment.userID || booking.userID || null;
-  const plan = computeRefundPlan(payment);
+  // No-show only: the deposit is forfeited (capped at what was paid); the pickup
+  // has passed so the policy tier is always "no_show" here.
+  const noShowPolicy = forfeitDeposit
+    ? getRefundPolicy(payment, { pickupAt: resolvePickupAt(booking), requestedAt: new Date() })
+    : null;
+  const forfeit = noShowPolicy ? noShowPolicy.forfeit : 0;
+  const plan = computeRefundPlan(payment, { forfeit });
   const outstandingDiscountRefund = payment.discountAmount > 0 && !payment.refundIssued ? plan.breakdown.refundDue : 0;
   const totalToRefund = plan.total + outstandingDiscountRefund;
+
+  // Everything the customer paid is the non-refundable deposit → nothing to send back.
+  if (totalToRefund === 0 && forfeit > 0) {
+    await markDepositAfterRefund(paymentRef, payment, forfeit);
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "deposit_forfeited", contextLabel, skipDriverNotify, { depositForfeited: forfeit, grossPaid: plan.grossPaid, policyTier: "no_show" });
+  }
 
   // Genuinely nothing collected (still Pending, etc.) — cancel only.
   if (totalToRefund === 0) {
@@ -760,6 +868,9 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         amount: totalToRefund,
         onlineAmount,
         manualAmount,
+        grossPaid: plan.grossPaid,
+        depositForfeited: forfeit,
+        policyTier: noShowPolicy ? noShowPolicy.tier : null,
         status: "Pending",
         parts: [],
         paymongoRefundID: null,
@@ -835,6 +946,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       amount: totalToRefund,
       onlineAmount,
       manualAmount,
+      grossPaid: plan.grossPaid,
+      depositForfeited: forfeit,
       parts,
       paymongoRefundID: parts[0]?.paymongoRefundID || null,
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
@@ -852,11 +965,13 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       updatedAt: now,
       ...(outstandingDiscountRefund > 0 ? { refundIssued: true } : {}),
     });
+    await markDepositAfterRefund(paymentRef, payment, forfeit);
 
     // ── 4. cancel the booking + notify (also what a retry re-runs) ──
     return await finishStaffRefund({
       refundRequestID, bookingID, paymentID, userID, reason,
       amount: totalToRefund, onlineAmount, manualAmount, manualRefund, contextLabel, skipDriverNotify,
+      depositForfeited: forfeit,
       processedBy: staffUserID || null, customerNotified: false,
     });
   } catch (err) {
@@ -1094,7 +1209,26 @@ export const getAdminBookingRefundPreview = async (docID) => {
   const status = lower(booking.status);
   const eligible = ["to pay", "upcoming"].includes(status);
   const preview = await getBookingRefundPreview(bookingID);
-  return { bookingID, status: booking.status, eligible, ...preview };
+
+  // What marking this booking as a NO-SHOW would do (deposit kept, rest refunded).
+  // pickupPassed is judged by the server (Manila-correct) — the no-show option is
+  // only offered once the pickup time has actually passed.
+  let noShow = null;
+  if (status === "upcoming") {
+    const pickupAt = resolvePickupAt(booking);
+    const pickupPassed = !!pickupAt && pickupAt.getTime() <= Date.now();
+    const pSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+    const payment = pSnap.empty ? null : pSnap.docs[0].data();
+    if (payment && lower(payment.status) !== "refunded") {
+      const gross   = computeRefundPlan(payment).grossPaid;
+      const forfeit = Math.min(getDepositAmount(payment), gross);
+      const plan    = computeRefundPlan(payment, { forfeit });
+      noShow = { pickupPassed, pickupAt, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount };
+    } else {
+      noShow = { pickupPassed, pickupAt, grossPaid: 0, forfeit: 0, total: 0, onlineAmount: 0, manualAmount: 0 };
+    }
+  }
+  return { bookingID, status: booking.status, eligible, ...preview, noShow };
 };
 
 export const adminCancelBooking = async (docID, { refund = true, reason } = {}, adminUserID = null) => {
@@ -1155,4 +1289,56 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
     userID: adminUserID, bookingID,
   });
   return { outcome: "cancelled_no_refund", bookingID, amount: 0, retainedAmount: retained, bookingCancelled: true };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN "Mark as no-show" from the Bookings page.
+//
+// For an UPCOMING booking whose pickup time has passed without the customer
+// showing up (the T&C: "No-show on pickup date — deposit forfeited"). The
+// customer's deposit is KEPT and everything else they paid (rental, fees, any
+// balance) is refunded — same money flow as staffRefundBooking(), with the
+// forfeit applied. If the customer had already asked for a refund after the
+// pickup time, that request is a no-show too and is handled from the Refund
+// Requests page, so this is blocked while one is open (they can't contradict
+// each other).
+// ─────────────────────────────────────────────────────────────────────────────
+export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = null) => {
+  const cleanReason = String(reason || "").trim() || "No-show: the customer did not pick up the vehicle.";
+
+  const { booking, bookingID } = await loadBookingByDocID(docID);
+  if (lower(booking.status) !== "upcoming") {
+    throw fail(`This booking is "${booking.status}". Only an upcoming booking can be marked as a no-show.`, 409);
+  }
+
+  const pickupAt = resolvePickupAt(booking);
+  if (!pickupAt) throw fail("This booking has no pickup time, so it can't be judged as a no-show.", 400);
+  if (pickupAt.getTime() > Date.now()) {
+    throw fail(`The pickup time (${pickupAt.toLocaleString("en-PH", { timeZone: "Asia/Manila" })}) hasn't passed yet — a no-show can only be recorded after it.`, 409);
+  }
+
+  const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  if (!paymentSnap.empty) {
+    const payment = paymentSnap.docs[0].data();
+    const open = await findOpenRefundRequest(payment.paymentID || paymentSnap.docs[0].id).catch(() => null);
+    if (open) {
+      throw fail("The customer has an open refund request for this booking. Approve or reject it from the Refund Requests page first (a request made after the pickup time is already treated as a no-show).", 409);
+    }
+  }
+
+  const result = await staffRefundBooking(bookingID, cleanReason, adminUserID, {
+    contextLabel: "no-show",
+    notes: "Admin-initiated: marked as a no-show after the pickup time passed — deposit forfeited, everything else refunded.",
+    skipDriverNotify: true, // notified once, below, together with the rest of the team
+    forfeitDeposit: true,
+  });
+
+  if (result.bookingCancelled) {
+    await notifyAdminCancellation({
+      docID, bookingID, driverID: booking.driverID || null, customerUserID: booking.userID,
+      reason: cleanReason, actorID: adminUserID, refundedAmount: result.amount || 0,
+      retainedAmount: result.amount > 0 ? 0 : (result.depositForfeited || 0),
+    });
+  }
+  return result;
 };

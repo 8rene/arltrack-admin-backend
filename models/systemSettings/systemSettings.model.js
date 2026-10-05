@@ -12,11 +12,14 @@
 // recently created doc. This model file just documents the shape —
 // systemSettings.service.js is what actually reads/writes it.
 //
-// NOTE: as of this change, the customer backend still uses its own
-// hardcoded constants — it has NOT been wired up to read from this doc
-// yet. This is admin-side only: it gives Owner/Admin a place to change
-// the numbers. Pointing customer-backend/utils/pricing.js at this same
-// Firestore doc is a separate follow-up.
+// NOTE: the customer backend IS wired to this doc. utils/pricing.js reads
+// the newest systemSettings doc (cached ~30s) and merges it over built-in
+// defaults (serviceFeePercent 5, gatewayFeePercent 5, securityDepositAmount
+// 1000). The public GET /api/policy route (customer backend) also exposes
+// securityDepositAmount + the two fee percents so the Terms pages stay in
+// sync (cached ~60s). The 48h full-refund window is a code constant, not
+// editable here. The legacy flat serviceFee/gatewayFee pesos are no longer
+// read by pricing and are dropped from new snapshots.
 //
 // storeName/storeLat/storeLng: powers the customer app's "Pick up
 // in-store" option (Booking.jsx / BookingDetails.jsx). UNLIKE pricing,
@@ -28,9 +31,9 @@
 // "in-store pickup not offered" rather than defaulting to some guess.
 
 export const PricingSettings = {
-  // Flat fees
-  serviceFee: 50,      // flat platform/service fee
-  gatewayFee: 53,      // flat payment gateway fee
+  // Percentage fees (0-100). NOT flat pesos any more.
+  serviceFeePercent: 5,  // % of the RENTAL FEE only (no extra/driver's fee, no security deposit)
+  gatewayFeePercent: 5,  // % of the rest of the booking: rental + extra + driver's + service fee + security deposit
 
   // Out-of-area / chauffeur fees
   extraFeeOutsideArea: 500,     // added when destination is outside the base area

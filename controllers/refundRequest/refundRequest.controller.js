@@ -20,7 +20,10 @@ export const approveRefund = async (req, res) => {
   try {
     const { id } = req.params;
     const adminUserID = req.user?.userID || req.user?.uid || null;
-    const data = await approveRefundRequest(id, adminUserID);
+    // Optional staff override of the 48-hour deposit forfeit (goodwill, duplicate charge…).
+    // A reason is mandatory — it is stored on the request and in the audit log.
+    const { waiveForfeit, waiveReason } = req.body || {};
+    const data = await approveRefundRequest(id, adminUserID, { waiveForfeit: waiveForfeit === true, waiveReason });
     return res.status(200).json({
       success: true,
       message: data.manualAmount > 0
