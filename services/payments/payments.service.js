@@ -3,7 +3,8 @@ import admin from "firebase-admin";
 import { notifyStaff, resolveNotification, createNotification } from "../notification/notification.service.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
-import { getPaymentBreakdown, resolvePaymongoIDs } from "./paymentBreakdown.js";
+import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
+import { upsertTransaction } from "./paymentTransactions.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
 // in refundRequest.service.js. No-ops quietly if there's no userID on the
@@ -175,6 +176,86 @@ export const derivePaymentStage = (payment, { bookingStatus = "", hasOpenRefund 
 
 const isoOf = (t) => (t?.toDate ? t.toDate().toISOString() : t instanceof Date ? t.toISOString() : null);
 
+// One list of every charge on a payment: the deposit/only payment and (Partial)
+// the balance — paid online, paid in person, still pending, failed or not yet due.
+// Built from the existing fields today; the shape is deliberately the same as a
+// stored `paymongoTransactions` array so that switching to one later only changes
+// this function, not the UI.
+//   { phase, ref, amount, fee, channel, source: "online"|"in_person", status, paidAt, by }
+const buildTransactions = (payment) => {
+  const p = payment || {};
+  const low = (v) => String(v || "").toLowerCase();
+  const ids = resolvePaymongoIDs(p);
+  const amount = Number(p.amount) || 0;
+  const payType = payTypeOf(p);
+
+  // What each phase is worth, whether or not it has been paid yet.
+  const expectedDeposit = getPaymentBreakdown({ ...p, status: "paid", balanceStatus: "", balanceCollected: false, discountAmount: 0 }).depositCollected;
+  const expectedBalance = Math.max(0, amount - expectedDeposit);
+
+  const statusOf = (raw) => {
+    const s = low(raw);
+    if (s === "paid" || s === "approved") return "Paid";
+    if (s === "refunded") return "Refunded";
+    if (s === "failed" || s === "rejected") return "Failed";
+    if (s === "cancelled" || s === "canceled") return "Cancelled";
+    return "Pending";
+  };
+
+  const list = [];
+
+  // ── Deposit (or the single payment for Full) ──
+  const manualRef = p.referenceNumber && !["—", "N/A"].includes(p.referenceNumber) ? p.referenceNumber : null;
+  const depositOnline = !!(ids.deposit || p.paymongoChannel || !["paid", "approved"].includes(low(p.status)));
+  list.push({
+    phase: "deposit",
+    ref: ids.deposit || manualRef || null,
+    amount: expectedDeposit,
+    fee: p.depositPaymongoFee ?? null,
+    channel: depositOnline ? (p.paymongoChannel || null) : (p.paymentMethod && p.paymentMethod !== "—" ? p.paymentMethod : null),
+    source: depositOnline ? "online" : "in_person",
+    status: statusOf(p.status),
+    paidAt: isoOf(p.paidAt) || isoOf(p.confirmedAt),
+    by: depositOnline ? null : (p.confirmedBy || null),
+  });
+
+  // ── Balance (Partial / Downpayment only) ──
+  if (payType !== "Full" && expectedBalance > 0) {
+    if (p.balanceCollected) {
+      const rec = Number(p.balanceCollectedAmount);
+      list.push({
+        phase: "balance",
+        ref: null,
+        amount: Number.isFinite(rec) && p.balanceCollectedAmount !== null && p.balanceCollectedAmount !== undefined ? rec : expectedBalance,
+        fee: null,
+        channel: p.balanceMethod || null,
+        source: "in_person",
+        status: "Paid",
+        paidAt: isoOf(p.balanceCollectedAt),
+        by: p.balanceCollectedBy || null,
+      });
+    } else {
+      const bs = low(p.balanceStatus);
+      list.push({
+        phase: "balance",
+        ref: ids.balance || null,
+        amount: Number(p.balanceAmount) || expectedBalance,
+        fee: p.balancePaymongoFee ?? null,
+        channel: ids.balance || bs === "pending" ? (p.paymongoChannel || null) : null,
+        source: "online",
+        status: bs === "paid" ? "Paid"
+              : bs === "pending" ? "Pending"
+              : bs === "failed" ? "Failed"
+              : bs === "cancelled" ? "Cancelled"
+              : "Not yet due",
+        paidAt: isoOf(p.balancePaidAt),
+        by: null,
+      });
+    }
+  }
+  return list;
+};
+
 // One place that shapes a payment for the admin UI (used by list + detail).
 const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund) => {
   const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
@@ -234,6 +315,9 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
       balance: payment.balancePaymongoFee ?? null,
       total:   payment.paymongoFeeTotal ?? null,
     },
+
+    // Every charge on this payment as one list (deposit + balance, incl. pending ones).
+    paymongoTransactions: buildTransactions(payment),
 
     // ── how it was actually paid (previously stored but never shown) ──
     paymongoChannel: payment.paymongoChannel || null,       // gcash | paymaya | qrph
@@ -331,6 +415,15 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     paymentMethod,
     confirmedBy:   confirmedBy || "—",
     confirmedAt:   admin.firestore.FieldValue.serverTimestamp(),
+    // The same fact as one transaction entry (in person — no PayMongo ref).
+    paymongoTransactions: upsertTransaction(data, "deposit", {
+      amount:  depositReceived,
+      channel: paymentMethod,
+      source:  "in_person",
+      status:  "paid",
+      paidAt:  new Date(),
+      by:      confirmedBy || "—",
+    }),
     updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
   });
 
@@ -423,6 +516,14 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     balanceCollectedAmount: balance,
     balanceCollectedAt: admin.firestore.FieldValue.serverTimestamp(),
     balanceCollectedBy: collectedBy || "—",
+    paymongoTransactions: upsertTransaction(data, "balance", {
+      amount:  balance,
+      channel: paymentMethod,
+      source:  "in_person",
+      status:  "paid",
+      paidAt:  new Date(),
+      by:      collectedBy || "—",
+    }),
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
   });
 
@@ -824,8 +925,14 @@ export const updatePaymentStatus = async (id, status, performedBy = null) => {
     throw new Error("This payment has already been refunded, so its status can't be changed.");
   }
 
+  // Keep the deposit's transaction entry in step with the manual status change.
+  const TXN_STATUS = { Approved: "paid", Rejected: "failed", Cancelled: "cancelled", Pending: "pending" };
   await ref.update({
     status,
+    paymongoTransactions: upsertTransaction(existing, "deposit", {
+      status: TXN_STATUS[status],
+      ...(status === "Approved" ? { paidAt: new Date() } : {}),
+    }, { force: true }),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 

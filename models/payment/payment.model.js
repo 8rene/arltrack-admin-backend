@@ -27,6 +27,9 @@ export const Payment = {
   depositPaymongoFee: null,   // fee on the deposit-phase online charge
   balancePaymongoFee: null,   // fee on the online balance charge (Partial only)
   paymongoFeeTotal: null,     // deposit + balance
+  // One entry per charge: { phase, ref, sessionID, amount, fee, channel, source, status, createdAt, updatedAt, paidAt, by }.
+  // Written alongside the fields above (see services/payments/paymentTransactions.js).
+  paymongoTransactions: [],
   status: "",         // "Paid" | "Pending" | "Refunded"
   discountAmount: 0,
   discountReason: "",

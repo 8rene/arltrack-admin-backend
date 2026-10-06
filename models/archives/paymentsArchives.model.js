@@ -1,13 +1,11 @@
-// Matches the 'paymentsArchives' collection in Firestore
-// Primary key: paymentsArchivesId (Firestore document ID)
-export const PaymentsArchive = {
-  paymentsArchivesId: "",  // Firestore doc ID — same as collection name + "Id"
-  originalId: "",          // doc ID from original 'payments' collection
+// Matches the actual 'payments' collection in Firestore
+export const Payment = {
+  paymentID: "",
   bookingID: "",
-  paymentMethod: "",       // e.g. "Cash", "GCash"
-  referenceNumber: "",
+  paymentMethod: "",  // e.g. "Cash", "GCash"
+  referenceNumber: "", // "N/A" for cash
   proofUrl: "",
-  amount: 0,
+  amount: 0,          // deposit amount (partial)
   rentalFee: 0,
   serviceFee: 0,
   extraFee: 0,
@@ -29,19 +27,24 @@ export const PaymentsArchive = {
   depositPaymongoFee: null,   // fee on the deposit-phase online charge
   balancePaymongoFee: null,   // fee on the online balance charge (Partial only)
   paymongoFeeTotal: null,     // deposit + balance
-  // (All payment fields above are copied verbatim from the live payment doc
-  // on archive and written back on restore.)
-  status: "",              // "Paid" | "Pending" | "Refunded"
-  customerName: "",        // resolved at archive time
+  // One entry per charge: { phase, ref, sessionID, amount, fee, channel, source, status, createdAt, updatedAt, paidAt, by }.
+  // Written alongside the fields above (see services/payments/paymentTransactions.js).
+  paymongoTransactions: [],
+  status: "",         // "Paid" | "Pending" | "Refunded"
+  discountAmount: 0,
+  discountReason: "",
+  discountBy: "",
+  discountAt: null,
+  // Set by applyDiscount() when a discount is applied to a booking that's
+  // already fully (or partially) paid past what the new discount covers —
+  // the spillover is cash that's now owed back to the customer. 0 means
+  // the discount fit entirely within the outstanding balance, nothing to
+  // return. See payments.service.js's computeAmounts()/applyDiscount().
+  refundDue: 0,
+  // Flipped true via markRefundIssued() once staff or the driver holding
+  // the cash actually hands it back. Drives the "Refund Due" banner in
+  // PaymentStatusModal and the Payments.jsx table/refund column.
+  refundIssued: false,
   createdAt: null,
   updatedAt: null,
-  archivedAt: null,
-  archivedBy: "",
-  // Restore deletes this doc entirely (see restorePaymentsArchive in
-  // services/archives/paymentsArchives.service.js) rather than marking it.
-  // restoredAt can still show up here though, inherited from the live
-  // payment doc if it's ever archived again after being restored.
-  // restoredBy was previously written directly to this doc on restore but
-  // that write path no longer exists, so it's been removed from this model.
-  restoredAt: null,
 };
