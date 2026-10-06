@@ -4,13 +4,12 @@
 //  full GPS trail so far and upload a permanent copy to Firebase Storage,
 //  overwriting the previous night's file.
 //
-//  Simpler than the test backend's version: there's no Sheets-tab deletion
-//  race to guard against here, since the archive subcollection this reads
-//  from is permanent Firestore data, not a rotating 3-day buffer. A failed
-//  flush just means that session's Storage copy is stale until the next
-//  successful run — nothing is ever deleted, so nothing is ever at risk of
-//  being lost. One session's failure is still isolated so it can't stop the
-//  rest of the fleet from being flushed.
+//  The trail is read from Google Sheets (one tab per PHT date — see
+//  services/sheets/sheets.service.js via bookingHistory.service.js), NOT
+//  from a Firestore archive sub-collection. A failed flush just means that
+//  session's Storage copy is stale until the next successful run. One
+//  session's failure is still isolated so it can't stop the rest of the
+//  fleet from being flushed.
 // ================================
 
 import { getAllActiveSessions } from "../services/booking/bookingSession.service.js";
