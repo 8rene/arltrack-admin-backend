@@ -17,6 +17,7 @@ export const BookingSessionArchive = {
   currentPosition: null,
   archiveUrl: null,              // Storage URL, if this session was ever flushed before deletion
   lastArchivedAt: null,
+  pointCount: null,              // GPS points in the flushed trail
   // Flattened copy of every archive/{date} day-doc this session had —
   // [{ date: "YYYY-MM-DD", points: [...] }, ...]. Not a live subcollection
   // here since an archived record never needs per-day querying.

@@ -9,11 +9,17 @@
 //   getSessionById / getSessionByBookingID        — direct + FK lookups
 //   markSessionActive / markSessionEnded / markSessionStolen — status writes,
 //     called from wherever pickup / return / stolen actually happen
-//   recordArchiveFlush — called by the nightly flush job after a successful
-//     Storage upload
+//   recordArchiveFlush — called by flushBookingHistory (bottom of this file)
+//     after a successful Storage upload
+//   flushBookingHistory — compiles a session's GPS trail from Google Sheets
+//     into one JSON file in Firebase Storage; called at pickup / return /
+//     stolen and by the nightly flush job
 
-import { db } from "../../config/firebaseConnection/firebase.js";
+import { db, bucket } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { toDate, sessionStartedAt, queryRecentByStart } from "../../utils/date/sessionDates.js";
+import { fetchSessionRows } from "../sheets/sheets.service.js";
+import { datesBetweenPHT } from "../../utils/date/phtDate.js";
 
 const SESSIONS = () => db.collection("bookingSessions");
 
@@ -61,15 +67,15 @@ export const getAllActiveSessions = async () => {
  * neither cares about a car's CURRENT session, they need the full history.
  * Sorted in memory (not orderBy) for the same reason getAllGpsDevices does:
  * a composite index would otherwise be required for carID-equality +
- * pickupTime-order, and older/hand-created docs missing pickupTime would
- * silently vanish from the results.
+ * startedAt-order. Ordered by the real start (see utils/date/sessionDates.js
+ * for the legacy fallback); sessions that never started sort last.
  */
 export const getSessionsByCar = async (carID) => {
   const snap = await SESSIONS().where("carID", "==", carID).get();
   const sessions = snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
   sessions.sort((a, b) => {
-    const at = a.data.pickupTime?._seconds ?? a.data.pickupTime?.seconds ?? 0;
-    const bt = b.data.pickupTime?._seconds ?? b.data.pickupTime?.seconds ?? 0;
+    const at = sessionStartedAt(a.data)?.getTime() ?? 0;
+    const bt = sessionStartedAt(b.data)?.getTime() ?? 0;
     return bt - at;
   });
   return sessions;
@@ -79,18 +85,11 @@ export const getSessionsByCar = async (carID) => {
  * Traceback only needs the session around ONE date, not the car's whole
  * history. Newest few sessions that started on/before the end of that date
  * (a car's trips don't overlap, so the match is among them). Needs a
- * composite index (carID asc, pickupTime desc) — if it's missing, or this
+ * composite index (carID asc, startedAt desc) — if it's missing, or this
  * returns nothing, callers fall back to the full getSessionsByCar read.
  */
-export const getRecentSessionsByCarUpTo = async (carID, endOfDate, limit = 4) => {
-  const snap = await SESSIONS()
-    .where("carID", "==", carID)
-    .where("pickupTime", "<=", admin.firestore.Timestamp.fromDate(endOfDate))
-    .orderBy("pickupTime", "desc")
-    .limit(limit)
-    .get();
-  return snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
-};
+export const getRecentSessionsByCarUpTo = (carID, endOfDate, limit = 4) =>
+  queryRecentByStart(SESSIONS(), carID, endOfDate, limit);
 
 /** Look a session up directly by its own primary key. */
 export const getSessionById = async (bookingSessionID) => {
@@ -159,12 +158,14 @@ export const markSessionActive = async (bookingSessionID, carID) => {
 
   try {
     const sessionDoc = await sessionRef.get();
-    // Stamp the ACTUAL pickup moment once. pickupTime on this doc is only the
-    // scheduled time from booking; the history flush needs the real start so
-    // an early pickup (before the scheduled date) doesn't look at the wrong
-    // Sheets date-tabs and come back empty.
-    if (!sessionDoc.exists || !sessionDoc.data().activatedAt) {
-      updates.activatedAt = admin.firestore.FieldValue.serverTimestamp();
+    // Stamp the ACTUAL pickup moment once. The scheduled dates live on the
+    // booking (startDateTime/endDateTime), not here; Traceback and the history
+    // flush need the real start so an early pickup doesn't look at the wrong
+    // Sheets date-tabs and come back empty. A pre-migration doc may already
+    // hold it as activatedAt — carry that over instead of overwriting it.
+    const existing = sessionDoc.exists ? sessionDoc.data() : {};
+    if (!existing.startedAt) {
+      updates.startedAt = existing.activatedAt || admin.firestore.FieldValue.serverTimestamp();
     }
     const existingZones = sessionDoc.exists ? (sessionDoc.data().geofenceZones || []) : [];
     if (existingZones.length === 0) {
@@ -208,8 +209,7 @@ export const markSessionStolen = async (bookingSessionID) => {
  * Universal marker, every booking type: the vehicle itself is physically
  * back, as distinct from Return (which only happens once inspection /
  * penalties / device-check all clear). Deliberately doesn't touch
- * `status`; this is purely an extra timestamp alongside pickupTime/
- * returnTime. No backfill, no re-editing — the caller
+ * `status`; this is purely an extra timestamp alongside startedAt. No backfill, no re-editing — the caller
  * (booking.service.js's markBookingDroppedOff) is responsible for only
  * calling this once, and for checking droppedOffTime isn't already set
  * before calling it.
@@ -221,10 +221,106 @@ export const markDroppedOff = async (bookingSessionID) => {
   });
 };
 
-/** Record the result of a successful archive flush. */
+/**
+ * Record the result of a successful archive flush. The archive file was just
+ * rewritten, so any saved pointCount is now stale — clear it and let
+ * getArchivePointCount below recount lazily the next time History loads.
+ */
 export const recordArchiveFlush = async (bookingSessionID, archiveUrl) => {
   await SESSIONS().doc(bookingSessionID).update({
     archiveUrl,
+    pointCount: admin.firestore.FieldValue.delete(),
     lastArchivedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
+};
+
+/**
+ * How many GPS points a session's archived trail holds — shown in History
+ * before anyone clicks Review. Returns the saved pointCount when there is one;
+ * otherwise reads the trip's Storage file once, saves the count on the session
+ * and returns it. Returns null if the file can't be read (History then just
+ * shows no count for that trip). Takes { ref, data } like the other helpers.
+ */
+export const getArchivePointCount = async ({ ref, data }) => {
+  if (typeof data.pointCount === "number") return data.pointCount;
+  if (!data.archiveUrl) return null;
+  try {
+    const [buf] = await bucket.file(`bookingHistory/${data.bookingSessionID}.json`).download();
+    const parsed = JSON.parse(buf.toString("utf8"));
+    const n = Array.isArray(parsed) ? parsed.length : (parsed.points?.length ?? 0); // older files are bare arrays
+    ref.update({ pointCount: n }).catch(() => {});
+    return n;
+  } catch (e) {
+    console.warn(`[BookingSession] couldn't count points for ${data.bookingSessionID}:`, e.message);
+    return null;
+  }
+};
+
+// ─────────────────────────────────────────────
+// History flush
+//
+// Compiles a session's full GPS trail into one permanent JSON file in
+// Firebase Storage under bookingHistory/. The trail is read from Google
+// Sheets (one tab per PHT date, shared by every car — see
+// services/sheets/sheets.service.js) across every PHT date the session
+// spans; it no longer comes from a Firestore archive/{date} sub-collection.
+// (Used to live in services/storage/bookingHistory.service.js.)
+// ─────────────────────────────────────────────
+
+export const flushBookingHistory = async (bookingSessionID) => {
+  const session = await getSessionById(bookingSessionID);
+  if (!session) {
+    throw new Error(`Booking session not found: ${bookingSessionID}`);
+  }
+  const { data } = session;
+
+  // Start of the range = the REAL start of the trip (startedAt, stamped at
+  // pickup), not the booking's scheduled date — so an early pickup (a booking
+  // for Oct 23 handed over on Sep 28) reads the right Sheets date-tabs instead
+  // of coming back empty. For sessions from before startedAt existed we also
+  // look at droppedOffTime / lastArchivedAt / last ping and take the earliest
+  // known real moment. If nothing is known at all (never started), start = now,
+  // i.e. just today's tab.
+  const realMoments = [sessionStartedAt(data), toDate(data.droppedOffTime), toDate(data.lastArchivedAt), toDate(data.currentPosition?.date)]
+    .filter((d) => d && !isNaN(d.getTime()));
+  const pickup = realMoments.length
+    ? new Date(Math.min(...realMoments.map((d) => d.getTime())))
+    : new Date();
+  // Flushing always happens at or after the real event, and no ping can be
+  // dated in the future — so "now" is the true upper bound (no wasted reads of
+  // Sheets tabs that don't exist yet).
+  const end = new Date();
+  const dateStrings = datesBetweenPHT(pickup, end);
+
+  const rows = await fetchSessionRows(data.carID, bookingSessionID, dateStrings);
+  const fullTrail = rows
+    .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
+    .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at, speed: r.speed ?? 0, offline: r.offline === true }))
+    .sort((a, b) => new Date(a.at) - new Date(b.at));
+
+  const filePath = `bookingHistory/${bookingSessionID}.json`;
+  const file = bucket.file(filePath);
+
+  // Shape changed from a bare points array to an object carrying this trip's
+  // geofence zones + alert timeline (and coding-restriction alerts) alongside
+  // the trail, so History → Review can reconstruct breach state on playback
+  // instead of only showing the dots. Older archive files already in Storage
+  // stay as bare arrays — the frontend handles both shapes.
+  const archivePayload = {
+    points: fullTrail,
+    geofenceZones:  data.geofenceZones  || [],
+    geofenceAlerts: data.geofenceAlerts || [],
+    codingAlerts:   data.codingAlerts   || [],
+  };
+
+  await file.save(JSON.stringify(archivePayload, null, 2), {
+    contentType: "application/json",
+    metadata: { cacheControl: "no-cache" },
+  });
+  await file.makePublic();
+
+  const archiveUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+  await recordArchiveFlush(bookingSessionID, archiveUrl);
+
+  return archiveUrl;
 };

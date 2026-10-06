@@ -62,6 +62,7 @@ export const BookingSession = {
 
   currentPosition:     null, // { lat, lng, date }
   archiveUrl:          null, // public Firebase Storage URL, set by the nightly flush job
+  pointCount:          null, // number of GPS points in the flushed trail, set with archiveUrl
   lastArchivedAt:      null,
   createdAt:           null,
   updatedAt:           null,

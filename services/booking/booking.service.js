@@ -1,7 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination } from "../../services/booking/bookingSession.service.js";
-import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
+import { flushBookingHistory, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination } from "../../services/booking/bookingSession.service.js";
 import { sessionStartedAt } from "../../utils/date/sessionDates.js";
 import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { resolveInspectionReminders } from "../../services/inspectionReminders/inspectionReminders.service.js";
@@ -158,7 +157,7 @@ const resolveServiceType = async (serviceTypeID) => {
 // bookingID → { hasHistory, bookingSessionID, lastArchivedAt } — powers the
 // "Trip History" row in the Bookings page's detail view, and the deep-link
 // into Car Tracking's History tab (see routes/booking/booking.routes.js
-// callers). hasHistory is true only once bookingHistory.service.js has
+// callers). hasHistory is true only once flushBookingHistory (bookingSession.service.js) has
 // actually flushed a trail to Storage (archiveUrl set) — a session that
 // exists but never got flushed still reports false, same as "no session at
 // all", since either way there's nothing in History to show yet.

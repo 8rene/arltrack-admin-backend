@@ -8,10 +8,11 @@ import {
 } from "../../services/gps/gpsLookupCache.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { getSessionsByCar, getActiveSessionByCar, getRecentSessionsByCarUpTo } from "../../services/booking/bookingSession.service.js";
+import { getSessionsByCar, getActiveSessionByCar, getRecentSessionsByCarUpTo, getArchivePointCount } from "../../services/booking/bookingSession.service.js";
 import { getSessionArchivesByCar, getRecentSessionArchivesByCarUpTo } from "../../services/archives/bookingSessionArchives.service.js";
 import { fetchCarRowsForDate } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
+import { sessionStartedAt, sessionEndedAt } from "../../utils/date/sessionDates.js";
 import { isWithinPhilippines } from "../../utils/gps/philippinesBounds.js";
 import admin from "firebase-admin";
 
@@ -591,17 +592,20 @@ export const getCarTraceback = async (req, res) => {
     let geofenceZones = [];
     let geofenceAlerts = [];
     let codingAlerts = [];
-    // { bookingSessionID, bookingID, status, pickupTime, returnTime } for
+    // { bookingSessionID, bookingID, status, startedAt, endedAt } for
     // whichever session owns this date — powers TracebackBookingInfoPanel's
     // read-only summary + canEdit check ("today" + status === "active") on
     // the frontend. null when no session covers this date.
     let session = null;
     try {
+      // A session covers a date from its REAL start (startedAt) to its real
+      // end (see sessionEndedAt) or "now" while it's still going. Sessions that
+      // never started have no start, so they never match — they have no trail.
       const findMatch = (sessions) => sessions.find((s) => {
-        const pickup = s.data.pickupTime?.toDate?.() || (s.data.pickupTime ? new Date(s.data.pickupTime) : null);
-        if (!pickup) return false;
-        const end = s.data.returnTime?.toDate?.() || (s.data.returnTime ? new Date(s.data.returnTime) : new Date());
-        return datesBetweenPHT(pickup, end).includes(date);
+        const start = sessionStartedAt(s.data);
+        if (!start) return false;
+        const end = sessionEndedAt(s.data) || new Date();
+        return datesBetweenPHT(start, end).includes(date);
       });
 
       // Bounded lookup first (a few reads); only if it errors (e.g. index not
@@ -645,8 +649,8 @@ export const getCarTraceback = async (req, res) => {
           bookingSessionID: match.data.bookingSessionID,
           bookingID:        match.data.bookingID || null,
           status:           match.data.status || null,
-          pickupTime:       match.data.pickupTime || null,
-          returnTime:       match.data.returnTime || null,
+          startedAt:        sessionStartedAt(match.data),
+          endedAt:          sessionEndedAt(match.data), // null while still going
           isArchived,
         };
       }
@@ -666,7 +670,7 @@ export const getCarTraceback = async (req, res) => {
  * GET /api/gps/:carId/history
  * Every archived (flushed-to-Storage) trip for one car, newest first.
  * Powers Car Tracking's History tab — a session only shows up here once
- * bookingHistory.service.js has flushed it (archiveUrl gets set then), so a
+ * flushBookingHistory (bookingSession.service.js) has flushed it (archiveUrl gets set then), so a
  * car with no completed/flushed trips yet returns an empty list, which the
  * frontend renders as "No GPS record."
  */
@@ -675,17 +679,23 @@ export const getCarHistory = async (req, res) => {
     const { carId } = req.params;
     const sessions = await getSessionsByCar(carId);
 
-    const history = sessions
-      .filter(({ data }) => !!data.archiveUrl)
-      .map(({ data }) => ({
-        bookingSessionID: data.bookingSessionID,
-        bookingID:        data.bookingID || null,
-        status:    data.status || null,
-        pickupTime:       data.pickupTime || null,
-        returnTime:       data.returnTime || null,
-        archiveUrl:       data.archiveUrl,
-        lastArchivedAt:   data.lastArchivedAt || null,
-      }));
+    // pointCount = how many GPS points the archived trail holds, so History can
+    // show it before anyone clicks Review (see getArchivePointCount in
+    // bookingSession.service.js — counted once, then saved on the session).
+    const history = await Promise.all(
+      sessions
+        .filter(({ data }) => !!data.archiveUrl)
+        .map(async (session) => { const { data } = session; return ({
+          bookingSessionID: data.bookingSessionID,
+          bookingID:        data.bookingID || null,
+          status:    data.status || null,
+          startedAt:        sessionStartedAt(data),
+          endedAt:          sessionEndedAt(data), // null while still going
+          archiveUrl:       data.archiveUrl,
+          lastArchivedAt:   data.lastArchivedAt || null,
+          pointCount:       await getArchivePointCount(session),
+        }); })
+    );
 
     // getSessionsByCar already sorts newest-pickup-first, so this list comes
     // out newest-first automatically — no extra sort needed here.
