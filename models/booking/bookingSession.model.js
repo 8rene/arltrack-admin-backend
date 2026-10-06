@@ -4,12 +4,13 @@
 // bookingSessionID as the doc's real ID, bookingID stored as an FK field
 // only — see the customer repo's models/bookingSession/bookingsession.model.js
 // for the fields set at creation: pickupLocation, dropoffLocation,
-// geofenceZones, codingCheck, pickupTime, returnTime).
+// geofenceZones, codingCheck). The scheduled pickup/return dates are NOT
+// copied here — they live on the booking (startDateTime/endDateTime).
 //
 // GPS pings are NOT stored on this doc. Each ping is appended to a Google
 // Sheet (one tab per PHT date, shared by all cars — see
 // services/sheets/sheets.service.js) and matched back to this session by
-// sessionId + carID + the activatedAt date range. The history flush compiles
+// sessionId + carID + the startedAt date range. The history flush compiles
 // that trail into a JSON file in Firebase Storage; archiveUrl points to it.
 // The old bookingSessions/{id}/archive sub-collection is no longer used.
 //
@@ -35,22 +36,24 @@ export const BookingSession = {
   geofenceAlerts:      [],
   codingAlerts:        [],
   codingCheck:         null,
-  pickupTime:          null, // SCHEDULED pickup (booking startDateTime), set once at creation
-  returnTime:          null, // SCHEDULED return (booking endDateTime), set once at creation.
-                             // NOT the actual return moment — no admin code rewrites it.
   // ACTUAL pickup moment. Stamped once by markSessionActive; null until the
-  // trip starts. The history flush uses it to pick which Sheets date tabs to
-  // read, so an early pickup still looks at the right days.
-  activatedAt:         null, // timestamp | null
+  // trip starts (so upcoming/cancelled sessions have none). Traceback and the
+  // history flush use it to pick which Sheets date-tabs to read, so an early
+  // pickup still looks at the right days. Replaces the old activatedAt.
+  // Sessions backfilled by scripts/migrate-session-dates.js from the old
+  // SCHEDULED pickup also carry startedAtSource ("pickupTime(scheduled)") so
+  // an approximate value can't be mistaken for a real one.
+  startedAt:           null, // timestamp | null
+  startedAtSource:     null, // only set by the migration script
 
   // Admin-side addition, set for EVERY booking (self-drive and chauffeur
   // alike) — the moment the vehicle itself is physically back on the lot,
-  // as distinct from returnTime (which is only the SCHEDULED return).
+  // as distinct from the booking's returnedAt (stamped once Return is confirmed).
   // Whoever has custody of the car marks this: the assigned driver on a
   // chauffeur booking, or a supervisor/staff member on a self-drive one
   // (there's no driver to do it on those). This is the single moment used
   // for the late-fee calculation for every booking type — never
-  // auto-filled/backfilled from returnTime, and never editable after the
+  // auto-filled/backfilled from returnedAt, and never editable after the
   // fact: if it's null, nobody tapped "Dropped Off", full stop. That's a
   // deliberate choice — a guessed or backfilled timestamp here would look
   // just as authoritative as a real one with no way to tell them apart,

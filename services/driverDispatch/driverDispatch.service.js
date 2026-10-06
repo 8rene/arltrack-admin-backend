@@ -9,6 +9,7 @@ import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRef
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createPenalty } from "../penalty/penalty.service.js";
+import { sessionStartedAt } from "../../utils/date/sessionDates.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -489,7 +490,7 @@ export const getMyTripHistory = async (driverID) => {
 
 // Shared shaping for the two driver-facing lists above — same vehicle/
 // customer resolution as getDispatchBoard, plus each booking's session
-// (for pickupTime/droppedOffTime/returnTime display).
+// (for startedAt/droppedOffTime display) plus the booking's own returnedAt.
 const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
@@ -537,9 +538,10 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         carID:                b.carID || null,
         customerName:         userMap[b.userID]?.name || "—",
         customerPhone:        userMap[b.userID]?.phone || "—",
-        pickupTime:           toJSDate(sessions[i]?.data?.pickupTime),
+        startedAt:            toJSDate(sessionStartedAt(sessions[i]?.data)),
         droppedOffTime:       toJSDate(sessions[i]?.data?.droppedOffTime),
-        returnTime:           toJSDate(sessions[i]?.data?.returnTime),
+        // ACTUAL return — stamped on the booking when Return is confirmed.
+        returnedAt:           toJSDate(b.returnedAt),
         // Set by the customer backend at booking time (see bookingsession.model.js).
         // Null when a session hasn't been created yet / doesn't have coords geocoded.
         pickupLocation:       sessions[i]?.data?.pickupLocation || null,

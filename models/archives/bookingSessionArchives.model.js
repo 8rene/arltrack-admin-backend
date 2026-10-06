@@ -13,8 +13,7 @@ export const BookingSessionArchive = {
   geofenceAlerts: [],
   codingAlerts: [],
   codingCheck: null,
-  pickupTime: null,
-  returnTime: null,
+  startedAt: null,               // ACTUAL pickup moment (replaces pickupTime/returnTime/activatedAt)
   currentPosition: null,
   archiveUrl: null,              // Storage URL, if this session was ever flushed before deletion
   lastArchivedAt: null,

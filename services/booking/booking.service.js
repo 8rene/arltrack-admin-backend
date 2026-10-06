@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination } from "../../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../../services/storage/bookingHistory.service.js";
+import { sessionStartedAt } from "../../utils/date/sessionDates.js";
 import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { resolveInspectionReminders } from "../../services/inspectionReminders/inspectionReminders.service.js";
 import { computeAmounts, derivePaymentStage } from "../../services/payments/payments.service.js";
@@ -162,7 +163,7 @@ const resolveServiceType = async (serviceTypeID) => {
 // exists but never got flushed still reports false, same as "no session at
 // all", since either way there's nothing in History to show yet.
 const EMPTY_HISTORY_INFO = {
-  hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, droppedOffTime: null,
+  hasHistory: false, bookingSessionID: null, lastArchivedAt: null, startedAt: null, droppedOffTime: null,
   // { address, lat, lng } | null — set by the customer backend at booking
   // time (see bookingsession.model.js). geofenceZones carries any extra
   // stops the customer selected beyond pickup/dropoff (same field
@@ -185,7 +186,7 @@ const resolveHistoryInfo = async (bookingID) => {
       // already reads the session doc for hasHistory/bookingSessionID —
       // Car Tracking's "Current trip" panel and Bookings.jsx need both to
       // show the Dropped Off marker without an extra round trip per booking.
-      pickupTime:       data.pickupTime || null,
+      startedAt:        sessionStartedAt(data),
       droppedOffTime:   data.droppedOffTime || null,
       pickupLocation:   data.pickupLocation || null,
       dropoffLocation:  data.dropoffLocation || null,
@@ -313,7 +314,7 @@ export const getAllBookings = async (statusFilter) => {
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
     const payInfo = paymentMap[bID] || EMPTY_PAYMENT_INFO;
-    const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, pickupTime: null, droppedOffTime: null };
+    const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, startedAt: null, droppedOffTime: null };
     // A cancelled booking always shows "Cancelled" payment status, matching
     // getAllPayments()'s override — the underlying payment doc's own status
     // (e.g. still "Pending") isn't what matters once the trip itself is off.
@@ -364,7 +365,7 @@ export const getAllBookings = async (statusFilter) => {
       hasHistory:       histInfo.hasHistory,
       bookingSessionID: histInfo.bookingSessionID,
       lastArchivedAt:   histInfo.lastArchivedAt,
-      pickupTime:           histInfo.pickupTime,
+      startedAt:            histInfo.startedAt,
       droppedOffTime:       histInfo.droppedOffTime,
       // Every stop for this booking's trip — pickup, dropoff, and any
       // extra stops selected at booking time — so the detail view can
