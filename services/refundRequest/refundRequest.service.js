@@ -268,10 +268,23 @@ const cancelBookingForRefund = async (bookingID, reason) => {
   return { cancelled: true, driverID: b.driverID || null };
 };
 
-const notifyCustomer = (userID, bookingID, type, title, message) => {
-  if (!userID) return Promise.resolve();
-  return createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID })
-    .catch((err) => console.error(`[REFUND] failed to notify customer (${type}):`, err.message));
+// Resolves true only if the notification was actually written (or an identical
+// active one already existed); false if there was nobody to notify or the write
+// failed. Never throws — a notification problem must not fail the refund action
+// itself — but callers that stamp customerNotified use the result, so the flag
+// reflects what really happened.
+// renotify: if an active card of this type already exists for the booking, bump it
+// (new message, unread again) instead of silently dropping the new one — e.g. a
+// second rejection after the customer re-requested a refund.
+const notifyCustomer = async (userID, bookingID, type, title, message, { renotify = false } = {}) => {
+  if (!userID) return false;
+  try {
+    await createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID, renotify });
+    return true;
+  } catch (err) {
+    console.error(`[REFUND] failed to notify customer (${type}):`, err.message);
+    return false;
+  }
 };
 // Emails the customer that their booking was cancelled with no money returned.
 // Best-effort — a missing address or a send failure never fails the cancellation.
@@ -437,9 +450,26 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       processedBy: adminUserID,
       processedAt: now,
       updatedAt: now,
-      customerNotified: true, // told right now, below — the daily cron only covers what this misses
+      customerNotified: false, // flipped to true below, only once the customer has actually been notified
       approvalLockedAt: null,
     });
+
+    // Tell the customer straight away — BEFORE the deposit update and the booking
+    // cancel below. The PayMongo refund has already gone out, so a failure in those
+    // later steps must never leave the customer without an answer. (This replaces the
+    // old daily customer-backend cron that used to sweep up missed notifications.)
+    const customerTold = await notifyCustomer(
+      refundRequest.userID, refundRequest.bookingID, "refund_approved", "Refund Approved",
+      (manualRefund
+        ? `Your refund of ${peso(plan.total)} has been approved. ${peso(onlineAmount)} will be returned through PayMongo and ${peso(plan.manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
+        : `Your refund of ${peso(plan.total)} has been approved. Please allow up to 24 hours for PayMongo to process it — we'll notify you once it has been returned.`)
+      + (forfeit > 0 ? ` Your ${peso(forfeit)} deposit was kept under our 48-hour cancellation policy.` : ""),
+      { renotify: true }
+    );
+    if (customerTold) {
+      await reqRef.update({ customerNotified: true })
+        .catch((err) => console.error("[REFUND] failed to stamp customerNotified:", err.message));
+    }
 
     await markDepositAfterRefund(paymentSnap.docs[0].ref, payment, forfeit);
 
@@ -447,14 +477,6 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // isn't happening, so the car is released straight away; a PayMongo hiccup is
     // a technical retry, not a reason to keep the trip alive.
     const cancel = await cancelBookingForRefund(refundRequest.bookingID, cancelReason || "Cancelled: refund approved.");
-
-    await notifyCustomer(
-      refundRequest.userID, refundRequest.bookingID, "refund_approved", "Refund Approved",
-      (manualRefund
-        ? `Your refund of ${peso(plan.total)} has been approved. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(plan.manualAmount)} will be handed back to you by our staff.`
-        : `Your refund of ${peso(plan.total)} has been approved and is being processed by PayMongo.`)
-      + (forfeit > 0 ? ` Your ${peso(forfeit)} deposit was kept under our 48-hour cancellation policy.` : "")
-    );
 
     // A driver already assigned to this booking shouldn't find out secondhand.
     if (cancel.cancelled && cancel.driverID && !skipDriverNotify) {
@@ -657,10 +679,10 @@ const finishStaffRefund = async (r) => {
     const onlineAmount = Number(r.onlineAmount) || 0;
 
     await notifyCustomer(
-      r.userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Processed",
+      r.userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Approved",
       (manualAmount > 0
-        ? `Your booking was cancelled: ${r.reason}. ${peso(onlineAmount)} is being returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff.`
-        : `Your booking was cancelled: ${r.reason}. Your payment of ${peso(r.amount)} is being refunded through PayMongo.`)
+        ? `Your booking was cancelled: ${r.reason}. A refund has been approved: ${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
+        : `Your booking was cancelled: ${r.reason}. A refund of ${peso(r.amount)} has been approved — please allow up to 24 hours for PayMongo to process it. We'll notify you once it has been returned.`)
       + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
     );
 
@@ -1074,7 +1096,7 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
       processedBy: adminUserID,
       processedAt: now,
       updatedAt: now,
-      customerNotified: true, // told right now, below
+      customerNotified: false, // flipped to true below, once the customer has actually been notified
     });
     return r;
   });
@@ -1103,10 +1125,15 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
     refundRequestID,
   });
 
-  await notifyCustomer(
+  const customerTold = await notifyCustomer(
     refundRequest.userID, refundRequest.bookingID, "refund_rejected", "Refund Rejected",
-    rejectReason ? `Your refund request was rejected: ${rejectReason}` : "Your refund request was rejected."
+    rejectReason ? `Your refund request was rejected: ${rejectReason}` : "Your refund request was rejected.",
+    { renotify: true }
   );
+  if (customerTold) {
+    await reqRef.update({ customerNotified: true })
+      .catch((err) => console.error("[REFUND] failed to stamp customerNotified:", err.message));
+  }
 
   resolveNotification("refund_request", refundRequestID)
     .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));

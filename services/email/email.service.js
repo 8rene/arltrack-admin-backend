@@ -148,14 +148,15 @@ export const sendRefundEmail = async ({ toEmail, toName, bookingID, amount, manu
     label: "Refund",
     dedicatedTemplateID: process.env.EMAILJS_REFUND_TEMPLATE_ID,
     toEmail, toName, bookingID, amount: peso(amount),
-    subject: `Your booking ${bookingID || ""} was cancelled and refunded`,
+    subject: `Your booking ${bookingID || ""} was cancelled — refund approved`,
     text:
       `Hi ${displayName},\n\n` +
-      `Your booking${bookingID ? ` (${bookingID})` : ""} has been cancelled and refunded ${peso(amount)}.\n\n` +
+      `Your booking${bookingID ? ` (${bookingID})` : ""} has been cancelled and a refund of ${peso(amount)} has been approved.\n\n` +
       `Reason: ${reason || "Not specified"}\n\n` +
       (hasManual
-        ? `${peso(amount - manualAmount)} has been returned through PayMongo, and ${peso(manualAmount)} will be handed back to you by our staff.\n\n`
-        : `This has been returned through PayMongo.\n\n`) +
+        ? `${peso(amount - manualAmount)} will be returned through PayMongo, and ${peso(manualAmount)} will be handed back to you by our staff.\n\n`
+        : `It will be returned through PayMongo.\n\n`) +
+      `Please allow up to 24 hours for the refund to be processed. We'll notify you once it has been returned.\n\n` +
       (depositForfeited > 0
         ? `As our cancellation policy states, your ${peso(depositForfeited)} deposit is non-refundable and has been kept.\n\n`
         : "") +

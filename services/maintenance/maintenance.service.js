@@ -4,6 +4,8 @@ import { BASIS_OPTIONS, STATUS_OPTIONS, SERVICE_CATALOG } from "../../models/mai
 import { adminUpdateHistoryPartStatus } from "../inventory/inventory.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createTransactionLog, rejectTransactionLogsByRef } from "../transactionLogs/transactionLogs.service.js";
+import { notifyOwners } from "../notification/notification.service.js";
+import { ROLES } from "../../utils/roles/role.util.js";
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -223,7 +225,9 @@ export const listMaintenanceForBooking = async (bookingID) => {
 // ─────────────────────────────────────────────
 // CREATE maintenance record
 // ─────────────────────────────────────────────
-export const createMaintenance = async (payload, editedBy = null) => {
+// actor: { role } of whoever is creating it (the controller passes req.user.role).
+// A Supervisor creating a record notifies the Owner(s); nobody else triggers it.
+export const createMaintenance = async (payload, editedBy = null, actor = {}) => {
   const { carID, bookingID = null, basis, services = [], overrideTotal, description = "", maintenanceDate = null, nextMaintenanceDate = null, status, partsAddressed = [] } = payload;
 
   if (!carID) throw new Error("carID is required.");
@@ -298,6 +302,34 @@ export const createMaintenance = async (payload, editedBy = null) => {
     refID: ref.id,
     refCollection: "carMaintenance",
   }).catch((err) => console.error("[TXN] Maintenance expense log failed:", err.message));
+
+  // A Supervisor scheduled this — let the Owner(s) know. Never blocks or fails the create.
+  if (actor?.role === ROLES.SUPERVISOR) {
+    try {
+      let by = "A Supervisor";
+      if (editedBy) {
+        const [detail, user] = await Promise.all([
+          db.collection("userDetails").doc(editedBy).get(),
+          db.collection("user").doc(editedBy).get(),
+        ]);
+        const d = detail.exists ? detail.data() : {};
+        const u = user.exists ? user.data() : {};
+        const name = [d.firstName, d.lastName].filter(Boolean).join(" ").trim() || u.username || u.email;
+        if (name) by = `${name} (Supervisor)`;
+      }
+      const plate = carDoc.data().plateNumber || carID;
+      await notifyOwners({
+        type: "maintenance_created",
+        refID: ref.id,
+        refCollection: "carMaintenance",
+        title: "Maintenance Created",
+        message: `${by} scheduled ${basis} maintenance for ${plate} (${finalStatus}) — ₱${totalCost.toFixed(2)}.`,
+        extra: { carID },
+      });
+    } catch (err) {
+      console.error("[MAINTENANCE] Owner notification failed:", err.message);
+    }
+  }
 
   return { id: ref.id };
 };

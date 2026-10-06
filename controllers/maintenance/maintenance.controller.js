@@ -69,7 +69,7 @@ export const listMaintenanceByBooking = async (req, res) => {
 export const addMaintenance = async (req, res) => {
   try {
     const editedBy = req.user?.uid || req.user?.userID || null;
-    const data = await createMaintenance(req.body, editedBy);
+    const data = await createMaintenance(req.body, editedBy, { role: req.user?.role });
     return res.status(201).json({ success: true, data });
   } catch (error) {
     console.error("[MAINTENANCE] addMaintenance error:", error);
