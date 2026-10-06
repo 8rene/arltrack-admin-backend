@@ -34,8 +34,8 @@ export const createTransactionLog = async ({
   referenceNumber = "",
   description = "",
   performedBy = null,
-  refID = null,           // generic FK for non-booking types (e.g. "Expense" -> a carMaintenance doc ID)
-  refCollection = null,   // which collection refID points into, e.g. "carMaintenance"
+  refID = null,           // generic FK for non-booking types (e.g. "Expense" -> a maintenance doc ID)
+  refCollection = null,   // which collection refID points into, e.g. "maintenance"
   // Optional idempotency key: written with create() to a doc of exactly this id,
   // so a repeat attempt to log the same event is a harmless no-op instead of a
   // duplicate row. Omit for one-off entries.

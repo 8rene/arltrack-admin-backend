@@ -151,7 +151,7 @@ export const getMaintenanceConfig = () => ({
 // ─────────────────────────────────────────────
 export const getAllMaintenance = async () => {
   const [maintSnap, carsSnap, brandSnap, modelSnap] = await Promise.all([
-    db.collection("carMaintenance").orderBy("createdAt", "desc").get(),
+    db.collection("maintenance").orderBy("createdAt", "desc").get(),
     db.collection("cars").get(),
     db.collection("brand").get(),
     db.collection("model").get(),
@@ -180,7 +180,7 @@ export const getAllMaintenance = async () => {
 // GET single maintenance record by ID
 // ─────────────────────────────────────────────
 export const getMaintenanceById = async (maintenanceID) => {
-  const doc = await db.collection("carMaintenance").doc(maintenanceID).get();
+  const doc = await db.collection("maintenance").doc(maintenanceID).get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
   return { id: doc.id, ...doc.data() };
 };
@@ -190,7 +190,7 @@ export const getMaintenanceById = async (maintenanceID) => {
 // ─────────────────────────────────────────────
 export const getMaintenanceByCar = async (carID) => {
   const snap = await db
-    .collection("carMaintenance")
+    .collection("maintenance")
     .where("carID", "==", carID)
     .orderBy("createdAt", "desc")
     .get();
@@ -211,7 +211,7 @@ export const getMaintenanceByCar = async (carID) => {
 // editRequests/idResubmitRequests in the admin frontend's Account.jsx.
 export const listMaintenanceForBooking = async (bookingID) => {
   const snap = await db
-    .collection("carMaintenance")
+    .collection("maintenance")
     .where("bookingID", "==", bookingID)
     .get();
 
@@ -244,14 +244,13 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
   const normalizedServices = normalizeServices(services);
   const totalCost = computeTotal(normalizedServices, overrideTotal);
 
-  const ref = await db.collection("carMaintenance").add({
+  const ref = await db.collection("maintenance").add({
     carID,
     // FK -> bookings. Null for routine/scheduled maintenance that isn't
-    // tied to any one rental (oil changes, monthly checks). Set either
-    // automatically (jobs/postRentalMaintenance.job.js, on the completed
-    // booking) or manually via the "+ Post-Rental Maintenance" button on
-    // a booking's detail view (Bookings.jsx's goToMaintenance), which
-    // deep-links here with ?carID=&bookingID= pre-filled. See
+    // tied to any one rental (oil changes, monthly checks). Set manually
+    // via the "+ Post-Rental Maintenance" button on a booking's detail
+    // view (Bookings.jsx's goToMaintenance), which deep-links here with
+    // ?carID=&bookingID= pre-filled. See
     // listMaintenanceForBooking() below for the read side — this is what
     // lets a booking's detail view show "linked maintenance" and what a
     // penalty's optional maintenanceID field can point back to.
@@ -300,7 +299,7 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
     description: `${basis} for ${carDoc.data().plateNumber || carID}: ${description || "no description"}`,
     performedBy: editedBy,
     refID: ref.id,
-    refCollection: "carMaintenance",
+    refCollection: "maintenance",
   }).catch((err) => console.error("[TXN] Maintenance expense log failed:", err.message));
 
   // A Supervisor scheduled this — let the Owner(s) know. Never blocks or fails the create.
@@ -321,7 +320,7 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
       await notifyOwners({
         type: "maintenance_created",
         refID: ref.id,
-        refCollection: "carMaintenance",
+        refCollection: "maintenance",
         title: "Maintenance Created",
         message: `${by} scheduled ${basis} maintenance for ${plate} (${finalStatus}) — ₱${totalCost.toFixed(2)}.`,
         extra: { carID },
@@ -367,7 +366,7 @@ const resolveAddressedParts = async (maintenanceID, carID, partsAddressed) => {
 };
 
 export const updateMaintenance = async (maintenanceID, payload, editedBy = null) => {
-  const ref = db.collection("carMaintenance").doc(maintenanceID);
+  const ref = db.collection("maintenance").doc(maintenanceID);
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
 
@@ -437,7 +436,7 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
   // then logs the new absolute amount as a fresh entry — same "one final
   // settled amount, not a delta" rule every other type in this ledger follows.
   if (update.totalCost !== undefined && update.totalCost !== existing.totalCost) {
-    rejectTransactionLogsByRef(maintenanceID, "carMaintenance")
+    rejectTransactionLogsByRef(maintenanceID, "maintenance")
       .catch((err) => console.error("[TXN] Maintenance expense rejection (pre-revision) failed:", err.message));
     createTransactionLog({
       type: "Expense",
@@ -446,7 +445,7 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
       description: `Revised maintenance cost for ${plate}: ₱${(existing.totalCost || 0).toFixed(2)} → ₱${update.totalCost.toFixed(2)}.`,
       performedBy: editedBy,
       refID: maintenanceID,
-      refCollection: "carMaintenance",
+      refCollection: "maintenance",
     }).catch((err) => console.error("[TXN] Maintenance expense revision failed:", err.message));
   }
 
@@ -459,7 +458,7 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
 export const updateMaintenanceStatus = async (maintenanceID, status, editedBy = null) => {
   if (!STATUS_OPTIONS.includes(status)) throw new Error(`Invalid status. Must be one of: ${STATUS_OPTIONS.join(", ")}`);
 
-  const ref = db.collection("carMaintenance").doc(maintenanceID);
+  const ref = db.collection("maintenance").doc(maintenanceID);
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
   const record = doc.data();
@@ -484,7 +483,7 @@ export const updateMaintenanceStatus = async (maintenanceID, status, editedBy = 
 // DELETE maintenance record
 // ─────────────────────────────────────────────
 export const deleteMaintenance = async (maintenanceID, editedBy = null) => {
-  const ref = db.collection("carMaintenance").doc(maintenanceID);
+  const ref = db.collection("maintenance").doc(maintenanceID);
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
   const record = doc.data();
@@ -502,7 +501,7 @@ export const deleteMaintenance = async (maintenanceID, editedBy = null) => {
   // Rejects this record's live Expense entry (if any) so it stops
   // counting toward any Success-based total, without deleting it — the
   // ledger keeps it as history, just no longer "live".
-  rejectTransactionLogsByRef(maintenanceID, "carMaintenance")
+  rejectTransactionLogsByRef(maintenanceID, "maintenance")
     .catch((err) => console.error("[TXN] Maintenance expense rejection (on delete) failed:", err.message));
 
   return { id: maintenanceID };

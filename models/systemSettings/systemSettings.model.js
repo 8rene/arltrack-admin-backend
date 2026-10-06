@@ -6,7 +6,7 @@
 // and store location today; other areas would add their own fields onto
 // this same shape later rather than creating a separate kind of doc).
 // Follows the same append-only convention as the rest of the app (e.g.
-// carMaintenance): every save adds a NEW auto-ID doc rather than mutating
+// maintenance): every save adds a NEW auto-ID doc rather than mutating
 // one fixed doc, with the ID mirrored onto itself as systemSettingsID and
 // a createdAt server timestamp. The "current" settings are just the most
 // recently created doc. This model file just documents the shape —

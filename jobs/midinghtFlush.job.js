@@ -199,7 +199,7 @@ const checkOverdueMaintenance = async () => {
   // Scheduled (like the booking check above does) would mean a record
   // that flips to Completed silently drops out of the snapshot and
   // never gets its notification resolved.
-  const snap = await db.collection("carMaintenance").get();
+  const snap = await db.collection("maintenance").get();
 
   for (const doc of snap.docs) {
     const record = doc.data();
@@ -211,7 +211,7 @@ const checkOverdueMaintenance = async () => {
       await notifyStaff({
         type: "maintenance_overdue",
         refID: docID,
-        refCollection: "carMaintenance",
+        refCollection: "maintenance",
         title: "Maintenance overdue",
         message: `${record.carID || "A vehicle"}'s scheduled maintenance (${record.description || "service"}) is past due.`,
       }).catch((err) => console.error("[NOTIF] maintenance_overdue create failed:", err.message));

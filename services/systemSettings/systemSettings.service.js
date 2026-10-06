@@ -94,7 +94,7 @@ export const getSystemSettings = async () => {
 // written. Validates numeric fields are numbers >= 0 before saving.
 //
 // Follows the same append-only pattern as the rest of the app (e.g.
-// carMaintenance): every save creates a NEW doc rather than mutating the
+// maintenance): every save creates a NEW doc rather than mutating the
 // old one, carrying forward every existing field (pricing AND any other
 // settings area that later gets added onto this same doc) so a partial
 // save never wipes out unrelated settings. systemSettings doubles as a

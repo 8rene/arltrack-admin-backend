@@ -18,8 +18,8 @@ export const TransactionLog = {
   paymentID: "",          // FK -> payments (null for "Expense")
   refundRequestID: null,  // FK -> refundRequests, only set when type === "Refund" via that flow
   userID: "",             // FK -> user, the customer the money event belongs to (null for "Expense")
-  refID: null,             // generic FK for non-booking types, e.g. a carMaintenance doc ID for "Expense"
-  refCollection: null,     // which collection refID points into, e.g. "carMaintenance"
+  refID: null,             // generic FK for non-booking types, e.g. a maintenance doc ID for "Expense"
+  refCollection: null,     // which collection refID points into, e.g. "maintenance"
 
   type: "",               // "Payment" | "Refund" | "Deposit" | "Discount" | "Expense"
   amount: 0,
