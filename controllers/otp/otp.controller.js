@@ -6,11 +6,14 @@ const OTP_EXPIRY_MS   = 5 * 60 * 1000; // 5 minutes
 const OTP_COOLDOWN_MS = 60 * 1000;     // 1 minute cooldown between requests
 const MAX_ATTEMPTS    = 5;             // max wrong guesses before lockout
 
-// Same shape/collection idea as customer-backend's "otpCodes", kept as its
-// own collection ("adminOtpCodes") so admin verification codes never mix
-// with customer signup codes, and so an email that happens to exist on
-// both sides doesn't share state.
-const otpDocFor = (email) => db.collection("adminOtpCodes").doc(email.toLowerCase());
+// Shared "otpCodes" collection — the same one customer-backend uses. A staff
+// email never goes through the customer flows (and vice versa), so one
+// document per email is enough. What stops a code from one flow being
+// accepted by another is the "purpose" field: this controller only writes
+// and accepts "admin-action" (see checkOtp below); the forgot-password flow
+// uses "admin-reset"; customer-backend uses "signup" / "reset".
+const OTP_PURPOSE = "admin-action";
+const otpDocFor = (email) => db.collection("otpCodes").doc(email.toLowerCase());
 
 /**
  * POST /api/auth/send-otp
@@ -49,6 +52,7 @@ export const sendOTP = async (req, res) => {
     const otp = generateOTP();
     await docRef.set({
       otp,
+      purpose: OTP_PURPOSE,
       createdAt: new Date(),
       expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
       attempts: 0,
@@ -114,6 +118,12 @@ const checkOtp = async (email, otp, { consume }) => {
   }
 
   const data = doc.data();
+
+  // A code created by a different flow (e.g. forgot-password) must never
+  // unlock a sensitive action. Treated as "no code" and left untouched.
+  if (data.purpose !== OTP_PURPOSE) {
+    return { ok: false, status: 400, message: "No verification code found. Please request a new one." };
+  }
 
   if (new Date() > data.expiresAt.toDate()) {
     await docRef.delete();

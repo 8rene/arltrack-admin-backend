@@ -9,10 +9,11 @@ import { sendOtpEmail } from "../../services/otp/otp.service.js";
 // yet (that one requires verifyToken and always emails req.user's own
 // address; this one is exactly for the case where you can't log in at all).
 //
-// Deliberately its own collection ("adminPasswordResetOtp") rather than
-// reusing "adminOtpCodes" — that collection's whole design assumes a
-// logged-in caller confirming their own email from the JWT, and mixing an
-// unauthenticated flow into it would be easy to get wrong later.
+// Uses the shared "otpCodes" collection, but tags its codes with
+// purpose "admin-reset". The logged-in flow (otp.controller.js) only accepts
+// "admin-action", so a forgot-password code can never unlock a sensitive
+// action there, and vice versa — that purpose check is what keeps the
+// unauthenticated flow separate from the logged-in one.
 //
 // customer-backend's forgot-password flow (controllers/auth/otp.controller.js
 // + resetPassword.controller.js) explicitly BLOCKS Owner/Admin/Supervisor/
@@ -31,7 +32,8 @@ const MAX_ATTEMPTS    = 5;             // max wrong guesses before lockout
 // valid in one place is valid everywhere.
 const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()\-_=+[\]{};':"\\|,.<>/?]).{8,16}$/;
 
-const otpDocFor = (email) => db.collection("adminPasswordResetOtp").doc(email.toLowerCase());
+const OTP_PURPOSE = "admin-reset";
+const otpDocFor = (email) => db.collection("otpCodes").doc(email.toLowerCase());
 
 // A email only counts as "resettable" here if it's a real Firebase Auth
 // user AND has a matching staffUser record — mirrors exactly what login()
@@ -95,6 +97,7 @@ export const sendPasswordResetOTP = async (req, res) => {
     const otp = generateOTP();
     await docRef.set({
       otp,
+      purpose: OTP_PURPOSE,
       createdAt: new Date(),
       expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
       attempts: 0,
@@ -151,6 +154,11 @@ export const resetAdminPassword = async (req, res) => {
     }
 
     const otpData = otpDoc.data();
+
+    // Only a code issued by this flow counts here.
+    if (otpData.purpose !== OTP_PURPOSE) {
+      return res.status(404).json({ success: false, message: "Code not found. Please request a new one." });
+    }
 
     if (new Date() > otpData.expiresAt.toDate()) {
       await otpRef.delete();
