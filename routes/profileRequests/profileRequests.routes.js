@@ -5,6 +5,7 @@ import {
   rejectReviewRequest,
   updateOwnProfileFields,
   updateOwnDocument,
+  updateOwnAvatar,
   submitEditRequest,
   cancelOwnEditRequest,
   submitIdResubmitRequest,
@@ -40,4 +41,5 @@ export const registerProfileRequestsRoutes = (app) => {
   app.patch ("/api/profile/edit-requests/:id/cancel",   verifyToken, cancelOwnEditRequest);
   app.post  ("/api/profile/id-resubmit-requests",        verifyToken, submitIdResubmitRequest);
   app.put   ("/api/profile/document",                   verifyToken, requireRole(ownerAdminOnly), updateOwnDocument);
+  app.put   ("/api/profile/avatar",                     verifyToken, updateOwnAvatar);
 };

@@ -10,6 +10,36 @@ const notFound = (message) => {
   throw err;
 };
 
+const badRequest = (message) => {
+  const err = new Error(message);
+  err.statusCode = 400;
+  throw err;
+};
+
+// Which fields a self-service profile edit / edit request may touch, per
+// collection. applyProfileChanges() writes whatever it is given straight
+// onto the doc, so without this list a caller could send e.g.
+// { collection: "user", field: "roleID" } or { field: "status" } and
+// change their own role or unlock their own account. Keep this in sync
+// with EDITABLE_FIELDS in Account.jsx / Profile.jsx.
+const ALLOWED_PROFILE_FIELDS = {
+  user:        new Set(["username", "phone"]),
+  userDetails: new Set(["firstName", "middleName", "lastName", "suffix", "birthDate"]),
+  userAddress: new Set([
+    "street", "barangay", "municipality", "city", "province",
+    "postalCode", "village", "zipCode", "region",
+  ]),
+};
+
+const assertAllowedChanges = (changes) => {
+  for (const c of changes) {
+    const allowed = ALLOWED_PROFILE_FIELDS[c?.collection];
+    if (!allowed || !allowed.has(c?.field)) {
+      badRequest(`Field "${c?.field}" in "${c?.collection}" cannot be edited here.`);
+    }
+  }
+};
+
 // Tells the requester (not the reviewer) what happened to their own
 // request — mirrors refundRequest.service.js's notifyCustomer helper.
 // refCollection is "account" so Header.jsx's click-through just lands
@@ -67,6 +97,7 @@ export const upsertUserDocument = async (userID, fields) => {
 // call the same logic.
 // ─────────────────────────────────────────────
 export const applyProfileChanges = async (userID, changes = []) => {
+  assertAllowedChanges(changes);
   const byCollection = { user: {}, userDetails: {}, userAddress: {} };
   changes.forEach((c) => {
     if (byCollection[c.collection]) byCollection[c.collection][c.field] = c.newValue;
@@ -225,6 +256,8 @@ export const createEditRequest = async (userID, role, changes) => {
     throw err;
   }
 
+  assertAllowedChanges(changes);
+
   const ref = await db.collection("editRequests").add({
     userID,
     role,
@@ -346,4 +379,34 @@ export const applyOwnDocumentUpdate = async (userID, documentKind, newUrl, drive
   }
 
   return { userID, documentKind };
+};
+
+// ─────────────────────────────────────────────
+// Profile photo — the browser uploads the file to Firebase Storage at
+// avatars/{uid} and sends us the resulting download URL; this stores it
+// on the caller's own user doc. The URL is checked so a caller can only
+// point profileImage at their own avatar object, not an arbitrary
+// (possibly external) image.
+// ─────────────────────────────────────────────
+export const setOwnAvatar = async (userID, profileImage) => {
+  const url = typeof profileImage === "string" ? profileImage.trim() : "";
+  if (!url) badRequest("profileImage is required.");
+
+  let parsed;
+  try { parsed = new URL(url); } catch { badRequest("profileImage must be a valid URL."); }
+
+  const objectPart = parsed.pathname.split("/o/")[1] || "";
+  let objectPath = "";
+  try { objectPath = decodeURIComponent(objectPart); } catch { /* falls through to the check below */ }
+
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname !== "firebasestorage.googleapis.com" ||
+    objectPath !== `avatars/${userID}`
+  ) {
+    badRequest("profileImage must be a Firebase Storage URL for your own avatar.");
+  }
+
+  await db.collection("user").doc(userID).update({ profileImage: url, updatedAt: timestamp() });
+  return { profileImage: url };
 };

@@ -87,6 +87,23 @@ export const notifyStaff = async ({ type, refID, refCollection, title, message, 
 };
 
 /**
+ * Same fan-out as notifyStaff, but ONLY to Owners — for things the Owner
+ * should see when somebody else did them (e.g. a Supervisor scheduling
+ * maintenance), without pinging every Admin/Supervisor too.
+ */
+export const notifyOwners = async ({ type, refID, refCollection, title, message, extra = {}, renotify = false }) => {
+  const ownerSnap = await db.collection("user")
+    .where("roleID", "==", ROLE_IDS.OWNER)
+    .get();
+
+  return Promise.all(
+    ownerSnap.docs.map((d) =>
+      createNotification({ type, refID, refCollection, title, message, userID: d.id, extra, renotify })
+    )
+  );
+};
+
+/**
  * Marks every ACTIVE notification for this type+refID as resolved —
  * intentionally has no userID filter, so it resolves every fan-out copy
  * of the same event at once (e.g. every Owner/Admin/Supervisor's own

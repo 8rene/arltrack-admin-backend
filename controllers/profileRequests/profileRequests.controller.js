@@ -8,6 +8,7 @@ import {
   createEditRequest,
   cancelEditRequest,
   createIdResubmitRequest,
+  setOwnAvatar,
 } from "../../services/profileRequests/profileRequests.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { notifyStaff, resolveNotification } from "../../services/notification/notification.service.js";
@@ -244,6 +245,28 @@ export const updateOwnDocument = async (req, res) => {
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("[PROFILE_REQUESTS] updateOwnDocument error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/profile/avatar
+// Body: { profileImage } — the Firebase Storage download URL the browser
+// got after uploading to avatars/{uid}. Acts on the caller's own account
+// (uid from the verified token); any role can change their own photo, so
+// there is no review step.
+export const updateOwnAvatar = async (req, res) => {
+  try {
+    const data = await setOwnAvatar(req.user.uid, req.body?.profileImage);
+
+    createAuditLog({
+      action: "update",
+      description: "Updated own profile photo.",
+      userID: req.user.uid,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] updateOwnAvatar error:", error);
     return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
