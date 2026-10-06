@@ -1,6 +1,6 @@
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
-import { deleteUser, getUserByUid, getUserDetails, getUsersByRole, updateUserRole, verifyUserDocument, updateUserStatus, ensureMyReferralCode } from "../../controllers/user/user.controller.js";
+import { deleteUser, getUserByUid, getUserDetails, getUsersByRole, updateUserRole, verifyUserDocument, updateUserStatus, ensureMyReferralCode, getMyReferralInfo } from "../../controllers/user/user.controller.js";
 
 // Visible to: Admin only (user management)
 const allowed = [roles.ADMIN];
@@ -38,6 +38,7 @@ const editAllowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 export const registerUserRoutes = (app) => {
   // Any logged-in staff role — only ever acts on the caller's own account.
   app.post("/api/users/me/referral-code", verifyToken, ensureMyReferralCode);
+  app.get("/api/users/me/referral",       verifyToken, getMyReferralInfo);
   app.get("/api/users",                  verifyToken, requireRole(listAllowed), getUsersByRole);
   app.delete("/api/users/:uid",          verifyToken, requireRole(deleteAllowed), deleteUser);
   app.get("/api/users/by-uid/:uid",      verifyToken, requireRole(viewAllowed), getUserByUid);

@@ -84,51 +84,58 @@ async function syncStaffUser(uid, newRoleID, email) {
  *     invited:    [{ id, username, name, status, isVerified, createdAt }],
  *     invitedCount,
  *   }
- * Fields come from the customer backend's signup: referralCode (own code),
- * referredBy (referrer's userID), referredByCode (what they typed). Old accounts without them just get an
- * empty referral block. A referrer whose account was deleted shows up as
- * `removed: true` (the stored code is still shown).
+ * Everything comes from the "referrals" connection table
+ * ({ referrerUserID, referredUserID, createdAt }) written by the customer
+ * backend at signup; the user docs only supply names/status. A referrer
+ * whose account was deleted shows up as `removed: true`. Invited accounts
+ * that no longer exist are left out of `invited`.
  */
 async function attachReferralInfo(users) {
   if (!users.length) return users;
 
-  // 1. Everyone invited by someone in this list.
-  const invitedByReferrer = new Map(); // referrerID -> [userDoc]
-  const push = (d) => {
-    const data = d.data();
-    const key = data.referredBy;
-    if (!invitedByReferrer.has(key)) invitedByReferrer.set(key, []);
-    invitedByReferrer.get(key).push({ id: d.id, ...data });
-  };
+  // 1. Referral rows involving anyone in this list.
+  const rows = [];
   if (users.length <= 5) {
-    // Single-user / small lookups: targeted queries (avoids scanning all referred users).
-    const snaps = await Promise.all(
-      users.map((u) => db.collection("user").where("referredBy", "==", u.id).get())
-    );
-    snaps.forEach((s) => s.forEach(push));
+    // Single-user / small lookups: targeted queries (avoids scanning the whole table).
+    const snaps = await Promise.all(users.flatMap((u) => [
+      db.collection("referrals").where("referredUserID", "==", u.id).get(),
+      db.collection("referrals").where("referrerUserID", "==", u.id).get(),
+    ]));
+    const seen = new Set();
+    snaps.forEach((s) => s.forEach((d) => {
+      if (!seen.has(d.id)) { seen.add(d.id); rows.push(d.data()); }
+    }));
   } else {
-    // Full role list: one query for every referred user, grouped in memory.
-    const snap = await db.collection("user").where("referredBy", "!=", null).get();
-    snap.forEach(push);
+    // Full role list: one read of the table, grouped in memory.
+    const snap = await db.collection("referrals").get();
+    snap.forEach((d) => rows.push(d.data()));
   }
 
-  // 2. Referrer docs for the users in this list.
-  const referrerIDs = [...new Set(users.map((u) => u.referredBy).filter(Boolean))];
-  const referrerDocs = new Map();
-  for (let i = 0; i < referrerIDs.length; i += 100) {
-    const refs = referrerIDs.slice(i, i + 100).map((id) => db.collection("user").doc(id));
+  const referrerOf = new Map(); // referredUserID -> referrerUserID
+  const invitedIDs = new Map(); // referrerUserID  -> [referredUserID]
+  rows.forEach((r) => {
+    referrerOf.set(r.referredUserID, r.referrerUserID);
+    if (!invitedIDs.has(r.referrerUserID)) invitedIDs.set(r.referrerUserID, []);
+    invitedIDs.get(r.referrerUserID).push(r.referredUserID);
+  });
+
+  // 2. User docs for the referrers of this list and for everyone these users invited.
+  const listedIDs = new Set(users.map((u) => u.id));
+  const referrerIDs = [...new Set(users.map((u) => referrerOf.get(u.id)).filter(Boolean))];
+  const wantedIDs = new Set(referrerIDs);
+  users.forEach((u) => (invitedIDs.get(u.id) || []).forEach((id) => wantedIDs.add(id)));
+
+  const userData = new Map();
+  const wantedList = [...wantedIDs];
+  for (let i = 0; i < wantedList.length; i += 100) {
+    const refs = wantedList.slice(i, i + 100).map((id) => db.collection("user").doc(id));
     const docs = await db.getAll(...refs);
-    docs.forEach((d) => { if (d.exists) referrerDocs.set(d.id, d.data()); });
+    docs.forEach((d) => { if (d.exists) userData.set(d.id, d.data()); });
   }
 
   // 3. Real names (userDetails is keyed by userID) for referrers + invitees.
-  const nameIDs = new Set(referrerIDs);
-  const listedIDs = new Set(users.map((u) => u.id));
-  invitedByReferrer.forEach((list, referrerID) => {
-    if (listedIDs.has(referrerID)) list.forEach((x) => nameIDs.add(x.id));
-  });
   const nameMap = new Map();
-  const nameIDList = [...nameIDs];
+  const nameIDList = [...userData.keys()];
   for (let i = 0; i < nameIDList.length; i += 100) {
     const refs = nameIDList.slice(i, i + 100).map((id) => db.collection("userDetails").doc(id));
     const docs = await db.getAll(...refs);
@@ -140,27 +147,30 @@ async function attachReferralInfo(users) {
   }
 
   return users.map((u) => {
-    const referrerData = u.referredBy ? referrerDocs.get(u.referredBy) : null;
-    const code = u.referredByCode || null; // what they typed at signup (kept even if it matched nobody)
-    let referredBy = null;
-    if (u.referredBy || code) {
-      referredBy = {
-        id:       u.referredBy || null,
-        username: referrerData?.username || null,
-        name:     nameMap.get(u.referredBy) || null,
-        code,
-        removed:  !!u.referredBy && !referrerData,
-      };
-    }
-    const invited = (invitedByReferrer.get(u.id) || [])
-      .map((x) => ({
-        id:         x.id,
-        username:   x.username || null,
-        name:       nameMap.get(x.id) || null,
-        status:     x.status || null,
-        isVerified: x.isVerified === true,
-        createdAt:  x.createdAt || null,
-      }));
+    const referrerID = referrerOf.get(u.id) || null;
+    const referrerData = referrerID ? userData.get(referrerID) : null;
+    const referredBy = referrerID
+      ? {
+          id:       referrerID,
+          username: referrerData?.username || null,
+          name:     nameMap.get(referrerID) || null,
+          code:     referrerData?.referralCode || null,
+          removed:  !referrerData,
+        }
+      : null;
+    const invited = (invitedIDs.get(u.id) || [])
+      .filter((id) => userData.has(id))
+      .map((id) => {
+        const x = userData.get(id);
+        return {
+          id,
+          username:   x.username || null,
+          name:       nameMap.get(id) || null,
+          status:     x.status || null,
+          isVerified: x.isVerified === true,
+          createdAt:  x.createdAt || null,
+        };
+      });
     return {
       ...u,
       referral: {
@@ -172,6 +182,29 @@ async function attachReferralInfo(users) {
     };
   });
 }
+
+/**
+ * GET /api/users/me/referral
+ *
+ * Used by the admin panel's Account page (any role). Returns who referred the
+ * logged-in account and who it has invited, read from the "referrals" table.
+ * uid comes from the verified token, never from the request.
+ */
+export const getMyReferralInfo = async (req, res) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ success: false, message: "Not authenticated." });
+
+    const [info] = await attachReferralInfo([{ id: uid }]);
+    return res.status(200).json({
+      success: true,
+      data: { referredBy: info.referral.referredBy, invited: info.referral.invited },
+    });
+  } catch (error) {
+    console.error("[USER] getMyReferralInfo error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 /**
  * POST /api/users/me/referral-code
@@ -216,12 +249,11 @@ export const ensureMyReferralCode = async (req, res) => {
 
 // " (referred by @juan)" for audit-log descriptions — added at the moments an
 // admin acts on a new signup (verify ID / unlock). Never throws.
-async function referrerNote(userData) {
+async function referrerNote(userID) {
   try {
-    if (!userData.referredBy) {
-      return userData.referredByCode ? ` (entered referral code ${userData.referredByCode}, no match)` : "";
-    }
-    const r = await db.collection("user").doc(userData.referredBy).get();
+    const rows = await db.collection("referrals").where("referredUserID", "==", userID).limit(1).get();
+    if (rows.empty) return "";
+    const r = await db.collection("user").doc(rows.docs[0].data().referrerUserID).get();
     if (!r.exists) return " (referred by an account that has since been removed)";
     return ` (referred by ${r.data().username || r.data().email || "a member"})`;
   } catch {
@@ -469,7 +501,7 @@ export const verifyUserDocument = async (req, res) => {
     const name = userDoc.data().username || userDoc.data().email || uid;
     createAuditLog({
       action: "update",
-      description: `${isVerified ? "Approved" : "Rejected"} ID document for ${name}${await referrerNote(userDoc.data())}.`,
+      description: `${isVerified ? "Approved" : "Rejected"} ID document for ${name}${await referrerNote(userDoc.id)}.`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[USER] Failed to write audit log:", err));
 
@@ -524,7 +556,7 @@ export const updateUserStatus = async (req, res) => {
 
     const name = userDoc.data().username || userDoc.data().email || uid;
     const unlocking = wasLocked && status !== undefined && String(status).toLowerCase() !== "locked";
-    const refNote = unlocking ? await referrerNote(userDoc.data()) : "";
+    const refNote = unlocking ? await referrerNote(userDoc.id) : "";
     createAuditLog({
       action: "update",
       description: `Updated account for ${name}${status !== undefined ? ` (status: ${status})` : ""}${isFlagged ? " — flagged" : ""}${refNote}.`,

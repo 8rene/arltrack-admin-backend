@@ -146,7 +146,7 @@ const USER_ID_LINKS = [
   ["bookingArchives", "userID"], ["refundArchives", "userID"], ["penaltyArchives", "userID"],
   ["reviewsArchives", "userID"], ["transactionLogArchives", "userID"],
   ["sessionLogArchives", "userID"], ["userLogArchives", "userID"], ["auditLogsArchives", "userID"],
-  ["user", "referredBy"],
+  ["referrals", "referrerUserID"], ["referrals", "referredUserID"],
 ];
 
 // Profile docs: the new account already has its own from signup, so those win.
@@ -205,7 +205,7 @@ export const mergeUserArchive = async (userArchivesId, targetUserID, mergedBy = 
     const snap = await db.collection(col).where(field, "==", oldUID).get();
     if (snap.empty) continue;
     counts[`${col}.${field}`] = snap.size;
-    if (col === "user" && field === "referredBy") referralsMoved = snap.size;
+    if (col === "referrals" && field === "referrerUserID") referralsMoved = snap.size;
     await commitInChunks(snap.docs.map((d) => (b) => b.update(d.ref, { [field]: targetUserID })));
   }
 
@@ -225,12 +225,12 @@ export const mergeUserArchive = async (userArchivesId, targetUserID, mergedBy = 
     }
   }
 
-  // 3. Stamp the surviving account, carry over referral counts, drop the archive record.
+  // 3. Stamp the surviving account and drop the archive record. (Referrals need no
+  // separate counter — they were re-pointed above and are counted from the table.)
   await targetRef.update({
     mergedFromUserIDs: admin.firestore.FieldValue.arrayUnion(oldUID),
     mergedAt: admin.firestore.FieldValue.serverTimestamp(),
     mergedBy,
-    ...(referralsMoved ? { referralCount: admin.firestore.FieldValue.increment(referralsMoved) } : {}),
   });
   await archiveRef.delete();
 
