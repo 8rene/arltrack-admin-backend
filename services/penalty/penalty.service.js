@@ -10,6 +10,8 @@ import { createNotification, notifyStaff } from "../notification/notification.se
 import { getSystemSettings } from "../systemSettings/systemSettings.service.js";
 import { getSessionByBookingID } from "../booking/bookingSession.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
+import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
+import { buildPenaltyPaymentEntry } from "../paymentEntries/paymentEntries.mapper.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
@@ -518,6 +520,8 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
   let remaining = amount;
   const batch = db.batch();
   const touched = [];
+  // One payment can cover several penalties: every row it creates shares this groupID.
+  const groupID = db.collection(ENTRY_COLLECTION).doc().id;
 
   for (const p of ordered) {
     if (remaining <= 0) break;
@@ -531,6 +535,15 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
       referenceNumber,
       paidAt: timestamp(),
       updatedAt: timestamp(),
+    });
+    // The same money as one paymentEntries row per penalty it covered, committed in the same batch.
+    const entryRef = db.collection(ENTRY_COLLECTION).doc();
+    batch.set(entryRef, {
+      paymentEntryID: entryRef.id,
+      ...buildPenaltyPaymentEntry({
+        penalty: { ...p, userID: p.userID || userID }, penaltyID: p.penaltyID,
+        amount: apply, method, referenceNumber, processedBy: performedBy, groupID,
+      }),
     });
   }
   await batch.commit();

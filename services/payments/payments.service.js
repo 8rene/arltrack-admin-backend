@@ -5,6 +5,7 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
 import { upsertTransaction } from "./paymentTransactions.js";
+import { syncPaymentEntries } from "../paymentEntries/paymentEntries.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
@@ -428,6 +429,9 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
   });
 
+  // Mirror into paymentEntries (re-derived from the document; never throws, never blocks the payment).
+  await syncPaymentEntries(doc.id);
+
   createTransactionLog({
     bookingID,
     paymentID: data.paymentID || doc.id,
@@ -527,6 +531,9 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     }),
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
   });
+
+  // Mirror into paymentEntries (re-derived from the document; never throws, never blocks the payment).
+  await syncPaymentEntries(doc.id);
 
   createTransactionLog({
     bookingID,
@@ -644,6 +651,17 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     throw new Error(
       "A refund request is already open for this payment. " +
       "Resolve or cancel that refund request before applying a new discount."
+    );
+  }
+
+  // A balance checkout is open on PayMongo for this booking. PayMongo fixes the amount when the
+  // session is created, so a discount applied now could never reach what the customer is charged
+  // (they would pay the old amount and the difference would come back as a hand-back).
+  // Let it finish -- paid, failed or cancelled -- then apply the discount.
+  if (String(existing.balanceStatus || "").toLowerCase() === "pending") {
+    throw new Error(
+      "A balance payment is in progress on PayMongo for this booking. " +
+      "Wait for it to finish (or fail) before applying a discount, so the customer is charged the right amount."
     );
   }
 
@@ -937,6 +955,9 @@ export const updatePaymentStatus = async (id, status, performedBy = null) => {
     }, { force: true }),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
+
+  // A deliberate manual change by staff may move an entry out of "success" (a late webhook may not).
+  await syncPaymentEntries(id, { force: true });
 
   // Manually approving a payment means staff have the money. Bookings now start at
   // "to pay", so without this the booking would stay there and be auto-cancelled

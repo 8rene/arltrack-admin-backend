@@ -4,6 +4,7 @@ import { findLinkedBookingSessionArchive } from "./bookingSessionArchives.servic
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { getAssignmentRefsForBooking } from "../driverAssignments/driverAssignments.service.js";
 import { getRequestRefsForBooking } from "../cancellationRequests/cancellationRequests.service.js";
+import { getEntryRefsForBooking } from "../paymentEntries/paymentEntries.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -282,6 +283,9 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   // place they are cleaned up.
   const assignmentRefs     = await getAssignmentRefsForBooking(bookingID);
   const requestRefs        = await getRequestRefsForBooking(bookingID);
+  // paymentEntries rows are not archived either (live, keyed by bookingID / paymentID), so a restore
+  // reconnects the money history. This permanent delete is the only place they are cleaned up.
+  const entryRefs          = await getEntryRefsForBooking(bookingID);
 
   // Delete all in batch
   const batch = db.batch();
@@ -301,6 +305,7 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   }
   for (const ref of assignmentRefs) batch.delete(ref);
   for (const ref of requestRefs)    batch.delete(ref);
+  for (const ref of entryRefs)      batch.delete(ref);
 
   await batch.commit();
 
@@ -311,5 +316,6 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
     deletedInspectionDocs: inspectionDocs.length,
     deletedAssignments:    assignmentRefs.length,
     deletedCancellationRequests: requestRefs.length,
+    deletedPaymentEntries: entryRefs.length,
   };
 };
