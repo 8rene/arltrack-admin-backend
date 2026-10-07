@@ -14,6 +14,7 @@ import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model
 const svc = makeEntriesDb(db);
 
 export const syncPaymentEntries       = svc.syncPaymentEntries;
+export const syncRefundEntries        = svc.syncRefundEntries;
 export const getEntriesForPaymentIDs  = svc.getEntriesForPaymentIDs;
 export const getEntriesForPenaltyIDs  = svc.getEntriesForPenaltyIDs;
 export const hydratePayments          = svc.hydratePayments;

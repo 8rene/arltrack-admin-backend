@@ -5,6 +5,7 @@ import { ROLE_IDS } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { computeRefundPlan, getRefundPolicy, resolvePickupAt, getDepositAmount } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
+import { syncRefundEntries } from "../paymentEntries/paymentEntries.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
@@ -420,6 +421,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
+        await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
         auditSafe({
           action: "update",
           description: `Refund ${refundRequestID}: the ${part.kind} refund failed at PayMongo (${e.message}) AFTER ${parts.length} earlier part(s) had already been refunded — needs manual follow-up.`,
@@ -459,6 +461,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       customerNotified: false, // flipped to true below, only once the customer has actually been notified
       approvalLockedAt: null,
     });
+    await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
 
     // Tell the customer straight away — BEFORE the deposit update and the booking
     // cancel below. The PayMongo refund has already gone out, so a failure in those
@@ -953,6 +956,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
+        await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
         auditSafe({
           action: "update",
           description: `Staff refund ${refundRequestID}: the ${part.kind} refund failed at PayMongo (${e.message}) AFTER ${parts.length} earlier part(s) had already been refunded — needs manual follow-up.`,
@@ -985,6 +989,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       updatedAt: now,
       approvalLockedAt: null,
     });
+    await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
     approvedSaved = true;
 
     // Discount spillover is folded into this refund now, so
@@ -1041,6 +1046,8 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     t.update(reqRef, { manualRefund, updatedAt: now, ...(finalize ? { status: "Refunded" } : {}) });
     return { request: { ...r, manualRefund, status: finalize ? "Refunded" : r.status }, finalize };
   });
+
+  await syncRefundEntries(refundRequestID); // the hand-back becomes a successful "out" row
 
   const r = outcome.request;
 
