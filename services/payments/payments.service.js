@@ -380,6 +380,18 @@ const promoteBookingIfToPay = async (bookingID) => {
 // This lets Car Tracking / My Trips confirm cash on the spot instead of
 // requiring a trip to the Payments page just to click Approve.
 // ─────────────────────────────────────────────
+// Records a staff action in paymentEntries. WHO took the money, WHEN and HOW (confirmedBy / confirmedAt,
+// balanceMethod / balanceCollectedBy / balanceCollectedAt) are written to the entry row only -- no longer
+// onto the payment document, which keeps just the status and amounts. If the row can't be written, the
+// values are put on the document the old way instead, so that information is never lost.
+const recordInEntries = async (docRef, docID, fields) => {
+  const r = await syncPaymentEntries(docID, { fields });
+  if (r.error || !r.written) {
+    console.error(`[PAYMENTS] entry for ${docID} not written (${r.error || "nothing derived"}); keeping ${Object.keys(fields).join(", ")} on the document.`);
+    await docRef.update(fields);
+  }
+};
+
 export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMethod) => {
   if (!bookingID) throw new Error("bookingID is required.");
   assertValidPaymentMethod(paymentMethod);
@@ -415,8 +427,6 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     // safe (unlike the balance case below) since this IS the payment the
     // method describes, not a second one layered on top of an earlier one.
     paymentMethod,
-    confirmedBy:   confirmedBy || "—",
-    confirmedAt:   admin.firestore.FieldValue.serverTimestamp(),
     // The same fact as one transaction entry (in person — no PayMongo ref).
     paymongoTransactions: upsertTransaction(data, "deposit", {
       amount:  depositReceived,
@@ -429,8 +439,8 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Mirror into paymentEntries (re-derived from the document; never throws, never blocks the payment).
-  await syncPaymentEntries(doc.id);
+  // Write the deposit row: who confirmed it and when go to the entry, not the payment document.
+  await recordInEntries(doc.ref, doc.id, { confirmedBy: confirmedBy || "—", confirmedAt: new Date() });
 
   createTransactionLog({
     bookingID,
@@ -517,10 +527,7 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     // How it was paid + how much — previously only in the transaction log, so the
     // Payments page couldn't show it and a later refund couldn't know which part
     // was cash that PayMongo can't return.
-    balanceMethod:          paymentMethod,
     balanceCollectedAmount: balance,
-    balanceCollectedAt: admin.firestore.FieldValue.serverTimestamp(),
-    balanceCollectedBy: collectedBy || "—",
     paymongoTransactions: upsertTransaction(data, "balance", {
       amount:  balance,
       channel: paymentMethod,
@@ -532,8 +539,8 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Mirror into paymentEntries (re-derived from the document; never throws, never blocks the payment).
-  await syncPaymentEntries(doc.id);
+  // Write the balance row: how it was paid, by whom and when go to the entry, not the payment document.
+  await recordInEntries(doc.ref, doc.id, { balanceMethod: paymentMethod, balanceCollectedBy: collectedBy || "—", balanceCollectedAt: new Date() });
 
   createTransactionLog({
     bookingID,

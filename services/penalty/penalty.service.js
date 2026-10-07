@@ -405,8 +405,9 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       penaltyUpdates.push({
         ref: p.ref,
         paidAmount: newPaidAmount,
-        paymentMethod: fromDeposit === owed ? "Deposit" : (fromDeposit > 0 ? "DepositPartial" : p.data.paymentMethod || ""),
-        paidAt: fromDeposit > 0 ? timestamp() : (p.data.paidAt || null),
+        // Only when the deposit actually paid something is the method / date set (no entry row exists for a deposit
+        // offset). Otherwise the penalty's method / date are left exactly as they are, not rewritten with blanks.
+        depositPaid: fromDeposit > 0 ? { paymentMethod: fromDeposit === owed ? "Deposit" : "DepositPartial", paidAt: timestamp() } : null,
         stillOwed: owed - fromDeposit,
       });
     }
@@ -417,8 +418,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     penaltyUpdates.forEach((u) => {
       tx.update(u.ref, {
         paidAmount: u.paidAmount,
-        paymentMethod: u.paymentMethod,
-        paidAt: u.paidAt,
+        ...(u.depositPaid || {}),
         updatedAt: timestamp(),
       });
     });
@@ -539,12 +539,10 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
     touched.push(p);
     batch.update(db.collection("penalties").doc(p.penaltyID), {
       paidAmount: (p.paidAmount || 0) + apply,
-      paymentMethod: method,
-      referenceNumber,
-      paidAt: timestamp(),
       updatedAt: timestamp(),
     });
-    // The same money as one paymentEntries row per penalty it covered, committed in the same batch.
+    // How / ref / when it was paid live ONLY on the paymentEntries row (one per penalty covered, same batch):
+    // the penalty keeps just paidAmount. Readers get the method, reference and date back through hydratePenalties.
     const entryRef = db.collection(ENTRY_COLLECTION).doc();
     batch.set(entryRef, {
       paymentEntryID: entryRef.id,

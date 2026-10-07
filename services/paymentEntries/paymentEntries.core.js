@@ -28,6 +28,9 @@ const makeEntriesDb = (db) => {
    * Re-derives and writes the deposit / balance entries of ONE payment.
    *   opts.force  a deliberate manual change by staff (e.g. Approved -> Rejected) may
    *               downgrade a "success" row; a late webhook may not.
+   *   opts.fields values of the moved fields (confirmedBy, confirmedAt, balanceMethod, balanceCollectedBy,
+   *               balanceCollectedAt ...) that the writer did NOT put on the payment document: they are laid over
+   *               the document before the rows are derived, so the row is written directly with them.
    * NEVER throws -- a failure here must not block a real payment. Returns { written }.
    */
   const syncPaymentEntries = async (paymentDocID, opts = {}) => {
@@ -45,7 +48,8 @@ const makeEntriesDb = (db) => {
       const refs = ["deposit", "balance"].map((ph) => col().doc(entryIDFor(paymentID, ph)));
       const existing = await db.getAll(...refs);
       const priorRows = existing.filter((x) => x.exists).map((x) => x.data());
-      const { entries } = buildPaymentEntries(hydratePayment(data, priorRows), snap.id);
+      const source = opts.fields ? { ...data, ...opts.fields } : data;
+      const { entries } = buildPaymentEntries(hydratePayment(source, priorRows), snap.id);
       if (!entries.length) return { written: 0 };
 
       const refOf = new Map(refs.map((r, i) => [r.id, i]));
