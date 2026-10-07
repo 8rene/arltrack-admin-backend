@@ -22,4 +22,9 @@ export const CancellationRequest = {
   processedAt:  null,
   rejectReason: null,
   migratedFrom: null, // "booking.cancellationRequest*" -- only set by the migration script
+  type:         "request", // "request" = customer asked to end an ongoing trip | "direct" = booking cancelled outright
+  cancelledBy:  null,      // direct rows: "customer" | "staff" | "admin" | "system" | "refund" | "unknown"
 };
+// A direct row is written with status "approved" at the moment the booking is
+// cancelled (doc ID = the booking key); its `reason` is why the booking was
+// cancelled. This replaces bookings.cancellationReason.

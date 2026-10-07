@@ -43,6 +43,8 @@ export const presentRequest = (doc) => {
     processedBy:  d.processedBy || null,
     processedAt:  toIso(d.processedAt),
     rejectReason: d.rejectReason || null,
+    type:         d.type || "request",       // "request" (customer asked mid-trip) | "direct" (cancelled outright)
+    cancelledBy:  d.cancelledBy || null,     // direct rows only: customer | staff | admin | system | refund | unknown
   };
 };
 
@@ -86,9 +88,9 @@ export const getRequestsByBookingKeys = async (bookingKeys) => {
 };
 
 /**
- * Map<bookingKey, presentedRequest[]> (newest first) for EVERY request. Volume is
- * tiny (only ongoing trips can request), so one whole-collection read is cheaper
- * than chunked "in" queries for the Bookings list.
+ * Map<bookingKey, presentedRequest[]> (newest first) for EVERY row (requests AND
+ * direct cancellations). One row per cancelled booking at most, so this stays small
+ * at current volume; switch to chunked "in" queries if the collection grows large.
  */
 export const getAllRequestsMap = async () => {
   const snap = await db.collection(COL).get();
@@ -123,4 +125,48 @@ export const getRequestRefsForBooking = async (bookingKey) => {
   if (!bookingKey) return [];
   const snap = await db.collection(COL).where("bookingID", "==", bookingKey).get();
   return snap.docs.map((d) => d.ref);
+};
+
+// -- Direct cancellations ---------------------------------------------------
+// Every cancellation reason now lives here (type "direct", status "approved"),
+// not on the booking. A customer request that staff approve keeps its own row
+// (type "request") and its reason, so approving one adds no second row.
+
+/** Who cancelled, guessed from the reason text. Only used for the migration and for staff/admin/refund writers. */
+export const inferCancelledBy = (reason) => {
+  const r = String(reason || "");
+  if (r.startsWith("Cancelled by staff:")) return "staff";
+  if (r.startsWith("Cancelled by admin:")) return "admin";
+  if (r.startsWith("Auto-cancelled")) return "system";
+  if (r.startsWith("Cancelled: refund")) return "refund";
+  if (r === "Cancelled by user.") return "customer";
+  return "unknown";
+};
+
+/** Writes the cancellation row for a booking that was cancelled outright. Pass a batch to commit it with the booking update. */
+export const recordDirectCancellation = (bookingKey, { userID = null, reason = "", cancelledBy = "unknown", processedBy = null } = {}, batch = null) => {
+  if (!bookingKey) return null;
+  const ref = db.collection(COL).doc(String(bookingKey));
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  const data = {
+    cancellationRequestID: ref.id,
+    type: "direct",
+    bookingID: bookingKey,
+    userID,
+    reason: reason || "",
+    status: REQUEST_STATUS.APPROVED,
+    cancelledBy,
+    requestedAt: now,
+    processedBy,
+    processedAt: now,
+    rejectReason: null,
+  };
+  if (batch) { batch.set(ref, data); return null; }
+  return ref.set(data);
+};
+
+/** Set of bookingKeys that staff cancelled through the refund/fleet flow. */
+export const getStaffCancelledBookingKeys = async () => {
+  const snap = await db.collection(COL).where("cancelledBy", "==", "staff").get();
+  return new Set(snap.docs.map((d) => d.data().bookingID));
 };

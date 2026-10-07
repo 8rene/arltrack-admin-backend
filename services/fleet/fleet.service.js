@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { getBookingRefundPreview, getStaffRefundOutcome } from "../refundRequest/refundRequest.service.js";
+import { getStaffCancelledBookingKeys } from "../cancellationRequests/cancellationRequests.service.js";
 import { getPaymentDetailsByBookingID } from "../payments/payments.service.js";
 
 // ─────────────────────────────────────────────
@@ -248,8 +249,8 @@ const resolveCarLabel = async (carDocID) => {
 };
 
 // Bookings on this car that staff already cancelled through THIS flow
-// (tagged by the "Cancelled by staff: " prefix cancelBookingForRefund
-// writes into cancellationReason), scoped to today-or-later starts only —
+// (cancellationRequests rows with cancelledBy "staff"; the old "Cancelled by
+// staff: " prefix on the booking is still honoured until the migration), scoped to today-or-later starts only —
 // a booking from months ago that happened to get cancelled this way
 // shouldn't pile up here forever. Shown on the status-change screen after
 // a partial batch failure so staff see the full picture (what already
@@ -266,9 +267,10 @@ export const getResolvedBookingsForCar = async (carID) => {
     .where("status", "==", "cancelled")
     .get();
 
+  const staffKeys = await getStaffCancelledBookingKeys();
   const candidates = snap.docs
     .map((d) => ({ id: d.id, ...d.data() }))
-    .filter((b) => (b.cancellationReason || "").startsWith("Cancelled by staff:"))
+    .filter((b) => staffKeys.has(b.bookingID || b.id) || (b.cancellationReason || "").startsWith("Cancelled by staff:"))
     .filter((b) => {
       const start = toJsDate(b.startDateTime);
       return !start || start >= cutoff; // no date on record — don't hide it, show it

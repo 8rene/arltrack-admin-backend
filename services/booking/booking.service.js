@@ -285,10 +285,14 @@ export const getAllBookings = async (statusFilter) => {
     rejectReason: b.cancellationRejectReason || null,
   } : null;
   rows = rows.map((b) => {
-    const reqs    = requestMap.get(bookingKeyOf(b.id, b)) || [];
+    const all     = requestMap.get(bookingKeyOf(b.id, b)) || [];
+    const reqs    = all.filter((r) => r.type !== "direct");          // real customer requests only
     const latest  = reqs[0] || legacyRequestOf(b);
     const pending = reqs.some((r) => r.status === REQUEST_STATUS.PENDING) || b.cancellationRequestStatus === "pending";
-    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs };
+    // Why the booking was cancelled: the direct-cancellation row, else the approved
+    // request's reason, else the old field on the booking (until the migration has run).
+    const reasonRow = all.find((r) => r.type === "direct") || all.find((r) => r.status === REQUEST_STATUS.APPROVED && r.reason);
+    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs, cancellationReason: reasonRow?.reason || b.cancellationReason || "" };
     return pending && (b.status || "").toLowerCase() !== "cancelled"
       ? { ...out, actualStatus: b.status, status: "cancellation_request" }
       : out;
@@ -1066,13 +1070,12 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
   const now = new Date();
   if (request) {
     // One batch: the request is marked approved and the booking cancelled together.
-    // The customer's own words become the booking's cancellationReason, so every
-    // cancelled booking shows one reason whichever path cancelled it.
+    // The customer's own words stay on the request row; the booking list reads
+    // the cancellation reason from there, so nothing is copied onto the booking.
     const batch = db.batch();
     resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, batch);
     batch.update(bookingRef, {
       status: "cancelled",
-      ...(request.reason ? { cancellationReason: request.reason } : {}),
       ...dropLegacyCancellationFields(),
       updatedAt: now,
     });

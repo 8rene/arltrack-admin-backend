@@ -25,7 +25,7 @@ export const Booking = {
   // driverAssignedBy used to live here.)
   //
   // Likewise a customer's request to cancel an ongoing trip is a row in
-  // cancellationRequests, not fields on the booking. cancellationReason stays
-  // here: it records why the booking ended up cancelled, whichever path was used.
-  cancellationReason: null,
+  // cancellationRequests, not fields on the booking. The reason a booking was
+  // cancelled is a row there too (type "direct"); cancellationReason is no
+  // longer stored here. (The booking list still returns it, read from that row.)
 };

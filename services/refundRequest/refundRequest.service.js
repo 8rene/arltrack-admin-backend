@@ -8,6 +8,7 @@ import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.ser
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
+import { recordDirectCancellation, inferCancelledBy } from "../cancellationRequests/cancellationRequests.service.js";
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -246,7 +247,7 @@ const createPaymongoRefund = async ({ paymongoPaymentID, amount, reason }) => {
 // started ("to pay"/"upcoming"): an ongoing/completed trip is never silently
 // cancelled by a refund. Same two writes the admin's own cancel does (status +
 // bookingSession). Returns { cancelled, driverID }.
-const cancelBookingForRefund = async (bookingID, reason) => {
+const cancelBookingForRefund = async (bookingID, reason, processedBy = null) => {
   if (!bookingID) return { cancelled: false, driverID: null };
   let ref = db.collection("bookings").doc(bookingID);
   let snap = await ref.get();
@@ -259,7 +260,11 @@ const cancelBookingForRefund = async (bookingID, reason) => {
   if (!["to pay", "upcoming"].includes(lower(b.status))) {
     return { cancelled: false, driverID: await resolveCurrentDriverID(b, snap.id), status: b.status };
   }
-  await ref.update({ status: "cancelled", cancellationReason: reason, updatedAt: new Date() });
+  // The reason lives in cancellationRequests (type "direct"), not on the booking.
+  const cancelBatch = db.batch();
+  cancelBatch.update(ref, { status: "cancelled", updatedAt: new Date() });
+  recordDirectCancellation(b.bookingID || snap.id, { userID: b.userID || null, reason, cancelledBy: inferCancelledBy(reason), processedBy }, cancelBatch);
+  await cancelBatch.commit();
   try {
     const session = await getSessionByBookingID(bookingID);
     if (session) await markSessionCancelled(session.ref.id);
@@ -477,7 +482,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // Decision: the booking is cancelled at APPROVAL. Staff have decided this trip
     // isn't happening, so the car is released straight away; a PayMongo hiccup is
     // a technical retry, not a reason to keep the trip alive.
-    const cancel = await cancelBookingForRefund(refundRequest.bookingID, cancelReason || "Cancelled: refund approved.");
+    const cancel = await cancelBookingForRefund(refundRequest.bookingID, cancelReason || "Cancelled: refund approved.", adminUserID);
 
     // A driver already assigned to this booking shouldn't find out secondhand.
     if (cancel.cancelled && cancel.driverID && !skipDriverNotify) {
@@ -556,7 +561,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     updatedAt: now,
   });
 
-  const cancel = await cancelBookingForRefund(bookingID, `Cancelled by staff: ${reason}`);
+  const cancel = await cancelBookingForRefund(bookingID, `Cancelled by staff: ${reason}`, staffUserID);
 
   await notifyCustomer(
     userID, bookingID, "booking_cancelled", "Booking Cancelled",
@@ -670,7 +675,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
 const finishStaffRefund = async (r) => {
   let cancel;
   try {
-    cancel = await cancelBookingForRefund(r.bookingID, `Cancelled by staff: ${r.reason}`);
+    cancel = await cancelBookingForRefund(r.bookingID, `Cancelled by staff: ${r.reason}`, r.processedBy || null);
   } catch (e) {
     throw fail(`The refund for ${r.bookingID} went through, but cancelling the booking failed: ${e.message}. Retry to finish — the refund will NOT be sent again.`, 502);
   }
@@ -819,7 +824,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     // Already "Approved" but the booking is still upcoming → the refund itself
     // went through earlier and only the cancel is missing. Finish just that;
     // never refund again.
-    const cancel = await cancelBookingForRefund(bookingID, cancelReason);
+    const cancel = await cancelBookingForRefund(bookingID, cancelReason, staffUserID);
     auditSafe({
       action: "update",
       description: `Booking ${bookingID} cancelled — its customer refund request ${openCustomerRequest.id} was already approved. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`,
@@ -1296,7 +1301,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
     if (lower(payment.status) !== "refunded") retained = computeRefundPlan(payment).total;
   }
 
-  const cancel = await cancelBookingForRefund(bookingID, `Cancelled by admin: ${cleanReason}`);
+  const cancel = await cancelBookingForRefund(bookingID, `Cancelled by admin: ${cleanReason}`, adminUserID);
   if (!cancel.cancelled) throw fail(`Booking could not be cancelled (status is "${cancel.status || booking.status}").`, 409);
 
   await notifyCustomer(
