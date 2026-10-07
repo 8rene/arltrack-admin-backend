@@ -9,6 +9,7 @@ import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createNotification, notifyStaff } from "../notification/notification.service.js";
 import { getSystemSettings } from "../systemSettings/systemSettings.service.js";
 import { getSessionByBookingID } from "../booking/bookingSession.service.js";
+import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
@@ -65,7 +66,8 @@ const getPaymentByBookingID = async (bookingID) => {
 export const isBookingAssignedTo = async (bookingID, uid) => {
   if (!bookingID || !uid) return false;
   const booking = await getBookingDoc(bookingID);
-  return !!booking && booking.data.driverID === uid;
+  if (!booking) return false;
+  return (await resolveCurrentDriverID(booking.data, bookingID)) === uid;
 };
 
 // ─────────────────────────────────────────────

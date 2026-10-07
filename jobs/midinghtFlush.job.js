@@ -5,14 +5,15 @@
 //  overwriting the previous night's file.
 //
 //  The trail is read from Google Sheets (one tab per PHT date — see
-//  services/sheets/sheets.service.js via flushBookingHistory in bookingSession.service.js), NOT
+//  services/sheets/sheets.service.js via flushBookingHistory in booking.service.js), NOT
 //  from a Firestore archive sub-collection. A failed flush just means that
 //  session's Storage copy is stale until the next successful run. One
 //  session's failure is still isolated so it can't stop the rest of the
 //  fleet from being flushed.
 // ================================
 
-import { getAllActiveSessions, flushBookingHistory } from "../services/booking/bookingSession.service.js";
+import { getAllActiveSessions } from "../services/booking/bookingSession.service.js";
+import { flushBookingHistory } from "../services/booking/booking.service.js";
 import { db } from "../config/firebaseConnection/firebase.js";
 import { createNotification, notifyStaff, resolveNotification } from "../services/notification/notification.service.js";
 import { sendLicenseExpiryEmail } from "../services/email/email.service.js";

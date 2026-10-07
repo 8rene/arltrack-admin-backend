@@ -5,6 +5,7 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
 import { upsertTransaction } from "./paymentTransactions.js";
+import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
 // in refundRequest.service.js. No-ops quietly if there's no userID on the
@@ -599,7 +600,8 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   // customer's userID (see resolveCustomerUserID).
   const booking = await findBookingByBookingID(bookingID);
   const isChauffeur = booking?.modeOfDriving === "With Chauffeur";
-  const driverID = booking?.driverID || null;
+  // The current driver lives in driverAssignments now (legacy booking.driverID is the fallback).
+  const driverID = booking ? await resolveCurrentDriverID(booking, bookingID) : null;
 
   // A chauffeur trip needs a driver on record before a discount can be
   // applied — the driver is one of the people who gets notified about the

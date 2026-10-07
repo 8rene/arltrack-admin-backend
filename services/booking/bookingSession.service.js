@@ -9,17 +9,12 @@
 //   getSessionById / getSessionByBookingID        — direct + FK lookups
 //   markSessionActive / markSessionEnded / markSessionStolen — status writes,
 //     called from wherever pickup / return / stolen actually happen
-//   recordArchiveFlush — called by flushBookingHistory (bottom of this file)
-//     after a successful Storage upload
-//   flushBookingHistory — compiles a session's GPS trail from Google Sheets
-//     into one JSON file in Firebase Storage; called at pickup / return /
-//     stolen and by the nightly flush job
+//   recordArchiveFlush — called by flushBookingHistory (now in
+//     booking.service.js) after a successful Storage upload
 
 import { db, bucket } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { toDate, sessionStartedAt, queryRecentByStart } from "../../utils/date/sessionDates.js";
-import { fetchSessionRows } from "../sheets/sheets.service.js";
-import { datesBetweenPHT } from "../../utils/date/phtDate.js";
+import { sessionStartedAt, queryRecentByStart } from "../../utils/date/sessionDates.js";
 
 const SESSIONS = () => db.collection("bookingSessions");
 
@@ -254,73 +249,4 @@ export const getArchivePointCount = async ({ ref, data }) => {
     console.warn(`[BookingSession] couldn't count points for ${data.bookingSessionID}:`, e.message);
     return null;
   }
-};
-
-// ─────────────────────────────────────────────
-// History flush
-//
-// Compiles a session's full GPS trail into one permanent JSON file in
-// Firebase Storage under bookingHistory/. The trail is read from Google
-// Sheets (one tab per PHT date, shared by every car — see
-// services/sheets/sheets.service.js) across every PHT date the session
-// spans; it no longer comes from a Firestore archive/{date} sub-collection.
-// (Used to live in services/storage/bookingHistory.service.js.)
-// ─────────────────────────────────────────────
-
-export const flushBookingHistory = async (bookingSessionID) => {
-  const session = await getSessionById(bookingSessionID);
-  if (!session) {
-    throw new Error(`Booking session not found: ${bookingSessionID}`);
-  }
-  const { data } = session;
-
-  // Start of the range = the REAL start of the trip (startedAt, stamped at
-  // pickup), not the booking's scheduled date — so an early pickup (a booking
-  // for Oct 23 handed over on Sep 28) reads the right Sheets date-tabs instead
-  // of coming back empty. For sessions from before startedAt existed we also
-  // look at droppedOffTime / lastArchivedAt / last ping and take the earliest
-  // known real moment. If nothing is known at all (never started), start = now,
-  // i.e. just today's tab.
-  const realMoments = [sessionStartedAt(data), toDate(data.droppedOffTime), toDate(data.lastArchivedAt), toDate(data.currentPosition?.date)]
-    .filter((d) => d && !isNaN(d.getTime()));
-  const pickup = realMoments.length
-    ? new Date(Math.min(...realMoments.map((d) => d.getTime())))
-    : new Date();
-  // Flushing always happens at or after the real event, and no ping can be
-  // dated in the future — so "now" is the true upper bound (no wasted reads of
-  // Sheets tabs that don't exist yet).
-  const end = new Date();
-  const dateStrings = datesBetweenPHT(pickup, end);
-
-  const rows = await fetchSessionRows(data.carID, bookingSessionID, dateStrings);
-  const fullTrail = rows
-    .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
-    .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at, speed: r.speed ?? 0, offline: r.offline === true }))
-    .sort((a, b) => new Date(a.at) - new Date(b.at));
-
-  const filePath = `bookingHistory/${bookingSessionID}.json`;
-  const file = bucket.file(filePath);
-
-  // Shape changed from a bare points array to an object carrying this trip's
-  // geofence zones + alert timeline (and coding-restriction alerts) alongside
-  // the trail, so History → Review can reconstruct breach state on playback
-  // instead of only showing the dots. Older archive files already in Storage
-  // stay as bare arrays — the frontend handles both shapes.
-  const archivePayload = {
-    points: fullTrail,
-    geofenceZones:  data.geofenceZones  || [],
-    geofenceAlerts: data.geofenceAlerts || [],
-    codingAlerts:   data.codingAlerts   || [],
-  };
-
-  await file.save(JSON.stringify(archivePayload, null, 2), {
-    contentType: "application/json",
-    metadata: { cacheControl: "no-cache" },
-  });
-  await file.makePublic();
-
-  const archiveUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
-  await recordArchiveFlush(bookingSessionID, archiveUrl);
-
-  return archiveUrl;
 };

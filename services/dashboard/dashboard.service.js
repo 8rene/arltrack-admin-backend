@@ -26,8 +26,17 @@ export const getActiveBookings = async () => {
 };
 
 export const getPendingBookings = async () => {
-  const snap = await db.collection("bookings").where("status", "==", "cancellation_request").get();
-  return snap.size;
+  // Pending cancellation requests (cancellationRequests table) plus any still on the
+  // old booking-document shape until the migration's cleanup phase has run.
+  const [pending, legacyStatus, legacyField] = await Promise.all([
+    db.collection("cancellationRequests").where("status", "==", "pending").get(),
+    db.collection("bookings").where("status", "==", "cancellation_request").get(),
+    db.collection("bookings").where("cancellationRequestStatus", "==", "pending").get(),
+  ]);
+  const keys = new Set(pending.docs.map((d) => d.data().bookingID));
+  legacyStatus.forEach((d) => keys.add(d.data().bookingID || d.id));
+  legacyField.forEach((d) => keys.add(d.data().bookingID || d.id));
+  return keys.size;
 };
 
 export const getRevenueToday = async () => {

@@ -1,13 +1,21 @@
-import { db } from "../../config/firebaseConnection/firebase.js";
+import { db, bucket } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { flushBookingHistory, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination } from "../../services/booking/bookingSession.service.js";
-import { sessionStartedAt } from "../../utils/date/sessionDates.js";
+import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination } from "../../services/booking/bookingSession.service.js";
+import { toDate, sessionStartedAt } from "../../utils/date/sessionDates.js";
+import { fetchSessionRows } from "../../services/sheets/sheets.service.js";
+import { datesBetweenPHT } from "../../utils/date/phtDate.js";
 import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { resolveInspectionReminders } from "../../services/inspectionReminders/inspectionReminders.service.js";
 import { computeAmounts, derivePaymentStage } from "../../services/payments/payments.service.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
+import {
+  bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
+} from "../../services/driverAssignments/driverAssignments.service.js";
+import {
+  REQUEST_STATUS, getPendingRequest, getAllPendingRequests, getAllRequestsMap, resolveRequest,
+} from "../../services/cancellationRequests/cancellationRequests.service.js";
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -157,7 +165,7 @@ const resolveServiceType = async (serviceTypeID) => {
 // bookingID → { hasHistory, bookingSessionID, lastArchivedAt } — powers the
 // "Trip History" row in the Bookings page's detail view, and the deep-link
 // into Car Tracking's History tab (see routes/booking/booking.routes.js
-// callers). hasHistory is true only once flushBookingHistory (bookingSession.service.js) has
+// callers). hasHistory is true only once flushBookingHistory (below) has
 // actually flushed a trail to Storage (archiveUrl set) — a session that
 // exists but never got flushed still reports false, same as "no session at
 // all", since either way there's nothing in History to show yet.
@@ -245,28 +253,55 @@ export const getAllBookings = async (statusFilter) => {
     );
     snaps.forEach(addSnap);
   } else if (filter === "cancellation_request") {
-    // Two shapes exist: the older one (status itself flipped to "cancellation_request")
-    // and the customer app's current one (status stays "ongoing", with
-    // cancellationRequestStatus: "pending" on the booking).
-    const [legacy, current] = await Promise.all([
+    // Pending requests live in the cancellationRequests collection now. The two
+    // older shapes (status itself flipped / cancellationRequestStatus on the
+    // booking) are still read until the migration's cleanup phase has run.
+    const [legacy, legacyField, pending] = await Promise.all([
       db.collection("bookings").where("status", "==", "cancellation_request").get(),
       db.collection("bookings").where("cancellationRequestStatus", "==", "pending").get(),
+      getAllPendingRequests(),
     ]);
-    addSnap(legacy); addSnap(current);
+    addSnap(legacy); addSnap(legacyField);
+    (await getBookingsByKeys([...new Set(pending.map((r) => r.bookingID))])).forEach((b) => {
+      if (seen.has(b.id)) return;
+      seen.add(b.id);
+      rows.push(b);
+    });
   } else {
     addSnap(await db.collection("bookings").where("status", "==", filter).get());
   }
 
-  // A booking with a pending cancellation request is PRESENTED as
+  // Every booking carries its cancellation request history (newest first) and
+  // the latest one as `cancellationRequest`, so the detail view can show WHY the
+  // customer asked. A booking with a PENDING request is still PRESENTED as
   // "cancellation_request" (the value the Bookings page already knows how to
-  // show and act on) while its real status is kept as actualStatus. Without this
-  // the customer's requests were invisible: the page looked for a status the
-  // customer app no longer sets.
-  rows = rows.map((b) =>
-    b.cancellationRequestStatus === "pending" && (b.status || "").toLowerCase() !== "cancelled"
-      ? { ...b, actualStatus: b.status, status: "cancellation_request" }
-      : b
-  );
+  // show and act on) while its real status is kept as actualStatus.
+  const requestMap = await getAllRequestsMap();
+  const legacyRequestOf = (b) => b.cancellationRequestStatus ? {
+    status:       b.cancellationRequestStatus,
+    reason:       b.cancellationRequestReason || "",
+    requestedAt:  b.cancellationRequestedAt?.toDate ? b.cancellationRequestedAt.toDate().toISOString() : null,
+    processedBy:  null, processedAt: null,
+    rejectReason: b.cancellationRejectReason || null,
+  } : null;
+  rows = rows.map((b) => {
+    const reqs    = requestMap.get(bookingKeyOf(b.id, b)) || [];
+    const latest  = reqs[0] || legacyRequestOf(b);
+    const pending = reqs.some((r) => r.status === REQUEST_STATUS.PENDING) || b.cancellationRequestStatus === "pending";
+    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs };
+    return pending && (b.status || "").toLowerCase() !== "cancelled"
+      ? { ...out, actualStatus: b.status, status: "cancellation_request" }
+      : out;
+  });
+  // Show WHO handled a request, not just a uid.
+  const staffIDs = [...new Set(rows.map((b) => b.cancellationRequest?.processedBy).filter(Boolean))];
+  if (staffIDs.length) {
+    const staffMap = Object.fromEntries(await Promise.all(staffIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))));
+    rows.forEach((b) => {
+      const pb = b.cancellationRequest?.processedBy;
+      if (pb) b.cancellationRequest = { ...b.cancellationRequest, processedByName: staffMap[pb]?.customerName || null };
+    });
+  }
   if (filter && filter !== "all") rows = rows.filter((b) => (b.status || "").toLowerCase() === filter);
 
   rows.sort((a, b) => {
@@ -274,6 +309,9 @@ export const getAllBookings = async (statusFilter) => {
     const tb = b.updatedAt?.toMillis?.() ?? 0;
     return tb - ta;
   });
+
+  // Current driver comes from driverAssignments now (see attachCurrentDrivers).
+  await attachCurrentDrivers(rows);
 
   // Bookings that have a refund request in flight → shown as "For Refund".
   const openRefundSnap = await db.collection("refundRequests").where("status", "in", ["Pending", "Approved"]).get();
@@ -766,6 +804,13 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
+  // -- Trip over -> close the driver's assignment row (best effort) --
+  if (["completed", "cancelled", "stolen"].includes(filtered.status)) {
+    completeActiveAssignment(bookingID || docID).catch((err) =>
+      console.error("[Booking] Failed to close driver assignment:", err.message)
+    );
+  }
+
   // ── Archive + auto-delete notification when booking moves out of pending/cancellation_request ──
   const newStatus = filtered.status;
   const activeStatuses = ["upcoming", "cancellation_request"];
@@ -963,7 +1008,7 @@ export const getReturnChecklist = async (docID) => {
     canReturn: items.every((i) => i.complete),
     canSettle: droppedOff && holdsDeposit,
     items,
-    driverID: booking.driverID || null,
+    driverID: await resolveCurrentDriverID(booking, docID),
     depositStatus: pos.depositStatus,
     depositHeld: pos.deposit?.amount ?? null,
     depositSettled: !!settlement,
@@ -988,9 +1033,24 @@ export const getReturnChecklist = async (docID) => {
 // same pattern as every other direct-write notification in this codebase.
 // ─────────────────────────────────────────────
 
-// True for either shape of a pending cancellation request — see getAllBookings.
-const hasPendingCancellationRequest = (booking) =>
-  booking.cancellationRequestStatus === "pending" || (booking.status || "").toLowerCase() === "cancellation_request";
+// The five fields the old design kept on the booking document. Removed whenever
+// a request is resolved through the new table, so nothing stale is left behind.
+const LEGACY_CANCELLATION_FIELDS = [
+  "cancellationRequestStatus", "cancellationRequestReason", "cancellationRequestedAt",
+  "cancellationRejectReason", "statusBeforeCancellationRequest",
+];
+const dropLegacyCancellationFields = () =>
+  Object.fromEntries(LEGACY_CANCELLATION_FIELDS.map((f) => [f, admin.firestore.FieldValue.delete()]));
+
+// A pending request is a row in cancellationRequests. The two older shapes
+// (status flipped / cancellationRequestStatus on the booking) are still honoured
+// until the migration's cleanup phase has run.
+const findPendingCancellation = async (docID, booking) => {
+  const request = await getPendingRequest(bookingKeyOf(docID, booking));
+  const legacy =
+    booking.cancellationRequestStatus === "pending" || (booking.status || "").toLowerCase() === "cancellation_request";
+  return { request, legacy, pending: !!request || legacy };
+};
 
 export const approveCancellationRequest = async (docID, performedBy = null) => {
   const bookingRef = db.collection("bookings").doc(docID);
@@ -998,20 +1058,37 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
   if (!bookingDoc.exists) throw new Error("Booking not found.");
   const booking = bookingDoc.data();
 
-  if (!hasPendingCancellationRequest(booking)) {
+  const { request, pending } = await findPendingCancellation(docID, booking);
+  if (!pending) {
     throw new Error(`Cannot approve: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
   }
 
   const now = new Date();
-  await bookingRef.update({
-    status: "cancelled",
-    cancellationRequestStatus: "approved",
-    statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
-    updatedAt: now,
-  });
+  if (request) {
+    // One batch: the request is marked approved and the booking cancelled together.
+    // The customer's own words become the booking's cancellationReason, so every
+    // cancelled booking shows one reason whichever path cancelled it.
+    const batch = db.batch();
+    resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, batch);
+    batch.update(bookingRef, {
+      status: "cancelled",
+      ...(request.reason ? { cancellationReason: request.reason } : {}),
+      ...dropLegacyCancellationFields(),
+      updatedAt: now,
+    });
+    await batch.commit();
+  } else {
+    // Legacy shape only -- exactly what this did before the table existed.
+    await bookingRef.update({
+      status: "cancelled",
+      cancellationRequestStatus: "approved",
+      statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
+      updatedAt: now,
+    });
+  }
 
   // Mirror onto the session doc, same as the customer's own instant-cancel
-  // path already does for "upcoming" bookings — this one is "ongoing", so
+  // path already does for "upcoming" bookings -- this one is "ongoing", so
   // there's a real active session to close out here.
   try {
     const bID = booking.bookingID || docID;
@@ -1023,8 +1100,12 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
     console.error("[BOOKINGS] approveCancellationRequest: failed to sync bookingSession:", err.message);
   }
 
+  completeActiveAssignment(booking.bookingID || docID, performedBy).catch((err) =>
+    console.error("[BOOKINGS] approveCancellationRequest: failed to close driver assignment:", err.message)
+  );
+
   // Resolves every Owner/Admin/Supervisor's own copy of this notification
-  // at once — see notification.service.js's resolveNotification() header
+  // at once -- see notification.service.js's resolveNotification() header
   // comment for why no userID filter is needed here.
   await resolveNotification("cancellation_request", docID).catch((err) =>
     console.error("[BOOKINGS] approveCancellationRequest: failed to resolve notification:", err.message)
@@ -1032,7 +1113,7 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
 
   auditSafe({
     action: "update",
-    description: `Cancellation request for booking ${booking.bookingID || docID} APPROVED — booking cancelled.`,
+    description: `Cancellation request for booking ${booking.bookingID || docID} APPROVED -- booking cancelled.`,
     userID: performedBy,
     bookingID: booking.bookingID || docID,
   });
@@ -1046,7 +1127,8 @@ export const rejectCancellationRequest = async (docID, rejectReason, performedBy
   if (!bookingDoc.exists) throw new Error("Booking not found.");
   const booking = bookingDoc.data();
 
-  if (!hasPendingCancellationRequest(booking)) {
+  const { request, pending } = await findPendingCancellation(docID, booking);
+  if (!pending) {
     throw new Error(`Cannot reject: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
   }
 
@@ -1057,15 +1139,22 @@ export const rejectCancellationRequest = async (docID, rejectReason, performedBy
   const revertTo = wasLegacy ? (booking.statusBeforeCancellationRequest || "ongoing") : booking.status;
 
   const now = new Date();
-  await bookingRef.update({
-    status: revertTo,
-    // "rejected" (not "pending") — the customer app only blocks a NEW request while
-    // one is "pending", so they can ask again if they need to.
-    cancellationRequestStatus: "rejected",
-    statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
-    cancellationRejectReason: rejectReason || "",
-    updatedAt: now,
-  });
+  if (request) {
+    const batch = db.batch();
+    resolveRequest(request, { status: REQUEST_STATUS.REJECTED, processedBy: performedBy, rejectReason }, batch);
+    batch.update(bookingRef, { status: revertTo, ...dropLegacyCancellationFields(), updatedAt: now });
+    await batch.commit();
+  } else {
+    await bookingRef.update({
+      status: revertTo,
+      // "rejected" (not "pending") -- the customer app only blocks a NEW request while
+      // one is "pending", so they can ask again if they need to.
+      cancellationRequestStatus: "rejected",
+      statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
+      cancellationRejectReason: rejectReason || "",
+      updatedAt: now,
+    });
+  }
 
   await resolveNotification("cancellation_request", docID).catch((err) =>
     console.error("[BOOKINGS] rejectCancellationRequest: failed to resolve notification:", err.message)
@@ -1079,4 +1168,74 @@ export const rejectCancellationRequest = async (docID, rejectReason, performedBy
   });
 
   return { id: docID, status: revertTo };
+};
+
+// ─────────────────────────────────────────────
+// History flush
+//
+// Compiles a session's full GPS trail into one permanent JSON file in
+// Firebase Storage under bookingHistory/. The trail is read from Google
+// Sheets (one tab per PHT date, shared by every car — see
+// services/sheets/sheets.service.js) across every PHT date the session
+// spans; it no longer comes from a Firestore archive/{date} sub-collection.
+// (Lived in services/storage/bookingHistory.service.js, then bookingSession.service.js;
+// now here so booking.service.js owns the whole booking → history flow.)
+// ─────────────────────────────────────────────
+
+export const flushBookingHistory = async (bookingSessionID) => {
+  const session = await getSessionById(bookingSessionID);
+  if (!session) {
+    throw new Error(`Booking session not found: ${bookingSessionID}`);
+  }
+  const { data } = session;
+
+  // Start of the range = the REAL start of the trip (startedAt, stamped at
+  // pickup), not the booking's scheduled date — so an early pickup (a booking
+  // for Oct 23 handed over on Sep 28) reads the right Sheets date-tabs instead
+  // of coming back empty. For sessions from before startedAt existed we also
+  // look at droppedOffTime / lastArchivedAt / last ping and take the earliest
+  // known real moment. If nothing is known at all (never started), start = now,
+  // i.e. just today's tab.
+  const realMoments = [sessionStartedAt(data), toDate(data.droppedOffTime), toDate(data.lastArchivedAt), toDate(data.currentPosition?.date)]
+    .filter((d) => d && !isNaN(d.getTime()));
+  const pickup = realMoments.length
+    ? new Date(Math.min(...realMoments.map((d) => d.getTime())))
+    : new Date();
+  // Flushing always happens at or after the real event, and no ping can be
+  // dated in the future — so "now" is the true upper bound (no wasted reads of
+  // Sheets tabs that don't exist yet).
+  const end = new Date();
+  const dateStrings = datesBetweenPHT(pickup, end);
+
+  const rows = await fetchSessionRows(data.carID, bookingSessionID, dateStrings);
+  const fullTrail = rows
+    .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
+    .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at, speed: r.speed ?? 0, offline: r.offline === true }))
+    .sort((a, b) => new Date(a.at) - new Date(b.at));
+
+  const filePath = `bookingHistory/${bookingSessionID}.json`;
+  const file = bucket.file(filePath);
+
+  // Shape changed from a bare points array to an object carrying this trip's
+  // geofence zones + alert timeline (and coding-restriction alerts) alongside
+  // the trail, so History → Review can reconstruct breach state on playback
+  // instead of only showing the dots. Older archive files already in Storage
+  // stay as bare arrays — the frontend handles both shapes.
+  const archivePayload = {
+    points: fullTrail,
+    geofenceZones:  data.geofenceZones  || [],
+    geofenceAlerts: data.geofenceAlerts || [],
+    codingAlerts:   data.codingAlerts   || [],
+  };
+
+  await file.save(JSON.stringify(archivePayload, null, 2), {
+    contentType: "application/json",
+    metadata: { cacheControl: "no-cache" },
+  });
+  await file.makePublic();
+
+  const archiveUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+  await recordArchiveFlush(bookingSessionID, archiveUrl);
+
+  return archiveUrl;
 };

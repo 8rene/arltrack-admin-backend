@@ -670,7 +670,7 @@ export const getCarTraceback = async (req, res) => {
  * GET /api/gps/:carId/history
  * Every archived (flushed-to-Storage) trip for one car, newest first.
  * Powers Car Tracking's History tab — a session only shows up here once
- * flushBookingHistory (bookingSession.service.js) has flushed it (archiveUrl gets set then), so a
+ * flushBookingHistory (booking.service.js) has flushed it (archiveUrl gets set then), so a
  * car with no completed/flushed trips yet returns an empty list, which the
  * frontend renders as "No GPS record."
  */

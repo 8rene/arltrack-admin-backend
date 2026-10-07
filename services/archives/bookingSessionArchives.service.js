@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { queryRecentByStart, sessionStartedAt } from "../../utils/date/sessionDates.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -31,22 +32,15 @@ export const getAllBookingSessionArchives = async () => {
 // alone would silently lose all geofence/alert/status context for that
 // date — see gps.controller.js's getCarTraceback). Same shape ({ ref, data })
 // as getSessionsByCar so callers don't need to branch on which one matched. ──
-export const getRecentSessionArchivesByCarUpTo = async (carID, endOfDate, limit = 4) => {
-  const snap = await db.collection("bookingSessionArchives")
-    .where("carID", "==", carID)
-    .where("pickupTime", "<=", admin.firestore.Timestamp.fromDate(endOfDate))
-    .orderBy("pickupTime", "desc")
-    .limit(limit)
-    .get();
-  return snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
-};
+export const getRecentSessionArchivesByCarUpTo = (carID, endOfDate, limit = 4) =>
+  queryRecentByStart(db.collection("bookingSessionArchives"), carID, endOfDate, limit);
 
 export const getSessionArchivesByCar = async (carID) => {
   const snap = await db.collection("bookingSessionArchives").where("carID", "==", carID).get();
   const sessions = snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
   sessions.sort((a, b) => {
-    const at = a.data.pickupTime?._seconds ?? a.data.pickupTime?.seconds ?? 0;
-    const bt = b.data.pickupTime?._seconds ?? b.data.pickupTime?.seconds ?? 0;
+    const at = sessionStartedAt(a.data)?.getTime() ?? 0;
+    const bt = sessionStartedAt(b.data)?.getTime() ?? 0;
     return bt - at;
   });
   return sessions;

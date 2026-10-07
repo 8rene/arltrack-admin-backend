@@ -7,6 +7,7 @@ import { computeRefundPlan, getRefundPolicy, resolvePickupAt, getDepositAmount }
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
+import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -256,7 +257,7 @@ const cancelBookingForRefund = async (bookingID, reason) => {
   }
   const b = snap.data();
   if (!["to pay", "upcoming"].includes(lower(b.status))) {
-    return { cancelled: false, driverID: b.driverID || null, status: b.status };
+    return { cancelled: false, driverID: await resolveCurrentDriverID(b, snap.id), status: b.status };
   }
   await ref.update({ status: "cancelled", cancellationReason: reason, updatedAt: new Date() });
   try {
@@ -265,7 +266,7 @@ const cancelBookingForRefund = async (bookingID, reason) => {
   } catch (err) {
     console.error("[REFUND] failed to sync bookingSession on cancel:", err.message);
   }
-  return { cancelled: true, driverID: b.driverID || null };
+  return { cancelled: true, driverID: await resolveCurrentDriverID(b, snap.id) };
 };
 
 // Resolves true only if the notification was actually written (or an identical
@@ -1144,8 +1145,8 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
   // find out secondhand.
   if (refundRequest.bookingID) {
     db.collection("bookings").doc(refundRequest.bookingID).get()
-      .then((bookingSnap) => {
-        const driverID = bookingSnap.exists ? bookingSnap.data().driverID : null;
+      .then(async (bookingSnap) => {
+        const driverID = bookingSnap.exists ? await resolveCurrentDriverID(bookingSnap.data(), bookingSnap.id) : null;
         if (!driverID) return;
         return createNotification({
           type: "refund_request",
@@ -1275,7 +1276,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
     });
     if (result.bookingCancelled) {
       await notifyAdminCancellation({
-        docID, bookingID, driverID: booking.driverID || null, customerUserID: booking.userID,
+        docID, bookingID, driverID: await resolveCurrentDriverID(booking, docID), customerUserID: booking.userID,
         reason: cleanReason, actorID: adminUserID, refundedAmount: result.amount || 0,
       });
     }
@@ -1307,7 +1308,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
     retained > 0 ? "No refund was issued for this cancellation." : ""
   );
   await notifyAdminCancellation({
-    docID, bookingID, driverID: booking.driverID || cancel.driverID || null, customerUserID: booking.userID,
+    docID, bookingID, driverID: (await resolveCurrentDriverID(booking, docID)) || cancel.driverID || null, customerUserID: booking.userID,
     reason: cleanReason, actorID: adminUserID, retainedAmount: retained,
   });
   auditSafe({
@@ -1362,7 +1363,7 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
 
   if (result.bookingCancelled) {
     await notifyAdminCancellation({
-      docID, bookingID, driverID: booking.driverID || null, customerUserID: booking.userID,
+      docID, bookingID, driverID: await resolveCurrentDriverID(booking, docID), customerUserID: booking.userID,
       reason: cleanReason, actorID: adminUserID, refundedAmount: result.amount || 0,
       retainedAmount: result.amount > 0 ? 0 : (result.depositForfeited || 0),
     });

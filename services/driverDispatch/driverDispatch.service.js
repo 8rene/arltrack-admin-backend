@@ -10,6 +10,10 @@ import { createNotification } from "../../services/notification/notification.ser
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createPenalty } from "../penalty/penalty.service.js";
 import { sessionStartedAt } from "../../utils/date/sessionDates.js";
+import {
+  ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID,
+  getAssignmentsForDriver, getBookingsByKeys, createAssignment, endActiveAssignment,
+} from "../driverAssignments/driverAssignments.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -197,6 +201,9 @@ export const getDispatchBoard = async () => {
     })
   );
 
+  // The current driver now lives in driverAssignments, not on the booking.
+  await attachCurrentDrivers(bookings);
+
   const carIDs  = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
 
@@ -259,27 +266,45 @@ export const getDispatchBoard = async () => {
 // booking whose window overlaps [startDateTime, endDateTime]?
 // Excludes the booking being assigned itself (for reassignment).
 // ─────────────────────────────────────────────
+// A driver's bookings (as { id, ...data }) in the given statuses. Comes from
+// driverAssignments; the old booking.driverID query is still unioned in until
+// the migration's cleanup phase has removed that field. The current assignment
+// always wins, so a booking reassigned to someone else drops out here.
+const getDriverBookings = async (driverID, statuses) => {
+  const [legacySnaps, assignments] = await Promise.all([
+    Promise.all(
+      statuses.map((s) =>
+        db.collection("bookings").where("driverID", "==", driverID).where("status", "==", s).get()
+      )
+    ),
+    getAssignmentsForDriver(driverID),
+  ]);
+
+  const byId = new Map();
+  legacySnaps.forEach((snap) => snap.forEach((doc) => byId.set(doc.id, { id: doc.id, ...doc.data() })));
+  (await getBookingsByKeys(assignments.map((a) => a.bookingID))).forEach((b) => {
+    if (statuses.includes(b.status)) byId.set(b.id, b);
+  });
+
+  const rows = [...byId.values()];
+  await attachCurrentDrivers(rows);
+  return rows.filter((b) => b.driverID === driverID);
+};
+
 const findDriverConflict = async (driverID, startDateTime, endDateTime, excludeBookingDocID) => {
-  const snaps = await Promise.all(
-    DISPATCHABLE_STATUSES.map((s) =>
-      db.collection("bookings").where("driverID", "==", driverID).where("status", "==", s).get()
-    )
-  );
+  const driverBookings = await getDriverBookings(driverID, DISPATCHABLE_STATUSES);
 
   const start = toJSDate(startDateTime);
   const end   = toJSDate(endDateTime);
   if (!start || !end) return null;
 
-  for (const snap of snaps) {
-    for (const doc of snap.docs) {
-      if (doc.id === excludeBookingDocID) continue;
-      const b = doc.data();
-      const bStart = toJSDate(b.startDateTime);
-      const bEnd   = toJSDate(b.endDateTime);
-      if (!bStart || !bEnd) continue;
-      if (start < bEnd && end > bStart) {
-        return { id: doc.id, bookingID: b.bookingID || doc.id, startDateTime: bStart, endDateTime: bEnd };
-      }
+  for (const b of driverBookings) {
+    if (b.id === excludeBookingDocID) continue;
+    const bStart = toJSDate(b.startDateTime);
+    const bEnd   = toJSDate(b.endDateTime);
+    if (!bStart || !bEnd) continue;
+    if (start < bEnd && end > bStart) {
+      return { id: b.id, bookingID: b.bookingID || b.id, startDateTime: bStart, endDateTime: bEnd };
     }
   }
   return null;
@@ -338,10 +363,14 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
     throw err;
   }
 
+  // The assignment is its own row now (closing any previous driver as
+  // "reassigned"). The three old fields on the booking are dropped so the
+  // table is the only source of truth.
+  await createAssignment({ bookingKey: bookingKeyOf(bookingDocID, booking), driverID, assignedBy });
   await bookingRef.update({
-    driverID,
-    driverAssignedAt: timestamp(),
-    driverAssignedBy: assignedBy || "admin",
+    driverID: admin.firestore.FieldValue.delete(),
+    driverAssignedAt: admin.firestore.FieldValue.delete(),
+    driverAssignedBy: admin.firestore.FieldValue.delete(),
     updatedAt: timestamp(),
   });
 
@@ -389,12 +418,16 @@ export const unassignDriver = async (bookingDocID, editedBy = null) => {
     throw new Error(`Cannot unassign a driver from a booking with status "${booking.status}".`);
   }
 
-  const previousDriverID = booking.driverID;
+  const ended = await endActiveAssignment(bookingKeyOf(bookingDocID, booking), {
+    status: ASSIGNMENT_STATUS.UNASSIGNED,
+    endedBy: editedBy,
+  });
+  const previousDriverID = ended?.driverID || booking.driverID || null;
 
   await bookingRef.update({
-    driverID: null,
-    driverAssignedAt: null,
-    driverAssignedBy: null,
+    driverID: admin.firestore.FieldValue.delete(),
+    driverAssignedAt: admin.firestore.FieldValue.delete(),
+    driverAssignedBy: admin.firestore.FieldValue.delete(),
     updatedAt: timestamp(),
   });
 
@@ -443,7 +476,8 @@ export const unassignDriver = async (bookingDocID, editedBy = null) => {
 const assertOwnsBooking = async (bookingDocID, driverID) => {
   const doc = await db.collection("bookings").doc(bookingDocID).get();
   if (!doc.exists) throw new Error("Booking not found.");
-  if (doc.data().driverID !== driverID) {
+  const currentDriverID = await resolveCurrentDriverID(doc.data(), doc.id);
+  if (currentDriverID !== driverID) {
     const err = new Error("This booking is not assigned to you.");
     err.status = 403;
     throw err;
@@ -455,14 +489,7 @@ const assertOwnsBooking = async (bookingDocID, driverID) => {
 export const getMyTrips = async (driverID) => {
   if (!driverID) throw new Error("driverID is required.");
 
-  const snaps = await Promise.all(
-    DISPATCHABLE_STATUSES.map((s) =>
-      db.collection("bookings").where("driverID", "==", driverID).where("status", "==", s).get()
-    )
-  );
-
-  let bookings = [];
-  snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
+  const bookings = await getDriverBookings(driverID, DISPATCHABLE_STATUSES);
 
   // withDocs: MyTrips needs to know whether staff have finished the
   // before/after vehicle inspection (photos + parts condition) so Start
@@ -475,14 +502,7 @@ export const getMyTrips = async (driverID) => {
 export const getMyTripHistory = async (driverID) => {
   if (!driverID) throw new Error("driverID is required.");
 
-  const snaps = await Promise.all(
-    ["completed", "cancelled", "stolen"].map((s) =>
-      db.collection("bookings").where("driverID", "==", driverID).where("status", "==", s).get()
-    )
-  );
-
-  let bookings = [];
-  snaps.forEach((snap) => snap.forEach((doc) => bookings.push({ id: doc.id, ...doc.data() })));
+  const bookings = await getDriverBookings(driverID, ["completed", "cancelled", "stolen"]);
 
   const shaped = await shapeTripsForDriver(bookings);
   return shaped.sort((a, b) => (b.startDateTime?.getTime() ?? 0) - (a.startDateTime?.getTime() ?? 0));

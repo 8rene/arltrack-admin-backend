@@ -9,7 +9,7 @@ export const Booking = {
   totalDays: 0,
   rentalFee: 0,
   serviceFee: 0,
-  status: "",         // "upcoming" | "ongoing" | "completed" | "cancelled" | "cancellation_request" | "stolen"
+  status: "",         // "upcoming" | "ongoing" | "completed" | "cancelled" | "cancellation_request" (shown while a request is pending) | "stolen"
   modeOfDriving: "",  // "With Chauffeur" | "Self Drive" — set at creation by the customer backend
   hasDevice: false,
   isReviewed: false,
@@ -18,10 +18,14 @@ export const Booking = {
   notesAdmin: "",
   createdAt: null,
 
-  // ── Driver Dispatch (added for chauffeur assignment) ──────────
-  // Only meaningful when modeOfDriving === "With Chauffeur". Unset/null
-  // means the booking is still sitting in the dispatch queue.
-  driverID:         null, // FK -> user/{uid} where roleID resolves to "Driver"
-  driverAssignedAt: null,
-  driverAssignedBy: null, // username/uid of the Owner/Admin/Supervisor who assigned it
+  // Who is driving is NOT stored on the booking. A chauffeur booking's current
+  // driver is its "assigned" row in driverAssignments (see
+  // models/driverAssignment/driverAssignment.model.js); a booking with no such
+  // row is still in the dispatch queue. (driverID / driverAssignedAt /
+  // driverAssignedBy used to live here.)
+  //
+  // Likewise a customer's request to cancel an ongoing trip is a row in
+  // cancellationRequests, not fields on the booking. cancellationReason stays
+  // here: it records why the booking ended up cancelled, whichever path was used.
+  cancellationReason: null,
 };

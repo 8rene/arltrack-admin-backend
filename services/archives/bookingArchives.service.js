@@ -2,6 +2,8 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { findLinkedBookingSessionArchive } from "./bookingSessionArchives.service.js";
 import { resolveUserNames } from "./resolveUserName.service.js";
+import { getAssignmentRefsForBooking } from "../driverAssignments/driverAssignments.service.js";
+import { getRequestRefsForBooking } from "../cancellationRequests/cancellationRequests.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -274,6 +276,12 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   // the only place that ever cleans them up. Without this, they'd be
   // orphaned forever: no booking, live or archived, left pointing to them.
   const inspectionDocs     = await findLinkedInspectionDocs(bookingID);
+  // driverAssignments / cancellationRequests rows are NOT archived with the booking —
+  // they stay in their live tables (keyed by bookingID) so a restore reconnects the
+  // driver and request history automatically. This permanent delete is the only
+  // place they are cleaned up.
+  const assignmentRefs     = await getAssignmentRefsForBooking(bookingID);
+  const requestRefs        = await getRequestRefsForBooking(bookingID);
 
   // Delete all in batch
   const batch = db.batch();
@@ -291,6 +299,8 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   for (const inspectionDoc of inspectionDocs) {
     batch.delete(inspectionDoc.ref);
   }
+  for (const ref of assignmentRefs) batch.delete(ref);
+  for (const ref of requestRefs)    batch.delete(ref);
 
   await batch.commit();
 
@@ -299,5 +309,7 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
     deletedReviewArchives: reviewArchiveDocs.length,
     deletedSessionArchive: !!sessionArchiveDoc,
     deletedInspectionDocs: inspectionDocs.length,
+    deletedAssignments:    assignmentRefs.length,
+    deletedCancellationRequests: requestRefs.length,
   };
 };
