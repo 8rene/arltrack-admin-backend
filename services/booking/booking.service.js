@@ -247,21 +247,14 @@ export const getAllBookings = async (statusFilter) => {
   if (!filter || filter === "all") {
     // "to pay" = created but the deposit hasn't cleared yet. Shown (read-only, badge
     // in the UI) so staff can see what's pending and that the car is spoken for.
-    const statuses = ["to pay", "upcoming", "ongoing", "completed", "cancelled", "cancellation_request", "stolen"];
+    const statuses = ["to pay", "upcoming", "ongoing", "completed", "cancelled", "stolen"];
     const snaps = await Promise.all(
       statuses.map((st) => db.collection("bookings").where("status", "==", st).get())
     );
     snaps.forEach(addSnap);
   } else if (filter === "cancellation_request") {
-    // Pending requests live in the cancellationRequests collection now. The two
-    // older shapes (status itself flipped / cancellationRequestStatus on the
-    // booking) are still read until the migration's cleanup phase has run.
-    const [legacy, legacyField, pending] = await Promise.all([
-      db.collection("bookings").where("status", "==", "cancellation_request").get(),
-      db.collection("bookings").where("cancellationRequestStatus", "==", "pending").get(),
-      getAllPendingRequests(),
-    ]);
-    addSnap(legacy); addSnap(legacyField);
+    // Pending requests live in the cancellationRequests collection.
+    const pending = await getAllPendingRequests();
     (await getBookingsByKeys([...new Set(pending.map((r) => r.bookingID))])).forEach((b) => {
       if (seen.has(b.id)) return;
       seen.add(b.id);
@@ -277,22 +270,14 @@ export const getAllBookings = async (statusFilter) => {
   // "cancellation_request" (the value the Bookings page already knows how to
   // show and act on) while its real status is kept as actualStatus.
   const requestMap = await getAllRequestsMap();
-  const legacyRequestOf = (b) => b.cancellationRequestStatus ? {
-    status:       b.cancellationRequestStatus,
-    reason:       b.cancellationRequestReason || "",
-    requestedAt:  b.cancellationRequestedAt?.toDate ? b.cancellationRequestedAt.toDate().toISOString() : null,
-    processedBy:  null, processedAt: null,
-    rejectReason: b.cancellationRejectReason || null,
-  } : null;
   rows = rows.map((b) => {
     const all     = requestMap.get(bookingKeyOf(b.id, b)) || [];
     const reqs    = all.filter((r) => r.type !== "direct");          // real customer requests only
-    const latest  = reqs[0] || legacyRequestOf(b);
-    const pending = reqs.some((r) => r.status === REQUEST_STATUS.PENDING) || b.cancellationRequestStatus === "pending";
-    // Why the booking was cancelled: the direct-cancellation row, else the approved
-    // request's reason, else the old field on the booking (until the migration has run).
+    const latest  = reqs[0] || null;
+    const pending = reqs.some((r) => r.status === REQUEST_STATUS.PENDING);
+    // Why the booking was cancelled: the direct-cancellation row, else the approved request's reason.
     const reasonRow = all.find((r) => r.type === "direct") || all.find((r) => r.status === REQUEST_STATUS.APPROVED && r.reason);
-    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs, cancellationReason: reasonRow?.reason || b.cancellationReason || "" };
+    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs, cancellationReason: reasonRow?.reason || "" };
     return pending && (b.status || "").toLowerCase() !== "cancelled"
       ? { ...out, actualStatus: b.status, status: "cancellation_request" }
       : out;
@@ -1037,23 +1022,10 @@ export const getReturnChecklist = async (docID) => {
 // same pattern as every other direct-write notification in this codebase.
 // ─────────────────────────────────────────────
 
-// The five fields the old design kept on the booking document. Removed whenever
-// a request is resolved through the new table, so nothing stale is left behind.
-const LEGACY_CANCELLATION_FIELDS = [
-  "cancellationRequestStatus", "cancellationRequestReason", "cancellationRequestedAt",
-  "cancellationRejectReason", "statusBeforeCancellationRequest",
-];
-const dropLegacyCancellationFields = () =>
-  Object.fromEntries(LEGACY_CANCELLATION_FIELDS.map((f) => [f, admin.firestore.FieldValue.delete()]));
-
-// A pending request is a row in cancellationRequests. The two older shapes
-// (status flipped / cancellationRequestStatus on the booking) are still honoured
-// until the migration's cleanup phase has run.
+// A pending request is a row in cancellationRequests.
 const findPendingCancellation = async (docID, booking) => {
   const request = await getPendingRequest(bookingKeyOf(docID, booking));
-  const legacy =
-    booking.cancellationRequestStatus === "pending" || (booking.status || "").toLowerCase() === "cancellation_request";
-  return { request, legacy, pending: !!request || legacy };
+  return { request, pending: !!request };
 };
 
 export const approveCancellationRequest = async (docID, performedBy = null) => {
@@ -1068,27 +1040,13 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
   }
 
   const now = new Date();
-  if (request) {
-    // One batch: the request is marked approved and the booking cancelled together.
-    // The customer's own words stay on the request row; the booking list reads
-    // the cancellation reason from there, so nothing is copied onto the booking.
-    const batch = db.batch();
-    resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, batch);
-    batch.update(bookingRef, {
-      status: "cancelled",
-      ...dropLegacyCancellationFields(),
-      updatedAt: now,
-    });
-    await batch.commit();
-  } else {
-    // Legacy shape only -- exactly what this did before the table existed.
-    await bookingRef.update({
-      status: "cancelled",
-      cancellationRequestStatus: "approved",
-      statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
-      updatedAt: now,
-    });
-  }
+  // One batch: the request is marked approved and the booking cancelled together.
+  // The customer's own words stay on the request row; the booking list reads the
+  // cancellation reason from there.
+  const batch = db.batch();
+  resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, batch);
+  batch.update(bookingRef, { status: "cancelled", updatedAt: now });
+  await batch.commit();
 
   // Mirror onto the session doc, same as the customer's own instant-cancel
   // path already does for "upcoming" bookings -- this one is "ongoing", so
@@ -1135,29 +1093,15 @@ export const rejectCancellationRequest = async (docID, rejectReason, performedBy
     throw new Error(`Cannot reject: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
   }
 
-  // Older shape: status itself was flipped, so restore what it was before the
-  // request (falls back to "ongoing", the only status this request is ever
-  // entered from). Current shape: status never changed, nothing to restore.
-  const wasLegacy = (booking.status || "").toLowerCase() === "cancellation_request";
-  const revertTo = wasLegacy ? (booking.statusBeforeCancellationRequest || "ongoing") : booking.status;
+  // The booking's status never changed while the request was pending, so there is
+  // nothing to restore; only the request row is resolved.
+  const revertTo = booking.status;
 
   const now = new Date();
-  if (request) {
-    const batch = db.batch();
-    resolveRequest(request, { status: REQUEST_STATUS.REJECTED, processedBy: performedBy, rejectReason }, batch);
-    batch.update(bookingRef, { status: revertTo, ...dropLegacyCancellationFields(), updatedAt: now });
-    await batch.commit();
-  } else {
-    await bookingRef.update({
-      status: revertTo,
-      // "rejected" (not "pending") -- the customer app only blocks a NEW request while
-      // one is "pending", so they can ask again if they need to.
-      cancellationRequestStatus: "rejected",
-      statusBeforeCancellationRequest: admin.firestore.FieldValue.delete(),
-      cancellationRejectReason: rejectReason || "",
-      updatedAt: now,
-    });
-  }
+  const batch = db.batch();
+  resolveRequest(request, { status: REQUEST_STATUS.REJECTED, processedBy: performedBy, rejectReason }, batch);
+  batch.update(bookingRef, { updatedAt: now });
+  await batch.commit();
 
   await resolveNotification("cancellation_request", docID).catch((err) =>
     console.error("[BOOKINGS] rejectCancellationRequest: failed to resolve notification:", err.message)
