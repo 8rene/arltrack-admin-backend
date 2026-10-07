@@ -16,8 +16,15 @@
 // payments, penalties and refundRequests stay as the parent documents (totals,
 // workflow, review). paymentEntries only holds the money movements.
 //
-// Money in  -> direction "in"  (customer paid)       <- built in STEP 1 (this release)
-// Money out -> direction "out" (refund / hand-back)  <- STEP 2 (refunds), not yet written
+// Money in  -> direction "in"  (customer paid)
+// Money out -> direction "out" (a refund)
+//     <refundRequestID>_part<n>          one PayMongo refund        (source "online",    referenceNumber = re_...)
+//     <refundRequestID>_manual           staff hand-back in person  (source "in_person") -- cash taken in person ONLY
+//     <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: status "unrefundable", flagged
+//                                        payment_id_missing, with the note "Payment ID does not exist". It is
+//                                        reported, never handed back.
+// For now refundRequests still carries parts[] / manualRefund / unrefundable[] and stays the source of truth;
+// the "out" rows are re-derived from it after every write (same bridge as the "in" rows).
 //
 // The row is the source of truth for "did this money move, how, and what is its
 // external reference". Anything totalling entries MUST filter on direction.

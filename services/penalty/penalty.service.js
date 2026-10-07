@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import {
   PENALTY_STATUSES,
+  PENALTY_SHORTFALL_METHODS,
   createPenaltyPayload,
 } from "../../models/penalty/penalty.model.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
@@ -12,6 +13,7 @@ import { getSessionByBookingID } from "../booking/bookingSession.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
 import { buildPenaltyPaymentEntry } from "../paymentEntries/paymentEntries.mapper.js";
+import { hydratePenalties } from "../paymentEntries/paymentEntries.service.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
@@ -222,7 +224,9 @@ export const createPenalty = async ({
 
 export const listPenaltiesForBooking = async (bookingID) => {
   const snap = await db.collection("penalties").where("bookingID", "==", bookingID).get();
-  return snap.docs.map((d) => d.data());
+  // paymentMethod / referenceNumber / paidAt come back from the payment entries once cleanup has removed them.
+  const hydrated = await hydratePenalties(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  return hydrated.map(({ id: _docID, ...rest }) => rest);   // same shape as before: no extra id key
 };
 
 // Confirmed penalties that still have an outstanding balance (paidAmount
@@ -484,6 +488,10 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
 export const recordShortfallPayment = async ({ userID, amount, method, referenceNumber = "", performedBy, penaltyID = null }) => {
   amount = Number(amount);
   if (!(amount > 0)) return { error: "amount must be greater than 0." };
+  // Penalties are paid in person only -- nothing in the customer app pays one, so there is no online option.
+  if (!PENALTY_SHORTFALL_METHODS.includes(method)) {
+    return { error: `method must be one of: ${PENALTY_SHORTFALL_METHODS.join(", ")}.` };
+  }
 
   const unpaid = await listUnpaidPenaltiesForUser(userID);
 
@@ -621,8 +629,11 @@ export const getAllPenalties = async () => {
     return "Paid";
   };
 
-  return penaltiesSnap.docs.map((d) => {
-    const data = d.data();
+  // Read through paymentEntries so paymentMethod / referenceNumber / paidAt survive the PHASE 2 cleanup.
+  const hydrated = await hydratePenalties(penaltiesSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+
+  return penaltiesSnap.docs.map((d, idx) => {
+    const { id: _docID, ...data } = hydrated[idx];
     const booking = bookingMap[data.bookingID];
     const car = carMap[data.carID];
     const customer = userMap[data.userID];

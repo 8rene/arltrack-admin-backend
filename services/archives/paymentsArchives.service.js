@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
+import { hydratePayments } from "../paymentEntries/paymentEntries.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -37,8 +38,11 @@ export const getAllPaymentsArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
-  const rows = snapshot.docs.map((doc) => {
-    const data = doc.data();
+  // Archived payments lose the moved fields in the PHASE 2 cleanup too: read them back from the entries.
+  const hydrated = await hydratePayments(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+
+  const rows = snapshot.docs.map((doc, idx) => {
+    const { id: _docID, ...data } = hydrated[idx];
     return {
       paymentsArchivesId: doc.id,
       ...data,

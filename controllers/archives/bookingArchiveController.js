@@ -7,6 +7,7 @@ import {
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { findLinkedBookingSessionArchive } from "../../services/archives/bookingSessionArchives.service.js";
+import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -95,7 +96,8 @@ export const getLinkedPaymentArchiveHandler = async (req, res) => {
       return res.status(200).json({ success: true, data: null, message: "No linked payment archive found for this booking." });
     }
 
-    const data = snap.docs[0].data();
+    // the moved payment fields are read back from the payment entries (PHASE 2 cleanup removes them from the archive too)
+    const data = await hydratePaymentData(snap.docs[0].data(), snap.docs[0].id);
     return res.status(200).json({
       success: true,
       data: {

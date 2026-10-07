@@ -3,13 +3,13 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { resolveNotification, createNotification } from "../notification/notification.service.js";
 import { ROLE_IDS } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
-import { computeRefundPlan, getRefundPolicy, resolvePickupAt, getDepositAmount } from "../payments/paymentBreakdown.js";
+import { computeRefundPlan, getRefundPolicy, resolvePickupAt, getDepositAmount, PAYMENT_ID_MISSING_NOTE } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
-import { syncRefundEntries } from "../paymentEntries/paymentEntries.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 import { recordDirectCancellation, inferCancelledBy } from "../cancellationRequests/cancellationRequests.service.js";
+import { syncRefundEntries, hydratePaymentData } from "../paymentEntries/paymentEntries.service.js";
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -23,6 +23,13 @@ const paymongoHeaders = () => ({
 
 const lower = (v) => String(v || "").toLowerCase();
 const peso  = (n) => `₱${Number(n || 0).toLocaleString()}`;
+
+// Online money with no PayMongo payment id on record can't be refunded through PayMongo, and it is NOT
+// handed back by staff either. The customer must not be promised it, so every message says so plainly.
+const unrefundableSentence = (amount) =>
+  Number(amount) > 0
+    ? ` ${peso(amount)} could not be refunded automatically because its payment record is incomplete — please contact support about it.`
+    : "";
 
 // A second admin clicking Approve while the first is still talking to PayMongo
 // would create a second set of refunds. The lock (a timestamp on the request,
@@ -126,13 +133,14 @@ export const getAllRefundRequests = async (status) => {
         try {
           const pSnap = await db.collection("payments").where("paymentID", "==", data.paymentID).limit(1).get();
           if (!pSnap.empty) {
-            const payment = pSnap.docs[0].data();
+            const payment = await hydratePaymentData(pSnap.docs[0].data(), pSnap.docs[0].id);
             const policy = policyForRequest(data, payment);
             const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0 });
             row.planPreview = {
               total: plan.total,
               onlineAmount: plan.total - plan.manualAmount,
               manualAmount: plan.manualAmount,
+              unrefundableAmount: plan.unrefundableAmount,   // paid online, no PayMongo payment id on record
               grossPaid: plan.grossPaid,
               forfeit: plan.forfeit,                       // deposit kept under the 48-hour policy
               tier: policy ? policy.tier : null,           // "full" | "late" | "no_show" | null (no policy snapshot)
@@ -165,7 +173,7 @@ export const getBookingRefundPreview = async (bookingID) => {
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   // No payment doc at all → nothing to refund; confirming just cancels the booking.
   if (paymentSnap.empty) return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false, noPayment: true, existingRequest: null };
-  const payment = paymentSnap.docs[0].data();
+  const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
   if (lower(payment.status) === "refunded") {
     return { total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: true, noPayment: false, existingRequest: null };
   }
@@ -176,7 +184,7 @@ export const getBookingRefundPreview = async (bookingID) => {
   const plan = computeRefundPlan(payment);
   const outstandingDiscountRefund = payment.discountAmount > 0 && !payment.refundIssued ? plan.breakdown.refundDue : 0;
   const total = plan.total + outstandingDiscountRefund;
-  return { total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount + outstandingDiscountRefund, alreadyRefunded: false, noPayment: false, existingRequest };
+  return { total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount + outstandingDiscountRefund, unrefundableAmount: plan.unrefundableAmount, alreadyRefunded: false, noPayment: false, existingRequest };
 };
 
 // What actually happened the last time staff ran a refund/cancel against
@@ -367,7 +375,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // ── 2. the plan, from the payment as it is now ──
     const paymentSnap = await db.collection("payments").where("paymentID", "==", refundRequest.paymentID).limit(1).get();
     if (paymentSnap.empty) throw fail("Underlying payment record not found.", 404);
-    const payment = paymentSnap.docs[0].data();
+    const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
 
     const payStatus = lower(payment.status);
     if (payStatus === "refunded") throw fail("This payment has already been refunded.", 409);
@@ -386,6 +394,15 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     }
 
     const plan = computeRefundPlan(payment, { forfeit });
+    // Everything was paid online but no PayMongo payment id is on record: there is nothing PayMongo can return,
+    // and it must NOT be turned into a hand-back. Say exactly that instead of "nothing to refund".
+    if (plan.total <= 0 && plan.unrefundableAmount > 0) {
+      throw fail(
+        `${peso(plan.unrefundableAmount)} was paid online but its PayMongo payment ID is not on record. ${PAYMENT_ID_MISSING_NOTE} ` +
+        "Nothing can be refunded for this request — fix the payment record (or refund it from the PayMongo dashboard), or reject the request.",
+        400
+      );
+    }
     if (plan.total <= 0) {
       throw fail(
         forfeit > 0
@@ -421,7 +438,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
-        await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
+        await syncRefundEntries(refundRequestID);
         auditSafe({
           action: "update",
           description: `Refund ${refundRequestID}: the ${part.kind} refund failed at PayMongo (${e.message}) AFTER ${parts.length} earlier part(s) had already been refunded — needs manual follow-up.`,
@@ -455,13 +472,17 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       paymongoRefundID: parts[0]?.paymongoRefundID || null,      // legacy single-id field
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key
       manualRefund,
+      unrefundable: plan.unrefundable,            // online money with no PayMongo payment id (never a hand-back)
+      unrefundableAmount: plan.unrefundableAmount,
       processedBy: adminUserID,
       processedAt: now,
       updatedAt: now,
       customerNotified: false, // flipped to true below, only once the customer has actually been notified
       approvalLockedAt: null,
     });
-    await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
+
+    // Mirror the refund into paymentEntries ("out" rows). Never throws, never blocks the refund.
+    await syncRefundEntries(refundRequestID);
 
     // Tell the customer straight away — BEFORE the deposit update and the booking
     // cancel below. The PayMongo refund has already gone out, so a failure in those
@@ -472,7 +493,8 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       (manualRefund
         ? `Your refund of ${peso(plan.total)} has been approved. ${peso(onlineAmount)} will be returned through PayMongo and ${peso(plan.manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
         : `Your refund of ${peso(plan.total)} has been approved. Please allow up to 24 hours for PayMongo to process it — we'll notify you once it has been returned.`)
-      + (forfeit > 0 ? ` Your ${peso(forfeit)} deposit was kept under our 48-hour cancellation policy.` : ""),
+      + (forfeit > 0 ? ` Your ${peso(forfeit)} deposit was kept under our 48-hour cancellation policy.` : "")
+      + unrefundableSentence(plan.unrefundableAmount),
       { renotify: true }
     );
     if (customerTold) {
@@ -499,7 +521,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 
     auditSafe({
       action: "update",
-      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
+      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""}${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
       userID: adminUserID,
       bookingID: refundRequest.bookingID,
       paymentID: refundRequest.paymentID,
@@ -511,7 +533,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     resolveNotification("refund_request", refundRequestID)
       .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));
 
-    return { ...refundRequest, status: "Approved", amount: plan.total, onlineAmount, manualAmount: plan.manualAmount, grossPaid: plan.grossPaid, depositForfeited: forfeit, parts, manualRefund, bookingCancelled: cancel.cancelled };
+    return { ...refundRequest, status: "Approved", amount: plan.total, onlineAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount, grossPaid: plan.grossPaid, depositForfeited: forfeit, parts, manualRefund, bookingCancelled: cancel.cancelled };
   } catch (err) {
     await releaseLock(); // safe even if an update above already cleared it
     throw err;
@@ -693,6 +715,7 @@ const finishStaffRefund = async (r) => {
         ? `Your booking was cancelled: ${r.reason}. A refund has been approved: ${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
         : `Your booking was cancelled: ${r.reason}. A refund of ${peso(r.amount)} has been approved — please allow up to 24 hours for PayMongo to process it. We'll notify you once it has been returned.`)
       + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
+      + unrefundableSentence(r.unrefundableAmount)
     );
 
     const { email: customerEmail, name: customerName } = await resolveCustomerContact(r.userID);
@@ -789,7 +812,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     return staffCancelWithNoRefund(bookingID, booking, { paymentID: null, userID: booking.userID || null }, reason, staffUserID, "no_payment", contextLabel, skipDriverNotify);
   }
   const paymentRef = paymentSnap.docs[0].ref;
-  const payment = paymentSnap.docs[0].data();
+  const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
   const paymentID = payment.paymentID || paymentSnap.docs[0].id; // never undefined — Firestore rejects it
   const payStatus = lower(payment.status);
 
@@ -862,6 +885,17 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "deposit_forfeited", contextLabel, skipDriverNotify, { depositForfeited: forfeit, grossPaid: plan.grossPaid, policyTier: "no_show" });
   }
 
+  // Everything the customer paid was ONLINE but no PayMongo payment id is on record: nothing can be refunded
+  // through PayMongo, and it must not be quietly cancelled as "nothing paid" or turned into a hand-back.
+  // Same precedent as the "needs manual review" stop below: staff fix the record, or cancel without a refund.
+  if (totalToRefund === 0 && plan.unrefundableAmount > 0) {
+    throw fail(
+      `${peso(plan.unrefundableAmount)} was paid online but its PayMongo payment ID is not on record. ${PAYMENT_ID_MISSING_NOTE} ` +
+      "Fix the payment record (or refund it from the PayMongo dashboard), or cancel this booking without a refund.",
+      409
+    );
+  }
+
   // Genuinely nothing collected (still Pending, etc.) — cancel only.
   if (totalToRefund === 0) {
     return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "nothing_owed", contextLabel, skipDriverNotify);
@@ -907,6 +941,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         paymongoRefundID: null,
         paymongoRefundIDs: [],
         manualRefund: null,
+        unrefundable: plan.unrefundable,
+        unrefundableAmount: plan.unrefundableAmount,
         processedBy: null,
         processedAt: null,
         rejectReason: null,
@@ -956,7 +992,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
-        await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
+        await syncRefundEntries(refundRequestID);
         auditSafe({
           action: "update",
           description: `Staff refund ${refundRequestID}: the ${part.kind} refund failed at PayMongo (${e.message}) AFTER ${parts.length} earlier part(s) had already been refunded — needs manual follow-up.`,
@@ -989,8 +1025,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       updatedAt: now,
       approvalLockedAt: null,
     });
-    await syncRefundEntries(reqRef.id); // mirror parts[] / manualRefund into paymentEntries ("out" rows)
     approvedSaved = true;
+    await syncRefundEntries(refundRequestID); // "out" rows -- never throws, never blocks the refund
 
     // Discount spillover is folded into this refund now, so
     // correctIssuedDiscount() must not also try to pay it later.
@@ -1003,7 +1039,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     // ── 4. cancel the booking + notify (also what a retry re-runs) ──
     return await finishStaffRefund({
       refundRequestID, bookingID, paymentID, userID, reason,
-      amount: totalToRefund, onlineAmount, manualAmount, manualRefund, contextLabel, skipDriverNotify,
+      amount: totalToRefund, onlineAmount, manualAmount, manualRefund, unrefundableAmount: plan.unrefundableAmount, contextLabel, skipDriverNotify,
       depositForfeited: forfeit,
       processedBy: staffUserID || null, customerNotified: false,
     });
@@ -1047,9 +1083,8 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     return { request: { ...r, manualRefund, status: finalize ? "Refunded" : r.status }, finalize };
   });
 
-  await syncRefundEntries(refundRequestID); // the hand-back becomes a successful "out" row
-
   const r = outcome.request;
+  await syncRefundEntries(refundRequestID); // the in-person row becomes "success"
 
   createTransactionLog({
     bookingID: r.bookingID,
@@ -1258,12 +1293,12 @@ export const getAdminBookingRefundPreview = async (docID) => {
     const pickupAt = resolvePickupAt(booking);
     const pickupPassed = !!pickupAt && pickupAt.getTime() <= Date.now();
     const pSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
-    const payment = pSnap.empty ? null : pSnap.docs[0].data();
+    const payment = pSnap.empty ? null : await hydratePaymentData(pSnap.docs[0].data(), pSnap.docs[0].id);
     if (payment && lower(payment.status) !== "refunded") {
       const gross   = computeRefundPlan(payment).grossPaid;
       const forfeit = Math.min(getDepositAmount(payment), gross);
       const plan    = computeRefundPlan(payment, { forfeit });
-      noShow = { pickupPassed, pickupAt, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount };
+      noShow = { pickupPassed, pickupAt, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount };
     } else {
       noShow = { pickupPassed, pickupAt, grossPaid: 0, forfeit: 0, total: 0, onlineAmount: 0, manualAmount: 0 };
     }
@@ -1299,7 +1334,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   let retained = 0;
   if (!paymentSnap.empty) {
-    const payment = paymentSnap.docs[0].data();
+    const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
     const paymentID = payment.paymentID || paymentSnap.docs[0].id;
     const open = await findOpenRefundRequest(paymentID).catch(() => null);
     if (open) {

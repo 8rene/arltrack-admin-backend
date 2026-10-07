@@ -5,7 +5,7 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
 import { upsertTransaction } from "./paymentTransactions.js";
-import { syncPaymentEntries } from "../paymentEntries/paymentEntries.service.js";
+import { syncPaymentEntries, hydratePayments, hydratePaymentData } from "../paymentEntries/paymentEntries.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
@@ -887,7 +887,9 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
 
 export const getAllPayments = async () => {
   const snapshot = await db.collection("payments").orderBy("createdAt", "desc").get();
-  const docs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  // Read through paymentEntries: the PayMongo ids, fees, channel, confirmedBy ... come back from the rows
+  // even after the cleanup removed them from the document. One query per 30 payments, not one per payment.
+  const docs = await hydratePayments(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
 
   // Batch-resolve bookings for carID and userID
   const bookingIDs = [...new Set(docs.map((d) => d.bookingID).filter(Boolean))];
@@ -976,7 +978,7 @@ export const updatePaymentStatus = async (id, status, performedBy = null) => {
 export const getPaymentById = async (id) => {
   const doc = await db.collection("payments").doc(id).get();
   if (!doc.exists) throw new Error("Payment not found.");
-  const payment = { id: doc.id, ...doc.data() };
+  const payment = { id: doc.id, ...(await hydratePaymentData(doc.data(), doc.id)) };
 
   const booking = payment.bookingID
     ? (await db.collection("bookings").doc(payment.bookingID).get())
@@ -1002,7 +1004,7 @@ export const getPaymentById = async (id) => {
 export const getPaymentDetailsByBookingID = async (bookingID) => {
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   if (paymentSnap.empty) return null;
-  const payment = { id: paymentSnap.docs[0].id, ...paymentSnap.docs[0].data() };
+  const payment = { id: paymentSnap.docs[0].id, ...(await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id)) };
 
   const bookingSnap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
   const bookingData = bookingSnap.empty ? {} : bookingSnap.docs[0].data();

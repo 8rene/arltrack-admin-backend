@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
+import { hydratePenalties } from "../paymentEntries/paymentEntries.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -13,8 +14,11 @@ export const getAllPenaltyArchives = async () => {
 
   const nameMap = await resolveUserNames(snapshot.docs.map((doc) => doc.data().userID));
 
-  return snapshot.docs.map((doc) => {
-    const data = doc.data();
+  // Archived penalties lose paymentMethod / referenceNumber / paidAt in the PHASE 2 cleanup too: read them back from the entries.
+  const hydrated = await hydratePenalties(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+
+  return snapshot.docs.map((doc, idx) => {
+    const { id: _docID, ...data } = hydrated[idx];
     return {
       penaltyArchivesId: doc.id,
       ...data,

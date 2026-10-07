@@ -32,6 +32,11 @@ export const RefundRequest = {
   source: "customer", // "customer" (default) | "staff" — see comment above
   outcome: null, // "refunded" | "already_refunded" | "nothing_owed" — staff-origin docs only
   amount: 0,
+  // Money paid ONLINE whose PayMongo payment id was never saved. It can't be refunded through PayMongo and
+  // is NOT handed back by staff either -- it is reported here (and as "unrefundable" rows in paymentEntries):
+  //   unrefundable: [{ kind: "deposit" | "balance", amount, reason: "payment_id_missing" }]
+  unrefundable: [],
+  unrefundableAmount: 0,
   status: "Pending",
   paymongoRefundID: null,
   processedBy: null,
