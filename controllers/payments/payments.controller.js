@@ -9,6 +9,10 @@ import {
   markRefundIssued,
 } from "../../services/payments/payments.service.js";
 
+// The acting staff member as a uid -- what paymentEntries.processedBy stores (same convention as the refund and
+// penalty controllers). The email is only a fallback for tokens that carry no uid.
+const actorUid = (req) => req.user?.userID || req.user?.uid || req.user?.email || null;
+
 export const listPayments = async (req, res) => {
   try {
     const data = await getAllPayments();
@@ -34,7 +38,7 @@ export const patchPaymentStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-    await updatePaymentStatus(id, status, req.user?.email || req.user?.uid || null);
+    await updatePaymentStatus(id, status, actorUid(req) || null);
     return res.status(200).json({ success: true, message: "Status updated." });
   } catch (error) {
     console.error("[PAYMENTS] patch error:", error);
@@ -86,7 +90,7 @@ export const correctDiscount = async (req, res) => {
 export const refundIssued = async (req, res) => {
   try {
     const { bookingID } = req.params;
-    const issuedBy = req.user?.email || req.user?.uid || "staff";
+    const issuedBy = actorUid(req) || "staff";
     await markRefundIssued(bookingID, issuedBy);
     return res.status(200).json({ success: true, message: "Refund marked as returned." });
   } catch (error) {
@@ -105,7 +109,7 @@ export const confirmPayment = async (req, res) => {
   try {
     const { bookingID } = req.params;
     const { paymentMethod } = req.body;
-    const confirmedBy = req.user?.email || req.user?.uid || "staff";
+    const confirmedBy = actorUid(req) || "staff";
     await confirmInitialPayment(bookingID, confirmedBy, paymentMethod);
     return res.status(200).json({ success: true, message: "Payment marked as received." });
   } catch (error) {
@@ -121,7 +125,7 @@ export const collectBalance = async (req, res) => {
   try {
     const { bookingID } = req.params;
     const { paymentMethod } = req.body;
-    const collectedBy = req.user?.email || req.user?.uid || "staff";
+    const collectedBy = actorUid(req) || "staff";
     await collectRemainingBalance(bookingID, collectedBy, paymentMethod);
     return res.status(200).json({ success: true, message: "Balance marked as collected." });
   } catch (error) {

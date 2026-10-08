@@ -141,6 +141,7 @@ const USER_ID_LINKS = [
   ["bookings", "userID"], ["bookings", "driverID"],
   ["driverAssignments", "driverID"], ["cancellationRequests", "userID"],
   ["refundRequests", "userID"], ["penalties", "userID"], ["reviews", "userID"],
+  ["payments", "userID"], ["paymentEntries", "userID"], ["paymentsArchives", "userID"],
   ["transactionLogs", "userID"], ["sessionLogs", "userID"], ["userLogs", "userID"],
   ["notifications", "userID"], ["editRequests", "userID"], ["idResubmitRequests", "userID"],
   ["auditLogs", "userID"],

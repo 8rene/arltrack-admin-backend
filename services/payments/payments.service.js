@@ -4,7 +4,8 @@ import { notifyStaff, resolveNotification, createNotification } from "../notific
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
-import { syncPaymentEntries, hydratePayments, hydratePaymentData } from "../paymentEntries/paymentEntries.service.js";
+import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
+import { resolveUserNames } from "../archives/resolveUserName.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
@@ -380,15 +381,43 @@ const promoteBookingIfToPay = async (bookingID) => {
 // requiring a trip to the Payments page just to click Approve.
 // ─────────────────────────────────────────────
 // Records a staff action in paymentEntries. WHO took the money, WHEN and HOW (confirmedBy / confirmedAt,
-// balanceMethod / balanceCollectedBy / balanceCollectedAt) are written to the entry row only -- no longer
-// onto the payment document, which keeps just the status and amounts. If the row can't be written, the
-// values are put on the document the old way instead, so that information is never lost.
+// balanceMethod / balanceCollectedBy / balanceCollectedAt) are written to the entry row only -- never onto the
+// payment document, which keeps just the status and amounts. The sync is idempotent, so a failure is retried
+// once and then reported: the status change is already saved, and pressing the same action again (or the
+// next sync) writes the row. Nothing is ever put back on the document in the old shape.
 const recordInEntries = async (docRef, docID, fields) => {
-  const r = await syncPaymentEntries(docID, { fields });
-  if (r.error || !r.written) {
-    console.error(`[PAYMENTS] entry for ${docID} not written (${r.error || "nothing derived"}); keeping ${Object.keys(fields).join(", ")} on the document.`);
-    await docRef.update(fields);
+  let r;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    r = await syncPaymentEntries(docID, { fields });
+    if (!r.error && r.written) return;
   }
+  const why = r.error || "nothing derived";
+  console.error(`[PAYMENTS] entry for ${docID} not written (${why}); ${Object.keys(fields).join(", ")} NOT saved.`);
+  throw new Error(`The payment was updated, but its payment entry could not be written (${why}). Please try again.`);
+};
+
+// Does this payment already have a settled "in" row for the phase? (used to tell "already done" from "done, but
+// its row failed to write" -- the latter must be repairable by pressing the same action again.)
+const hasSuccessRow = async (data, docID, phase) => {
+  const key = data.paymentID || docID;
+  const rows = (await getEntriesForPaymentIDs([key])).get(key) || [];
+  return rows.some((e) => e.direction !== "out" && e.phase === phase && e.status === "success");
+};
+
+// confirmedBy / balanceCollectedBy are stored as the staff member's uid; the Payments page wants a name.
+// Older values (an email, or "—") are shown as they are.
+const withStaffNames = async (rows) => {
+  const list = Array.isArray(rows) ? rows : [rows];
+  const ids = list.flatMap((r) => [r.confirmedBy, r.balanceCollectedBy])
+    .filter((v) => v && v !== "—" && !String(v).includes("@"));
+  if (!ids.length) return rows;
+  const names = await resolveUserNames(ids);
+  const named = list.map((r) => ({
+    ...r,
+    confirmedBy: names[r.confirmedBy] || r.confirmedBy,
+    balanceCollectedBy: names[r.balanceCollectedBy] || r.balanceCollectedBy,
+  }));
+  return Array.isArray(rows) ? named : named[0];
 };
 
 export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMethod) => {
@@ -405,7 +434,12 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
   const data = doc.data();
 
   const status = (data.status || "").toLowerCase();
-  if (status === "approved" || status === "paid") {
+  const wasApproved = status === "approved" || status === "paid";
+  // Approved but with no deposit row = an earlier confirmation saved the status and then failed to write the row.
+  // Pressing Confirm again repairs it (writes the row, log and booking step) instead of refusing. An online
+  // payment, or one that already has its row, really is confirmed.
+  const looksOnline = !!(data.paymongoChannel || data.depositPaymongoPaymentID || data.paymongoPaymentID);
+  if (wasApproved && (looksOnline || await hasSuccessRow(data, doc.id, "deposit"))) {
     throw new Error("This payment is already confirmed.");
   }
   if (status === "rejected" || status === "cancelled" || status === "refunded") {
@@ -417,7 +451,7 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
   // for ₱2,500 received, and the later balance entry then counted the rest again.)
   const depositReceived = getPaymentBreakdown({ ...data, status: "paid" }).depositCollected;
 
-  await doc.ref.update({
+  if (!wasApproved) await doc.ref.update({
     status:        "Approved",
     // This is the first point the actual mode is ever captured for a
     // cash/in-person initial payment — previously this field just held
@@ -493,26 +527,33 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
       `Approve the payment first in the Payments page.`
     );
   }
-  if (data.balanceCollected) {
+  // balanceCollected with no balance row = an earlier collection saved the flag and then failed to write the row:
+  // pressing the action again repairs it. With a row, it really is collected.
+  const repair = !!data.balanceCollected && !(await hasSuccessRow(data, doc.id, "balance"));
+  if (data.balanceCollected && !repair) {
     throw new Error("This booking is already marked fully paid.");
   }
-  // The customer can also pay the balance online (Pay Balance). If they did,
-  // collecting it again in cash would take the same money twice.
-  if (String(data.balanceStatus || "").toLowerCase() === "paid") {
-    throw new Error("The customer already paid the balance online — there is nothing left to collect.");
-  }
-  // Don't take more money on a payment that's mid-refund.
-  const openRefund = await findOpenRefundRequest(data.paymentID || doc.id);
-  if (openRefund) {
-    throw new Error(`A refund request (${openRefund.status}) is open for this booking — resolve it before collecting the balance.`);
+  let balance;
+  if (repair) {
+    balance = Number(data.balanceCollectedAmount) || 0;
+  } else {
+    // The customer can also pay the balance online (Pay Balance). If they did,
+    // collecting it again in cash would take the same money twice.
+    if (String(data.balanceStatus || "").toLowerCase() === "paid") {
+      throw new Error("The customer already paid the balance online — there is nothing left to collect.");
+    }
+    // Don't take more money on a payment that's mid-refund.
+    const openRefund = await findOpenRefundRequest(data.paymentID || doc.id);
+    if (openRefund) {
+      throw new Error(`A refund request (${openRefund.status}) is open for this booking — resolve it before collecting the balance.`);
+    }
+    ({ balance } = computeAmounts(data));
+    if (balance <= 0) {
+      throw new Error("There is no remaining balance to collect.");
+    }
   }
 
-  const { balance } = computeAmounts(data);
-  if (balance <= 0) {
-    throw new Error("There is no remaining balance to collect.");
-  }
-
-  await doc.ref.update({
+  if (!repair) await doc.ref.update({
     balanceCollected:   true,
     // How it was paid + how much — previously only in the transaction log, so the
     // Payments page couldn't show it and a later refund couldn't know which part
@@ -836,12 +877,51 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
     throw new Error("There is no refund due on this booking.");
   }
 
-  await doc.ref.update({
+  const paymentID = data.paymentID || doc.id;
+  const handedBackBy = issuedBy || "—";
+
+  // The cash handed back is money OUT, so it gets its own paymentEntries row -- otherwise the entry ledger
+  // would never see that this money left. Same shape as a refund's in-person hand-back (<id>_manual), but it
+  // hangs off the payment (refCollection "payments"), not a refund request, because no request exists for a
+  // discount spillover. Deterministic id => marking twice only rewrites the same row. It is committed in the
+  // same batch as refundIssued, so the flag and the ledger can never disagree.
+  const batch = db.batch();
+  batch.update(doc.ref, {
     refundIssued:   true,
-    refundIssuedBy: issuedBy || "—",
+    refundIssuedBy: handedBackBy,
     refundIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
   });
+  const now = new Date();
+  batch.set(db.collection(ENTRY_COLLECTION).doc(`${paymentID}_discountrefund`), {
+    paymentEntryID: `${paymentID}_discountrefund`,
+    paymentID,
+    bookingID,
+    userID: data.userID || null,
+    refID: paymentID,
+    refCollection: "payments",
+    direction: "out",
+    phase: data.balanceCollected ? "balance" : "deposit",
+    parentEntryID: null,
+    source: "in_person",
+    method: "cash",
+    amount: refundDue,
+    status: "success",
+    referenceNumber: null,
+    sessionID: null,
+    transactionFee: null,
+    proofUrl: null,
+    processedBy: issuedBy || null,
+    processedAt: now,
+    settledAt: now,
+    groupID: null,
+    note: "Discount spillover handed back to the customer",
+    flags: ["discount_spillover"],
+    migratedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await batch.commit();
 
   await resolveNotification("refund_due", bookingID);
 
@@ -913,12 +993,12 @@ export const getAllPayments = async () => {
   const openRefundByPayment = {};
   openRefundSnap.docs.forEach((d) => { openRefundByPayment[d.data().paymentID] = { id: d.id, ...d.data() }; });
 
-  return docs.map((payment) => {
+  return withStaffNames(docs.map((payment) => {
     const booking = bookingMap[payment.bookingID] || {};
     const vehicleName = vehicleMap[booking.carID] || "—";
     const customerName = nameMap[booking.userID] || "—";
     return buildPaymentRow(payment, booking, customerName, vehicleName, openRefundByPayment[payment.paymentID || payment.id] || null);
-  });
+  }));
 };
 
 export const updatePaymentStatus = async (id, status, performedBy = null) => {
@@ -941,8 +1021,17 @@ export const updatePaymentStatus = async (id, status, performedBy = null) => {
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
+  // Approving a payment by hand means staff have the money, so record WHO and WHEN on the entry row (they no
+  // longer live on the payment document). An earlier confirmation is kept: hydrate reads it back from the
+  // row, so a second Approve click can't overwrite whoever confirmed it first.
+  let entryFields;
+  if (status === "Approved") {
+    const prior = await hydratePaymentData(existing, id);
+    if (!prior.confirmedBy) entryFields = { confirmedBy: performedBy || "—", confirmedAt: new Date() };
+  }
+
   // A deliberate manual change by staff may move an entry out of "success" (a late webhook may not).
-  await syncPaymentEntries(id, { force: true });
+  await syncPaymentEntries(id, entryFields ? { force: true, fields: entryFields } : { force: true });
 
   // Manually approving a payment means staff have the money. Bookings now start at
   // "to pay", so without this the booking would stay there and be auto-cancelled
@@ -974,7 +1063,7 @@ export const getPaymentById = async (id) => {
   ]);
 
   const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
-  return buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund);
+  return withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund));
 };
 
 // Same full detail as getPaymentById() above (discounts, the deposit/balance
@@ -998,5 +1087,5 @@ export const getPaymentDetailsByBookingID = async (bookingID) => {
   ]);
 
   const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
-  return buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund);
+  return withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund));
 };

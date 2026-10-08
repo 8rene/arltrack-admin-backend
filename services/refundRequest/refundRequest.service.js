@@ -9,7 +9,7 @@ import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingS
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
 import { resolveCurrentDriverID, completeActiveAssignment } from "../driverAssignments/driverAssignments.service.js";
 import { recordDirectCancellation, inferCancelledBy } from "../cancellationRequests/cancellationRequests.service.js";
-import { syncRefundEntries, writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
+import { writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { normalizeMethod } from "../paymentEntries/paymentEntries.mapper.js";
 
 // A refund's parts[] / manualRefund / unrefundable[] live ONLY in paymentEntries ("out" rows) now. Readers get
@@ -1096,8 +1096,8 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
   const manualRef = entryCol.doc(`${refundRequestID}_manual`);
 
   // The hand-back lives in the "out" row <id>_manual (paymentEntries), not on the request. The row is read and
-  // flipped inside the transaction so two staff can't both mark it. A request that still carries manualRefund /
-  // parts on the document (not yet cleaned up) is kept consistent too, because hydrate prefers the document.
+  // flipped inside the transaction so two staff can't both mark it. Nothing is written to manualRefund on the
+  // request any more: hydrate lets the row win over any leftover legacy field on the document.
   const outcome = await db.runTransaction(async (t) => {
     const snap = await t.get(reqRef);
     if (!snap.exists) throw fail("Refund request not found.", 404);
@@ -1110,40 +1110,34 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
       .filter((e) => e.refCollection === "refundRequests" && e.direction === "out");
     const manualRow = rows.find((e) => e.source === "in_person") || null;
 
-    const manualAmount = Number(manualRow ? manualRow.amount : r.manualRefund?.amount) || 0;
-    if (!(manualAmount > 0)) throw fail("This refund has no manual portion to hand back.", 400);
-    const alreadyIssued = manualRow ? manualRow.status === "success" : !!r.manualRefund?.issued;
-    if (alreadyIssued) throw fail("This has already been marked as handed back.", 409);
+    // The rows are the only source -- nothing is read from manualRefund / parts on the request document.
+    const manualAmount = Number(manualRow?.amount) || 0;
+    if (!manualRow || !(manualAmount > 0)) throw fail("This refund has no manual portion to hand back.", 400);
+    if (manualRow.status === "success") throw fail("This has already been marked as handed back.", 409);
 
     const now = new Date();
     const manualRefund = { amount: manualAmount, issued: true, issuedBy: issuedBy || null, issuedAt: now, method };
     // Finished only if every PayMongo part has already settled. Otherwise the
     // customer-backend webhook completes it when the last part lands.
-    const partDone = Array.isArray(r.parts) && r.parts.length
-      ? r.parts.map((p) => p.status === "succeeded")
-      : rows.filter((e) => e.source === "online" && e.status !== "unrefundable").map((e) => e.status === "success");
-    const finalize = partDone.every(Boolean);
+    const finalize = rows
+      .filter((e) => e.source === "online" && e.status !== "unrefundable")
+      .every((e) => e.status === "success");
 
     t.update(reqRef, {
       updatedAt: now,
-      ...(r.manualRefund ? { manualRefund: { ...r.manualRefund, ...manualRefund } } : {}),
       ...(finalize ? { status: "Refunded" } : {}),
     });
-    if (manualRow) {
-      t.update(manualRef, {
-        status: "success", method: normalizeMethod(method).method,
-        processedBy: issuedBy || null, processedAt: now, settledAt: manualRow.settledAt || now, updatedAt: now,
-      });
-    }
+    t.update(manualRef, {
+      status: "success", method: normalizeMethod(method).method,
+      processedBy: issuedBy || null, processedAt: now, settledAt: manualRow.settledAt || now, updatedAt: now,
+    });
     return {
       request: { ...r, manualRefund, status: finalize ? "Refunded" : r.status },
-      finalize, hadRow: !!manualRow,
+      finalize,
     };
   });
 
   const r = outcome.request;
-  // A request approved before its rows existed: derive the in-person row now (best effort, as before).
-  if (!outcome.hadRow) await syncRefundEntries(refundRequestID);
 
   createTransactionLog({
     bookingID: r.bookingID,

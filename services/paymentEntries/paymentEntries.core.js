@@ -170,7 +170,7 @@ const makeEntriesDb = (db) => {
   const hydrateRefundRequests = async (requests) => {
     const list = requests || [];
     const map = await getEntriesForRefundRequestIDs(list.map((r) => r.refundRequestID || r.id));
-    return list.map((r) => hydrateRefundRequest(r, map.get(r.refundRequestID || r.id) || []));
+    return list.map((r) => hydrateRefundRequest(r, map.get(r.refundRequestID || r.id) || [], { rowsOnly: true }));
   };
 
   /** paymentID[] -> Map(paymentID -> entries[]). One query per 30 ids, not one per payment. */
@@ -205,33 +205,28 @@ const makeEntriesDb = (db) => {
   const hydratePayments = async (payments) => {
     const list = payments || [];
     const map = await getEntriesForPaymentIDs(list.map(paymentKeyOf));
-    return list.map((p) => hydratePayment(p, map.get(paymentKeyOf(p)) || []));
+    return list.map((p) => hydratePayment(p, map.get(paymentKeyOf(p)) || [], { rowsOnly: true }));
   };
 
   /**
    * ONE payment document's data (doc.data(), as the readers have it) -> the same data with the moved fields
    * filled in from its rows. `docID` is the Firestore id, used when the data has no paymentID of its own.
-   * Adds no keys of its own (unlike hydratePayments over {id, ...data}), so it is safe where the object is
-   * written back or spread into another document. Never throws: on any failure the data is returned as it is.
+   * Rows only: the moved fields on the document are ignored. If the rows can't be read this THROWS -- a read
+   * that fails must not quietly serve the old fields instead.
    */
   const hydratePaymentData = async (data, docID) => {
     if (!data) return data;
-    try {
-      const key = data.paymentID || data.originalId || docID;
-      if (!key) return data;
-      const map = await getEntriesForPaymentIDs([key]);
-      return hydratePayment(data, map.get(key) || []);
-    } catch (err) {
-      console.error("[paymentEntries] hydrate failed, using the document as it is:", err.message);
-      return data;
-    }
+    const key = data.paymentID || data.originalId || docID;
+    if (!key) return hydratePayment(data, [], { rowsOnly: true });
+    const map = await getEntriesForPaymentIDs([key]);
+    return hydratePayment(data, map.get(key) || [], { rowsOnly: true });
   };
 
   /** penalties[] -> the same penalties with paymentMethod / referenceNumber / paidAt filled in. */
   const hydratePenalties = async (penalties) => {
     const list = penalties || [];
     const map = await getEntriesForPenaltyIDs(list.map(penaltyKeyOf));
-    return list.map((p) => hydratePenalty(p, map.get(penaltyKeyOf(p)) || []));
+    return list.map((p) => hydratePenalty(p, map.get(penaltyKeyOf(p)) || [], { rowsOnly: true }));
   };
 
   /** Refs of every entry that belongs to a booking -- used by the permanent delete. */

@@ -23,8 +23,13 @@
 //     <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: status "unrefundable", flagged
 //                                        payment_id_missing, with the note "Payment ID does not exist". It is
 //                                        reported, never handed back.
-// For now refundRequests still carries parts[] / manualRefund / unrefundable[] and stays the source of truth;
-// the "out" rows are re-derived from it after every write (same bridge as the "in" rows).
+//     <paymentID>_discountrefund         cash handed back for a staff discount that exceeded what was owed
+//                                        (source "in_person", method "cash", refCollection "payments", flag
+//                                        discount_spillover). No refund request exists for it. Written by
+//                                        markRefundIssued() in the same batch as payments.refundIssued.
+// The "out" rows ARE the source of truth for a refund: refundRequests no longer stores parts[] / manualRefund /
+// unrefundable[] (writeRefundEntries commits them with the status change; hydrateRefundRequests rebuilds the
+// old shape for readers). A request that still carries those fields (not yet cleaned up) wins in hydrate.
 //
 // The row is the source of truth for "did this money move, how, and what is its
 // external reference". Anything totalling entries MUST filter on direction.

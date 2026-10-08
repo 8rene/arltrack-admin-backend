@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
+import { hydrateRefundRequests } from "../paymentEntries/paymentEntries.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -13,8 +14,18 @@ export const getAllRefundArchives = async () => {
 
   const nameMap = await resolveUserNames(snapshot.docs.map((doc) => doc.data().userID));
 
-  return snapshot.docs.map((doc) => {
-    const data = doc.data();
+  // Refund docs no longer store parts[] / manualRefund / unrefundable[] -- those live in the
+  // paymentEntries "out" rows (keyed by refundRequestID, which the archive copy carries).
+  // paymentEntries rows are not archived with the booking, so they can still be read here.
+  const hydrated = await hydrateRefundRequests(
+    snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return { ...data, refundRequestID: data.refundRequestID || data.originalId || doc.id };
+    })
+  );
+
+  return snapshot.docs.map((doc, i) => {
+    const data = hydrated[i];
     return {
       refundArchivesId: doc.id,
       ...data,
