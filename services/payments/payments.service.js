@@ -4,7 +4,6 @@ import { notifyStaff, resolveNotification, createNotification } from "../notific
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
-import { upsertTransaction } from "./paymentTransactions.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData } from "../paymentEntries/paymentEntries.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
@@ -427,15 +426,6 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     // safe (unlike the balance case below) since this IS the payment the
     // method describes, not a second one layered on top of an earlier one.
     paymentMethod,
-    // The same fact as one transaction entry (in person — no PayMongo ref).
-    paymongoTransactions: upsertTransaction(data, "deposit", {
-      amount:  depositReceived,
-      channel: paymentMethod,
-      source:  "in_person",
-      status:  "paid",
-      paidAt:  new Date(),
-      by:      confirmedBy || "—",
-    }),
     updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
   });
 
@@ -528,14 +518,6 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     // Payments page couldn't show it and a later refund couldn't know which part
     // was cash that PayMongo can't return.
     balanceCollectedAmount: balance,
-    paymongoTransactions: upsertTransaction(data, "balance", {
-      amount:  balance,
-      channel: paymentMethod,
-      source:  "in_person",
-      status:  "paid",
-      paidAt:  new Date(),
-      by:      collectedBy || "—",
-    }),
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
   });
 
@@ -614,7 +596,7 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   // customer's userID (see resolveCustomerUserID).
   const booking = await findBookingByBookingID(bookingID);
   const isChauffeur = booking?.modeOfDriving === "With Chauffeur";
-  // The current driver lives in driverAssignments now (legacy booking.driverID is the fallback).
+  // The current driver lives in driverAssignments (the only source).
   const driverID = booking ? await resolveCurrentDriverID(booking, bookingID) : null;
 
   // A chauffeur trip needs a driver on record before a discount can be
@@ -954,14 +936,8 @@ export const updatePaymentStatus = async (id, status, performedBy = null) => {
     throw new Error("This payment has already been refunded, so its status can't be changed.");
   }
 
-  // Keep the deposit's transaction entry in step with the manual status change.
-  const TXN_STATUS = { Approved: "paid", Rejected: "failed", Cancelled: "cancelled", Pending: "pending" };
   await ref.update({
     status,
-    paymongoTransactions: upsertTransaction(existing, "deposit", {
-      status: TXN_STATUS[status],
-      ...(status === "Approved" ? { paidAt: new Date() } : {}),
-    }, { force: true }),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 

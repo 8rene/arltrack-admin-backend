@@ -1,6 +1,7 @@
 // cancellationRequests service -- the ONLY admin-side place that reads/writes
-// the cancellationRequests collection (see models/cancellationRequest/cancellationRequest.model.js).
-// The customer backend creates rows itself (its own requestCancellation()).
+// the cancellationRequests collection (see models/cancellationRequests/cancellationRequest.model.js).
+// The customer backend creates "request" rows itself (its own requestCancellation()).
+// This side writes the "direct" rows (a booking cancelled outright) and resolves requests.
 //
 // Imports only db, so any service can import it without a circular dependency.
 import { db } from "../../config/firebaseConnection/firebase.js";
@@ -66,8 +67,11 @@ export const getAllPendingRequests = async () => {
 };
 
 /**
- * Map<bookingKey, presentedRequest[]> (newest first) for many bookings.
- * Used by the Bookings list so the detail view can show the customer's reason.
+ * Map<bookingKey, presentedRequest[]> (newest first) for many bookings -- every
+ * row for those bookings (requests AND direct cancellations). Used by the
+ * Bookings list so the detail view can show why a booking was cancelled.
+ * Only reads the rows of the bookings asked about (chunked "in" queries), so the
+ * cost follows the page size, not the size of the whole collection.
  */
 export const getRequestsByBookingKeys = async (bookingKeys) => {
   const keys = [...new Set((bookingKeys || []).filter(Boolean))];
@@ -87,24 +91,7 @@ export const getRequestsByBookingKeys = async (bookingKeys) => {
   return map;
 };
 
-/**
- * Map<bookingKey, presentedRequest[]> (newest first) for EVERY row (requests AND
- * direct cancellations). One row per cancelled booking at most, so this stays small
- * at current volume; switch to chunked "in" queries if the collection grows large.
- */
-export const getAllRequestsMap = async () => {
-  const snap = await db.collection(COL).get();
-  const all = snap.docs.slice().sort((a, b) => millis(b.data().requestedAt) - millis(a.data().requestedAt));
-  const map = new Map();
-  all.forEach((d) => {
-    const k = d.data().bookingID;
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(presentRequest(d));
-  });
-  return map;
-};
-
-/** Marks a request approved/rejected. Pass a Firestore batch to commit it together with other writes. */
+/** Marks a request approved/rejected. Pass a Firestore batch OR transaction to commit it together with other writes. */
 export const resolveRequest = (request, { status, processedBy = null, rejectReason = null }, batch = null) => {
   const patch = {
     status,

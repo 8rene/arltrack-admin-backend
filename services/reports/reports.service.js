@@ -1,4 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
+import { hydratePayments } from "../paymentEntries/paymentEntries.service.js";
 
 const toDate = (val) => {
   if (!val) return null;
@@ -243,8 +244,10 @@ export const generateReport = async (period, selection = {}) => {
   // always the only real total, same as everywhere else in this app.
   const paymentAmountByBookingID = {};
 
-  paySnap.forEach((doc) => {
-    const p = doc.data();
+  // Through the entries, so referenceNumber / proofUrl etc. still resolve after the moved fields are cleaned off.
+  const payDocs = await hydratePayments(paySnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+  payDocs.forEach((p) => {
+    const doc = { id: p.id };
     // The refundable security deposit rides inside p.amount but isn't revenue —
     // report on the net (0 for older payments, so nothing changes for them).
     const amount   = Math.max(0, (Number(p.amount) || 0) - (Number(p.securityDeposit) || 0));

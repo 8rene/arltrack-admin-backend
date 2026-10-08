@@ -25,7 +25,7 @@ export const getAllPenaltyArchives = async () => {
       customerName: data.userID ? (nameMap[data.userID] || "—") : "—",
       createdAt:   toISO(data.createdAt),
       updatedAt:   toISO(data.updatedAt),
-      confirmedAt: toISO(data.confirmedAt),
+      confirmedAt: toISO(data.confirmedAt ?? data.createdAt),   // not stored on new penalties: confirmed when created
       paidAt:      toISO(data.paidAt),
       archivedAt:  toISO(data.archivedAt),
       restoredAt:  toISO(data.restoredAt),

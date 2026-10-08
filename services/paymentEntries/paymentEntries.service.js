@@ -19,6 +19,7 @@ const svc = makeEntriesDb(db);
 export const syncPaymentEntries       = svc.syncPaymentEntries;
 export const syncRefundEntries        = svc.syncRefundEntries;
 export const hydrateRefundRequests    = svc.hydrateRefundRequests;
+export const writeRefundEntries       = svc.writeRefundEntries;
 export const getEntriesForPaymentIDs  = svc.getEntriesForPaymentIDs;
 export const getEntriesForPenaltyIDs  = svc.getEntriesForPenaltyIDs;
 export const hydratePayments          = svc.hydratePayments;

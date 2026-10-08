@@ -32,13 +32,13 @@ export const RefundRequest = {
   source: "customer", // "customer" (default) | "staff" — see comment above
   outcome: null, // "refunded" | "already_refunded" | "nothing_owed" — staff-origin docs only
   amount: 0,
-  // Money paid ONLINE whose PayMongo payment id was never saved. It can't be refunded through PayMongo and
-  // is NOT handed back by staff either -- it is reported here (and as "unrefundable" rows in paymentEntries):
-  //   unrefundable: [{ kind: "deposit" | "balance", amount, reason: "payment_id_missing" }]
-  unrefundable: [],
-  unrefundableAmount: 0,
+  // parts[] (one PayMongo refund per online charge), manualRefund (the in-person hand-back) and unrefundable[]
+  // (online money with no PayMongo payment id -- never refunded, never handed back) are NOT stored here any more:
+  // they are the "out" rows in paymentEntries (refID = this request, ids <id>_part<n> | _manual | _unrefundable<n>).
+  // hydrateRefundRequests() rebuilds the old shape, incl. unrefundableAmount (their sum), for readers.
+  // paymongoRefundIDs is only the lookup key the customer backend's refund.updated webhook queries.
   status: "Pending",
-  paymongoRefundID: null,
+  paymongoRefundIDs: [],
   processedBy: null,
   processedAt: null,
   rejectReason: null,

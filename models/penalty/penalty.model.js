@@ -81,18 +81,14 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   status:       data.status       || "Confirmed",
   statusReason: data.statusReason || "", // required for Voided / Waived
 
-  paymentMethod:   data.paymentMethod   || "", // set once settled — see PENALTY_PAYMENT_METHODS
-  referenceNumber: data.referenceNumber || "",
+  // paymentMethod / referenceNumber / paidAt are NOT stored on a new penalty any more: each payment is a row in
+  // paymentEntries (phase "penalty") and hydratePenalties() gives the latest method / reference / date back to
+  // readers. A penalty covered by the held deposit gets paymentMethod / paidAt from settleBooking().
   paidAmount:      data.paidAmount      ?? 0,  // may be < amount if partially covered by deposit
-  paidAt:          data.paidAt          || null,
 
-  // confirmedBy/confirmedAt are set equal to createdBy/createdAt at
-  // creation time now — kept as separate fields (rather than removed)
-  // since older documents written before this change have a real gap
-  // between the two, and callers/reports may still rely on both existing.
+  // confirmedBy / confirmedAt are NOT stored on a new penalty: a penalty is confirmed the moment it is created,
+  // so they were always equal to createdBy / createdAt. Readers fall back to those (older documents keep theirs).
   createdBy:   data.createdBy   || null, // staff/driver uid who created it
-  confirmedBy: data.confirmedBy || null,
-  confirmedAt: data.confirmedAt || null,
 
   createdAt: data.createdAt || null,
   updatedAt: data.updatedAt || null,

@@ -10,11 +10,12 @@ import { computeAmounts, derivePaymentStage } from "../../services/payments/paym
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
+import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 import {
   bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
 } from "../../services/driverAssignments/driverAssignments.service.js";
 import {
-  REQUEST_STATUS, getPendingRequest, getAllPendingRequests, getAllRequestsMap, resolveRequest,
+  REQUEST_STATUS, getPendingRequest, getAllPendingRequests, getRequestsByBookingKeys, resolveRequest, recordDirectCancellation,
 } from "../../services/cancellationRequests/cancellationRequests.service.js";
 // ─────────────────────────────────────────────
 // Helpers
@@ -64,7 +65,7 @@ const EMPTY_PAYMENT_INFO = {
   depositAmount: 0, depositStatus: "—", confirmedPenaltyTotal: 0, amountToReturn: 0,
   depositSettled: false, depositDeducted: 0,
 };
-const resolvePaymentInfo = async (bookingID) => {
+export const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT_INFO;
   try {
     const snap = await db.collection("payments")
@@ -72,7 +73,9 @@ const resolvePaymentInfo = async (bookingID) => {
       .limit(1)
       .get();
     if (snap.empty) return EMPTY_PAYMENT_INFO;
-    const data = snap.docs[0].data();
+    // Hydrated so paymentMethod / referenceNumber etc. still resolve once the
+    // moved fields are cleaned off the payment doc (they live in paymentEntries).
+    const data = await hydratePaymentData(snap.docs[0].data(), snap.docs[0].id);
     const { amountPaid, balance, payType, refundDue } = computeAmounts(data);
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
@@ -269,7 +272,8 @@ export const getAllBookings = async (statusFilter) => {
   // customer asked. A booking with a PENDING request is still PRESENTED as
   // "cancellation_request" (the value the Bookings page already knows how to
   // show and act on) while its real status is kept as actualStatus.
-  const requestMap = await getAllRequestsMap();
+  // Only the rows of THESE bookings are read (not the whole collection).
+  const requestMap = await getRequestsByBookingKeys(rows.map((b) => bookingKeyOf(b.id, b)));
   rows = rows.map((b) => {
     const all     = requestMap.get(bookingKeyOf(b.id, b)) || [];
     const reqs    = all.filter((r) => r.type !== "direct");          // real customer requests only
@@ -310,11 +314,11 @@ export const getAllBookings = async (statusFilter) => {
   const bookingIDs     = [...new Set(rows.map((b) => b.bookingID || b.id).filter(Boolean))];
   const userIDs        = [...new Set(rows.map((b) => b.userID).filter(Boolean))];
   const serviceTypeIDs = [...new Set(rows.map((b) => b.serviceTypeID).filter(Boolean))];
-  // Chauffeur bookings carry driverID once driverDispatch.assignDriver()
-  // has run (see that service) — resolved the same way as the customer
-  // (userDetails + user collections) so Bookings.jsx can show who's
-  // actually driving, or that no one's assigned yet, without a separate
-  // Driver Dispatch lookup.
+  // The current driver is the booking's "assigned" row in driverAssignments
+  // (attachCurrentDrivers above puts it on each row as a read-only view). It is
+  // resolved the same way as the customer (userDetails + user collections) so
+  // Bookings.jsx can show who's actually driving, or that no one's assigned yet,
+  // without a separate Driver Dispatch lookup.
   const driverIDs      = [...new Set(rows.map((b) => b.driverID).filter(Boolean))];
 
   const [vehicleEntries, paymentEntries, userEntries, driverEntries, serviceTypeEntries, historyEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
@@ -430,7 +434,10 @@ const getDepositPosition = async (bID) => {
     db.collection("payments").where("bookingID", "==", bID).limit(1).get(),
     listPenaltiesForBooking(bID),
   ]);
-  const deposit = paymentSnap.empty ? null : (paymentSnap.docs[0].data().deposit || null);
+  const paymentData = paymentSnap.empty
+    ? null
+    : await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
+  const deposit = paymentData?.deposit || null;
   const unpaidTotal = penalties
     .filter((p) => p.status === "Confirmed")
     .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
@@ -541,7 +548,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
       throw new Error("Cannot approve booking: no payment record found for this booking.");
     }
 
-    const paymentData = paySnap.docs[0].data();
+    const paymentData = await hydratePaymentData(paySnap.docs[0].data(), paySnap.docs[0].id);
     const payStatus   = paymentData.status || "";
     const approvedStatuses = ["approved", "paid"];
 
@@ -664,7 +671,38 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     await updateSessionDestination(bookingID || docID, bookingData.location, pickedLocation);
   }
 
-  await db.collection("bookings").doc(docID).update(filtered);
+  const bookingRef = db.collection("bookings").doc(docID);
+  if (filtered.status === "cancelled") {
+    // A cancellation is a booking update PLUS a cancellationRequests row (the reason no
+    // longer lives on the booking). Both commit together:
+    //   * a customer request is still pending  -> it is the row; mark it approved
+    //   * otherwise                            -> write the "direct" row
+    // ("admin", not "staff": cancelledBy "staff" is what Fleet uses to find the bookings
+    // it cancelled itself, so this manual edit must not be mistaken for that.)
+    const bookingKey = bookingKeyOf(docID, bookingData);
+    const pendingRequest = await getPendingRequest(bookingKey);
+    const cancelBatch = db.batch();
+    cancelBatch.update(bookingRef, filtered);
+    if (pendingRequest) {
+      resolveRequest(pendingRequest, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, cancelBatch);
+    } else {
+      const reason = String(updates.cancellationReason ?? updates.reason ?? "").trim();
+      recordDirectCancellation(bookingKey, {
+        userID: userID || null,
+        reason: reason || "Cancelled by admin.",
+        cancelledBy: performedBy ? "admin" : "unknown",
+        processedBy: performedBy,
+      }, cancelBatch);
+    }
+    await cancelBatch.commit();
+    if (pendingRequest) {
+      resolveNotification("cancellation_request", docID).catch((err) =>
+        console.error("[Booking] Failed to resolve cancellation_request notification:", err.message)
+      );
+    }
+  } else {
+    await bookingRef.update(filtered);
+  }
 
   if (filtered.location !== undefined && filtered.location !== bookingData.location) {
     createAuditLog({
@@ -1040,13 +1078,23 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
   }
 
   const now = new Date();
-  // One batch: the request is marked approved and the booking cancelled together.
+  // One transaction: the request is marked approved and the booking cancelled together,
+  // and both are re-read inside it, so two staff approving at once (or approving a request
+  // someone just rejected, or a trip that already ended) cannot both go through.
   // The customer's own words stay on the request row; the booking list reads the
   // cancellation reason from there.
-  const batch = db.batch();
-  resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, batch);
-  batch.update(bookingRef, { status: "cancelled", updatedAt: now });
-  await batch.commit();
+  await db.runTransaction(async (t) => {
+    const [reqSnap, bookingSnap] = await Promise.all([t.get(request.ref), t.get(bookingRef)]);
+    if (!reqSnap.exists || reqSnap.data().status !== REQUEST_STATUS.PENDING) {
+      throw new Error(`Cannot approve: the cancellation request for booking ${docID} was already handled.`);
+    }
+    const current = String(bookingSnap.data()?.status || "").toLowerCase();
+    if (["cancelled", "completed", "stolen"].includes(current)) {
+      throw new Error(`Cannot approve: booking ${docID} is already ${current}.`);
+    }
+    resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, t);
+    t.update(bookingRef, { status: "cancelled", updatedAt: now });
+  });
 
   // Mirror onto the session doc, same as the customer's own instant-cancel
   // path already does for "upcoming" bookings -- this one is "ongoing", so
@@ -1098,10 +1146,14 @@ export const rejectCancellationRequest = async (docID, rejectReason, performedBy
   const revertTo = booking.status;
 
   const now = new Date();
-  const batch = db.batch();
-  resolveRequest(request, { status: REQUEST_STATUS.REJECTED, processedBy: performedBy, rejectReason }, batch);
-  batch.update(bookingRef, { updatedAt: now });
-  await batch.commit();
+  await db.runTransaction(async (t) => {
+    const reqSnap = await t.get(request.ref);
+    if (!reqSnap.exists || reqSnap.data().status !== REQUEST_STATUS.PENDING) {
+      throw new Error(`Cannot reject: the cancellation request for booking ${docID} was already handled.`);
+    }
+    resolveRequest(request, { status: REQUEST_STATUS.REJECTED, processedBy: performedBy, rejectReason }, t);
+    t.update(bookingRef, { updatedAt: now });
+  });
 
   await resolveNotification("cancellation_request", docID).catch((err) =>
     console.error("[BOOKINGS] rejectCancellationRequest: failed to resolve notification:", err.message)

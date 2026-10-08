@@ -1,11 +1,11 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
-import { updateBooking, markBookingDroppedOff, markDeviceChecked, settleDeposit, getReturnChecklist } from "../../services/booking/booking.service.js";
+import { updateBooking, markBookingDroppedOff, markDeviceChecked, settleDeposit, getReturnChecklist, resolvePaymentInfo as resolveBookingPaymentInfo } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
 import { getPhaseChecklist } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
-import { computeAmounts, collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
+import { collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createPenalty } from "../penalty/penalty.service.js";
@@ -13,6 +13,7 @@ import { sessionStartedAt } from "../../utils/date/sessionDates.js";
 import {
   ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID,
   getAssignmentsForDriver, getBookingsByKeys, createAssignment, endActiveAssignment,
+  legacyDriverFieldsPatch,
 } from "../driverAssignments/driverAssignments.service.js";
 
 // ─────────────────────────────────────────────
@@ -22,8 +23,6 @@ import {
 // see booking.service.js vs payments.service.js both having their own
 // resolveVehicleName/resolveUserInfo).
 // ─────────────────────────────────────────────
-
-const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
 const toJSDate = (val) => {
   if (!val) return null;
@@ -65,58 +64,14 @@ const EMPTY_PAYMENT = {
   depositSettled: false, depositDeducted: 0,
 };
 const EMPTY_CHECKLIST = { photos: false, parts: false, complete: false };
+// The payment / deposit / penalty read is the SAME one the Bookings list uses
+// (booking.service.js's resolvePaymentInfo), trimmed to the fields the driver app
+// shows. It used to be a second copy of that logic here (including its own
+// penalties query), which had to be kept in step by hand.
 const resolvePaymentInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_PAYMENT;
-  try {
-    const snap = await db.collection("payments")
-      .where("bookingID", "==", bookingID)
-      .limit(1)
-      .get();
-    if (snap.empty) return EMPTY_PAYMENT;
-    const data = snap.docs[0].data();
-    const { amountPaid, balance, payType, refundDue } = computeAmounts(data);
-    let paymentStatus = data.status || "Pending";
-    if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
-
-    // Same "what does the customer get back / still owe" math as
-    // settleBooking() in penalty.service.js: deposit held minus every
-    // unpaid Confirmed penalty, still-negative-allowed. Read-only here —
-    // this never writes anything, it's just a live preview for the
-    // driver's Payments button before Return actually runs settlement.
-    const deposit = data.deposit || null;
-    const depositAmount = deposit?.amount || 0;
-    const depositStatus = deposit?.status || "—";
-    const penaltiesSnap = await db.collection("penalties")
-      .where("bookingID", "==", bookingID)
-      .where("status", "==", "Confirmed")
-      .get();
-    const confirmedPenaltyTotal = penaltiesSnap.docs.reduce(
-      (sum, p) => sum + Math.max(0, (p.data().amount || 0) - (p.data().paidAmount || 0)),
-      0
-    );
-    // Before settlement this is a live preview: deposit minus every unpaid
-    // Confirmed penalty, still-negative-allowed (same as settleBooking()'s
-    // `net`). AFTER settlement the deposit has already paid those penalties
-    // out, so they now read as paid and the unpaid total falls to 0 —
-    // recomputing would show the FULL deposit as "to return" again. So once
-    // settled, report what actually happened instead: anything still unpaid
-    // right now is owed by the customer (negative), otherwise it's the
-    // amount that was handed back (settlement.net).
-    const settlement = deposit?.settlement?.status ? deposit.settlement : null;
-    const depositSettled = !!settlement;
-    const depositDeducted = settlement ? depositAmount - Math.max(0, settlement.net || 0) : 0;
-    const amountToReturn = settlement
-      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, settlement.net || 0))
-      : depositAmount - confirmedPenaltyTotal;
-
-    return {
-      totalFee: Number(data.amount) || 0, amountPaid, balance, payType, paymentStatus,
-      discountAmount: Number(data.discountAmount) || 0,
-      refundDue, refundIssued: !!data.refundIssued,
-      depositAmount, depositStatus, confirmedPenaltyTotal, amountToReturn,
-      depositSettled, depositDeducted,
-    };
-  } catch { return EMPTY_PAYMENT; }
+  const info = await resolveBookingPaymentInfo(bookingID);
+  return Object.fromEntries(Object.keys(EMPTY_PAYMENT).map((k) => [k, info[k] ?? EMPTY_PAYMENT[k]]));
 };
 
 const resolveUserInfo = async (userID) => {
@@ -131,6 +86,24 @@ const resolveUserInfo = async (userID) => {
     const { phone = "—", username = "", email = "" } = userDoc.exists ? userDoc.data() : {};
     return { name: fullName || username || email || "—", phone };
   } catch { return { name: "—", phone: "—" }; }
+};
+
+// userID -> "First Last" from userDetails (where names live; the user doc has no
+// first/last name). One query per 30 ids instead of two reads per person.
+const resolveDisplayNames = async (userIDs) => {
+  const map = new Map();
+  const ids = [...new Set((userIDs || []).filter(Boolean))];
+  for (let i = 0; i < ids.length; i += 30) {
+    const snap = await db.collection("userDetails")
+      .where(admin.firestore.FieldPath.documentId(), "in", ids.slice(i, i + 30))
+      .get();
+    snap.forEach((doc) => {
+      const { firstName = "", lastName = "" } = doc.data();
+      const full = [firstName, lastName].filter(Boolean).join(" ").trim();
+      if (full) map.set(doc.id, full);
+    });
+  }
+  return map;
 };
 
 // Statuses considered "live" for dispatch purposes — a booking that's
@@ -235,7 +208,11 @@ export const getDispatchBoard = async () => {
   const unassigned = shapedBookings.filter((b) => !b.driverID && b.status === "upcoming");
   const missingWhileOngoing = shapedBookings.filter((b) => !b.driverID && b.status === "ongoing");
 
-  const licenseMap = await resolveLicenseExpiries(driverSnap.docs.map((d) => d.id));
+  const driverIDs = driverSnap.docs.map((d) => d.id);
+  const [licenseMap, driverNames] = await Promise.all([
+    resolveLicenseExpiries(driverIDs),
+    resolveDisplayNames(driverIDs),
+  ]);
 
   const drivers = driverSnap.docs.map((d) => {
     const data = d.data();
@@ -246,7 +223,7 @@ export const getDispatchBoard = async () => {
       .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
     return {
       driverID:  d.id,
-      name:      [data.firstName, data.lastName].filter(Boolean).join(" ").trim() || data.username || data.email || "—",
+      name:      driverNames.get(d.id) || [data.firstName, data.lastName].filter(Boolean).join(" ").trim() || data.username || data.email || "—",
       phone:     data.phone || "—",
       status:    data.status || "Active", // matches Users.jsx directory convention
       license: {
@@ -266,22 +243,19 @@ export const getDispatchBoard = async () => {
 // booking whose window overlaps [startDateTime, endDateTime]?
 // Excludes the booking being assigned itself (for reassignment).
 // ─────────────────────────────────────────────
-// A driver's bookings (as { id, ...data }) in the given statuses. Comes from
-// driverAssignments; the old booking.driverID query is still unioned in until
-// the migration's cleanup phase has removed that field. The current assignment
-// always wins, so a booking reassigned to someone else drops out here.
+// A driver's bookings (as { id, ...data }) in the given statuses, from driverAssignments.
+// The current assignment always wins, so a booking reassigned to someone else drops out.
+//   * live statuses (upcoming/ongoing) only need the driver's "assigned" rows;
+//   * history statuses also need the "completed" ones.
+// Only driverAssignments is read: no booking.driverID query (and so no composite index for it).
 const getDriverBookings = async (driverID, statuses) => {
-  const [legacySnaps, assignments] = await Promise.all([
-    Promise.all(
-      statuses.map((s) =>
-        db.collection("bookings").where("driverID", "==", driverID).where("status", "==", s).get()
-      )
-    ),
-    getAssignmentsForDriver(driverID),
-  ]);
+  const liveOnly = statuses.every((s) => DISPATCHABLE_STATUSES.includes(s));
+  const assignments = await getAssignmentsForDriver(
+    driverID,
+    liveOnly ? [ASSIGNMENT_STATUS.ASSIGNED] : [ASSIGNMENT_STATUS.ASSIGNED, ASSIGNMENT_STATUS.COMPLETED],
+  );
 
   const byId = new Map();
-  legacySnaps.forEach((snap) => snap.forEach((doc) => byId.set(doc.id, { id: doc.id, ...doc.data() })));
   (await getBookingsByKeys(assignments.map((a) => a.bookingID))).forEach((b) => {
     if (statuses.includes(b.status)) byId.set(b.id, b);
   });
@@ -363,15 +337,12 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
     throw err;
   }
 
-  // The assignment is its own row now (closing any previous driver as
-  // "reassigned"). The three old fields on the booking are dropped so the
-  // table is the only source of truth.
-  await createAssignment({ bookingKey: bookingKeyOf(bookingDocID, booking), driverID, assignedBy });
-  await bookingRef.update({
-    driverID: admin.firestore.FieldValue.delete(),
-    driverAssignedAt: admin.firestore.FieldValue.delete(),
-    driverAssignedBy: admin.firestore.FieldValue.delete(),
-    updatedAt: timestamp(),
+  // The assignment is its own row (closing any previous driver as "reassigned").
+  // The three old fields on the booking are dropped in the SAME transaction, so the
+  // table is the only source of truth and the two writes cannot half-succeed.
+  await createAssignment({
+    bookingKey: bookingKeyOf(bookingDocID, booking), driverID, assignedBy,
+    bookingRef, bookingPatch: legacyDriverFieldsPatch(),
   });
 
   // Personal notification to the driver themselves — didn't exist before
@@ -387,9 +358,8 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
     userID: driverID,
   }).catch((err) => console.error("[NOTIF] driver_assigned create failed:", err.message));
 
-  const driverData = driverDoc.data();
-  const driverName = [driverData.firstName, driverData.lastName].filter(Boolean).join(" ").trim()
-    || driverData.username || driverID;
+  const driverInfo = await resolveUserInfo(driverID);
+  const driverName = driverInfo.name !== "—" ? driverInfo.name : driverID;
   createAuditLog({
     action: "update",
     description: `Driver ${driverName} assigned to booking ${booking.bookingID || bookingDocID}` +
@@ -418,18 +388,14 @@ export const unassignDriver = async (bookingDocID, editedBy = null) => {
     throw new Error(`Cannot unassign a driver from a booking with status "${booking.status}".`);
   }
 
+  // Closing the row and dropping the legacy booking fields commit together.
   const ended = await endActiveAssignment(bookingKeyOf(bookingDocID, booking), {
     status: ASSIGNMENT_STATUS.UNASSIGNED,
     endedBy: editedBy,
+    bookingRef,
+    bookingPatch: legacyDriverFieldsPatch(),
   });
-  const previousDriverID = ended?.driverID || booking.driverID || null;
-
-  await bookingRef.update({
-    driverID: admin.firestore.FieldValue.delete(),
-    driverAssignedAt: admin.firestore.FieldValue.delete(),
-    driverAssignedBy: admin.firestore.FieldValue.delete(),
-    updatedAt: timestamp(),
-  });
+  const previousDriverID = ended?.driverID || null;
 
   // Same gap assignDriver's own notification fixed, just missed on this
   // side: without this, a driver only finds out they were unassigned
@@ -447,13 +413,8 @@ export const unassignDriver = async (bookingDocID, editedBy = null) => {
 
   let driverName = previousDriverID || "a driver";
   if (previousDriverID) {
-    try {
-      const driverDoc = await db.collection("user").doc(previousDriverID).get();
-      if (driverDoc.exists) {
-        const d = driverDoc.data();
-        driverName = [d.firstName, d.lastName].filter(Boolean).join(" ").trim() || d.username || previousDriverID;
-      }
-    } catch { /* fall back to the raw ID above */ }
+    const info = await resolveUserInfo(previousDriverID); // userDetails first, falls back to username/email
+    if (info.name !== "—") driverName = info.name;
   }
   createAuditLog({
     action: "update",

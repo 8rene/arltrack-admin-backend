@@ -7,9 +7,21 @@ import { computeRefundPlan, getRefundPolicy, resolvePickupAt, getDepositAmount, 
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
-import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
+import { resolveCurrentDriverID, completeActiveAssignment } from "../driverAssignments/driverAssignments.service.js";
 import { recordDirectCancellation, inferCancelledBy } from "../cancellationRequests/cancellationRequests.service.js";
-import { syncRefundEntries, hydratePaymentData } from "../paymentEntries/paymentEntries.service.js";
+import { syncRefundEntries, writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
+import { normalizeMethod } from "../paymentEntries/paymentEntries.mapper.js";
+
+// A refund's parts[] / manualRefund / unrefundable[] live ONLY in paymentEntries ("out" rows) now. Readers get
+// the old shape back through hydrate (it only fills what the request document does not carry).
+//   paymongoRefundIDs stays on the request as the lookup key the customer backend's refund.updated webhook
+//   queries (array-contains). It is a key, not data; drop it once that webhook looks rows up by
+//   paymentEntries.referenceNumber instead.
+const hydrateOne = async (data, docID) => {
+  if (!data) return data;
+  const [h] = await hydrateRefundRequests([{ ...data, refundRequestID: data.refundRequestID || docID }]);
+  return h;
+};
 
 // Same PayMongo account as the customer backend — the secret key must be
 // set in this backend's own env too (it's a separate deployment/process).
@@ -127,7 +139,7 @@ export const getAllRefundRequests = async (status) => {
     snap.docs.map(async (doc) => {
       const data = doc.data();
       const customerName = await resolveCustomerName(data.userID);
-      const row = { ...data, customerName };
+      const row = { ...data, refundRequestID: data.refundRequestID || doc.id, customerName };
 
       if (data.status === "Pending" && data.paymentID) {
         try {
@@ -154,13 +166,15 @@ export const getAllRefundRequests = async (status) => {
     })
   );
 
-  requests.sort((a, b) => {
+  const hydrated = await hydrateRefundRequests(requests);   // parts / manualRefund / unrefundable from the rows
+
+  hydrated.sort((a, b) => {
     const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
     const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
     return bT - aT;
   });
 
-  return requests;
+  return hydrated;
 };
 
 // What refunding this booking right now would look like — same computation
@@ -280,7 +294,14 @@ const cancelBookingForRefund = async (bookingID, reason, processedBy = null) => 
   } catch (err) {
     console.error("[REFUND] failed to sync bookingSession on cancel:", err.message);
   }
-  return { cancelled: true, driverID: await resolveCurrentDriverID(b, snap.id) };
+  // Read the driver BEFORE the assignment is closed (a closed row no longer counts as current),
+  // then close it -- the other cancel paths (updateBooking, approveCancellationRequest) already do,
+  // this one used to leave the row "assigned" on a cancelled booking.
+  const driverID = await resolveCurrentDriverID(b, snap.id);
+  completeActiveAssignment(b.bookingID || snap.id, processedBy).catch((err) =>
+    console.error("[REFUND] failed to close driver assignment on cancel:", err.message)
+  );
+  return { cancelled: true, driverID };
 };
 
 // Resolves true only if the notification was actually written (or an identical
@@ -428,17 +449,21 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
         // back. Record exactly what happened so it isn't lost, and mark the
         // request Failed so staff finish it by hand instead of it looking untouched.
         const failedAt = new Date();
-        await reqRef.update({
+        const failedBatch = db.batch();
+        failedBatch.update(reqRef, {
           status: "Failed",
-          parts: [...parts, { kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID: null, status: "failed", error: e.message }],
-          paymongoRefundID: parts[0].paymongoRefundID,
-          paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
+          paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
           processedBy: adminUserID,
           processedAt: failedAt,
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
-        await syncRefundEntries(refundRequestID);
+        // The rows ARE the record of which parts already went out -- written in the same commit as the status.
+        await writeRefundEntries(refundRequestID, {
+          request: { ...refundRequest, refundRequestID: refundRequest.refundRequestID || refundRequestID, status: "Failed", processedBy: adminUserID, processedAt: failedAt, updatedAt: failedAt },
+          parts: [...parts, { kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID: null, status: "failed", error: e.message }],
+        }, { batch: failedBatch });
+        await failedBatch.commit();
         auditSafe({
           action: "update",
           description: `Refund ${refundRequestID}: the ${part.kind} refund failed at PayMongo (${e.message}) AFTER ${parts.length} earlier part(s) had already been refunded — needs manual follow-up.`,
@@ -458,7 +483,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       : null;
     const now = new Date();
 
-    await reqRef.update({
+    const approvedFields = {
       status: "Approved",
       amount: plan.total,
       onlineAmount,
@@ -468,21 +493,23 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       forfeitWaived: !!(policy && policy.waived),
       forfeitWaivedAmount: policy && policy.waived ? policy.waivedAmount : 0,
       forfeitWaivedReason: policy && policy.waived ? String(waiveReason).trim() : null,
-      parts,
-      paymongoRefundID: parts[0]?.paymongoRefundID || null,      // legacy single-id field
-      paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key
-      manualRefund,
-      unrefundable: plan.unrefundable,            // online money with no PayMongo payment id (never a hand-back)
-      unrefundableAmount: plan.unrefundableAmount,
+      paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
       processedBy: adminUserID,
       processedAt: now,
       updatedAt: now,
       customerNotified: false, // flipped to true below, only once the customer has actually been notified
       approvalLockedAt: null,
-    });
-
-    // Mirror the refund into paymentEntries ("out" rows). Never throws, never blocks the refund.
-    await syncRefundEntries(refundRequestID);
+    };
+    // parts / manualRefund / unrefundable go ONLY to paymentEntries ("out" rows), committed together with the
+    // status change. Strict: if the rows can't be written the request stays Pending-with-lock, never "Approved"
+    // without the PayMongo refund ids.
+    const approveBatch = db.batch();
+    approveBatch.update(reqRef, approvedFields);
+    await writeRefundEntries(refundRequestID, {
+      request: { ...refundRequest, ...approvedFields, refundRequestID: refundRequest.refundRequestID || refundRequestID },
+      parts, manualRefund, unrefundable: plan.unrefundable,
+    }, { batch: approveBatch });
+    await approveBatch.commit();
 
     // Tell the customer straight away — BEFORE the deposit update and the booking
     // cancel below. The PayMongo refund has already gone out, so a failure in those
@@ -576,8 +603,6 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     amount: 0,
     onlineAmount: 0,
     manualAmount: 0,
-    parts: [],
-    manualRefund: null,
     status: "Refunded", // nothing left to do — no manual portion to issue later
     processedBy: staffUserID,
     processedAt: now,
@@ -792,7 +817,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   // ── Retry of an attempt that already got past PayMongo ──
   const existingSnap = await reqRef.get();
   if (existingSnap.exists) {
-    const e = existingSnap.data();
+    const e = await hydrateOne(existingSnap.data(), refundRequestID);
     if (["Approved", "Refunded"].includes(e.status) && e.outcome === "refunded") {
       return finishStaffRefund({ ...e, refundRequestID, contextLabel, skipDriverNotify }); // money already moved — just finish the cancel
     }
@@ -825,7 +850,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   // The customer already has their own request open for this payment — resolve
   // that one instead of racing it with a second PayMongo refund. (Our own
   // placeholder doesn't count.)
-  const openCustomerRequest = await findOpenRefundRequest(paymentID);
+  const openCustomerRequestRaw = await findOpenRefundRequest(paymentID);
+  const openCustomerRequest = openCustomerRequestRaw ? { ...(await hydrateOne(openCustomerRequestRaw, openCustomerRequestRaw.id)), id: openCustomerRequestRaw.id } : openCustomerRequestRaw;
   if (openCustomerRequest && openCustomerRequest.id !== refundRequestID) {
     const cancelReason = `Cancelled by staff: ${reason}`;
 
@@ -937,12 +963,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         depositForfeited: forfeit,
         policyTier: noShowPolicy ? noShowPolicy.tier : null,
         status: "Pending",
-        parts: [],
-        paymongoRefundID: null,
         paymongoRefundIDs: [],
-        manualRefund: null,
-        unrefundable: plan.unrefundable,
-        unrefundableAmount: plan.unrefundableAmount,
         processedBy: null,
         processedAt: null,
         rejectReason: null,
@@ -982,17 +1003,20 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         // An earlier part is ALREADY refunded at PayMongo and can't be undone —
         // record exactly what happened and mark Failed (same as approve).
         const failedAt = new Date();
-        await reqRef.update({
+        const failedBatch = db.batch();
+        failedBatch.update(reqRef, {
           status: "Failed",
-          parts: [...parts, { kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID: null, status: "failed", error: e.message }],
-          paymongoRefundID: parts[0].paymongoRefundID,
-          paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
+          paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
           processedBy: staffUserID || null,
           processedAt: failedAt,
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
-        await syncRefundEntries(refundRequestID);
+        await writeRefundEntries(refundRequestID, {
+          request: { refundRequestID, bookingID, paymentID, userID, status: "Failed", processedBy: staffUserID || null, processedAt: failedAt, createdAt: claimedAt, updatedAt: failedAt },
+          parts: [...parts, { kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID: null, status: "failed", error: e.message }],
+        }, { batch: failedBatch });
+        await failedBatch.commit();
         auditSafe({
           action: "update",
           description: `Staff refund ${refundRequestID}: the ${part.kind} refund failed at PayMongo (${e.message}) AFTER ${parts.length} earlier part(s) had already been refunded — needs manual follow-up.`,
@@ -1009,24 +1033,28 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       ? { amount: manualAmount, issued: false, issuedBy: null, issuedAt: null, method: null }
       : null;
     const now = new Date();
-    await reqRef.update({
+    const staffApprovedFields = {
       status: "Approved",
       amount: totalToRefund,
       onlineAmount,
       manualAmount,
       grossPaid: plan.grossPaid,
       depositForfeited: forfeit,
-      parts,
-      paymongoRefundID: parts[0]?.paymongoRefundID || null,
-      paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),
-      manualRefund,
+      paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
       processedBy: staffUserID || null,
       processedAt: now,
       updatedAt: now,
       approvalLockedAt: null,
-    });
+    };
+    // Same rule as approveRefundRequest: the rows are the record, committed with the status, strict.
+    const staffApproveBatch = db.batch();
+    staffApproveBatch.update(reqRef, staffApprovedFields);
+    await writeRefundEntries(refundRequestID, {
+      request: { refundRequestID, bookingID, paymentID, userID, ...staffApprovedFields, createdAt: claimedAt },
+      parts, manualRefund, unrefundable: plan.unrefundable,
+    }, { batch: staffApproveBatch });
+    await staffApproveBatch.commit();
     approvedSaved = true;
-    await syncRefundEntries(refundRequestID); // "out" rows -- never throws, never blocks the refund
 
     // Discount spillover is folded into this refund now, so
     // correctIssuedDiscount() must not also try to pay it later.
@@ -1064,27 +1092,58 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     throw fail(`method must be one of: ${PAYMENT_METHODS.join(", ")}.`, 400);
   }
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
+  const entryCol = db.collection(ENTRY_COLLECTION);
+  const manualRef = entryCol.doc(`${refundRequestID}_manual`);
 
+  // The hand-back lives in the "out" row <id>_manual (paymentEntries), not on the request. The row is read and
+  // flipped inside the transaction so two staff can't both mark it. A request that still carries manualRefund /
+  // parts on the document (not yet cleaned up) is kept consistent too, because hydrate prefers the document.
   const outcome = await db.runTransaction(async (t) => {
     const snap = await t.get(reqRef);
     if (!snap.exists) throw fail("Refund request not found.", 404);
     const r = snap.data();
     if (r.status !== "Approved") throw fail(`Only an Approved refund can be marked as handed back (this one is ${r.status}).`, 409);
-    if (!r.manualRefund || !(Number(r.manualRefund.amount) > 0)) throw fail("This refund has no manual portion to hand back.", 400);
-    if (r.manualRefund.issued) throw fail("This has already been marked as handed back.", 409);
+
+    const rowSnap = await t.get(entryCol.where("refID", "==", refundRequestID));
+    const rows = rowSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((e) => e.refCollection === "refundRequests" && e.direction === "out");
+    const manualRow = rows.find((e) => e.source === "in_person") || null;
+
+    const manualAmount = Number(manualRow ? manualRow.amount : r.manualRefund?.amount) || 0;
+    if (!(manualAmount > 0)) throw fail("This refund has no manual portion to hand back.", 400);
+    const alreadyIssued = manualRow ? manualRow.status === "success" : !!r.manualRefund?.issued;
+    if (alreadyIssued) throw fail("This has already been marked as handed back.", 409);
 
     const now = new Date();
-    const manualRefund = { ...r.manualRefund, issued: true, issuedBy: issuedBy || null, issuedAt: now, method };
-    const parts = Array.isArray(r.parts) ? r.parts : [];
+    const manualRefund = { amount: manualAmount, issued: true, issuedBy: issuedBy || null, issuedAt: now, method };
     // Finished only if every PayMongo part has already settled. Otherwise the
     // customer-backend webhook completes it when the last part lands.
-    const finalize = parts.every((p) => p.status === "succeeded");
-    t.update(reqRef, { manualRefund, updatedAt: now, ...(finalize ? { status: "Refunded" } : {}) });
-    return { request: { ...r, manualRefund, status: finalize ? "Refunded" : r.status }, finalize };
+    const partDone = Array.isArray(r.parts) && r.parts.length
+      ? r.parts.map((p) => p.status === "succeeded")
+      : rows.filter((e) => e.source === "online" && e.status !== "unrefundable").map((e) => e.status === "success");
+    const finalize = partDone.every(Boolean);
+
+    t.update(reqRef, {
+      updatedAt: now,
+      ...(r.manualRefund ? { manualRefund: { ...r.manualRefund, ...manualRefund } } : {}),
+      ...(finalize ? { status: "Refunded" } : {}),
+    });
+    if (manualRow) {
+      t.update(manualRef, {
+        status: "success", method: normalizeMethod(method).method,
+        processedBy: issuedBy || null, processedAt: now, settledAt: manualRow.settledAt || now, updatedAt: now,
+      });
+    }
+    return {
+      request: { ...r, manualRefund, status: finalize ? "Refunded" : r.status },
+      finalize, hadRow: !!manualRow,
+    };
   });
 
   const r = outcome.request;
-  await syncRefundEntries(refundRequestID); // the in-person row becomes "success"
+  // A request approved before its rows existed: derive the in-person row now (best effort, as before).
+  if (!outcome.hadRow) await syncRefundEntries(refundRequestID);
 
   createTransactionLog({
     bookingID: r.bookingID,

@@ -110,6 +110,48 @@ const makeEntriesDb = (db) => {
     }
   };
 
+  /**
+   * THE writer for a refund's "out" rows (the rows are the source of truth; the request document no longer
+   * carries parts[] / manualRefund / unrefundable[]). Unlike syncRefundEntries it is STRICT: it throws, because
+   * the PayMongo refund ids exist ONLY in these rows -- losing the write would lose the money trail.
+   *   refundRequestDocID  the refundRequests document id
+   *   request             the request AS IT WILL BE after this write (processedBy, processedAt, status ...)
+   *   parts / manualRefund / unrefundable   what the refund did (same shapes buildRefundEntries reads)
+   *   opts.batch          add the rows to the caller's batch so they commit atomically with the request update
+   * Returns { written }.
+   */
+  const writeRefundEntries = async (refundRequestDocID, { request, parts, manualRefund, unrefundable } = {}, opts = {}) => {
+    if (!refundRequestDocID) throw new Error("writeRefundEntries: refundRequestDocID is required");
+    const r = {
+      ...(request || {}),
+      parts: Array.isArray(parts) ? parts : [],
+      manualRefund: manualRefund || null,
+      unrefundable: Array.isArray(unrefundable) ? unrefundable : [],
+      paymongoRefundID: null,   // never fall back to the legacy single id
+    };
+    let payment = null;
+    if (r.paymentID) {
+      const ps = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
+      payment = ps.docs.length ? ps.docs[0].data() : null;
+    }
+    const { entries } = buildRefundEntries(r, refundRequestDocID, { payment });
+    if (!entries.length) return { written: 0 };
+
+    const refs = entries.map((e) => col().doc(e.paymentEntryID));
+    const existing = await db.getAll(...refs);
+    const batch = opts.batch || db.batch();
+    let written = 0;
+    entries.forEach((e, i) => {
+      const prev = existing[i].exists ? existing[i].data() : null;
+      const patch = mergeRefundEntry(prev, e, opts);
+      if (!patch) return;
+      if (prev) batch.update(refs[i], patch); else batch.set(refs[i], patch);
+      written += 1;
+    });
+    if (!opts.batch && written) await batch.commit();
+    return { written };
+  };
+
   /** refundRequestID[] -> Map(refundRequestID -> "out" entries[]). */
   const getEntriesForRefundRequestIDs = async (refundRequestIDs) => {
     const ids = [...new Set((refundRequestIDs || []).filter(Boolean))];
@@ -200,7 +242,7 @@ const makeEntriesDb = (db) => {
   };
 
   return {
-    syncPaymentEntries, syncRefundEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
+    syncPaymentEntries, syncRefundEntries, writeRefundEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
     getEntriesForRefundRequestIDs, hydratePayments, hydratePaymentData, hydratePenalties, hydrateRefundRequests,
     getEntryRefsForBooking,
   };

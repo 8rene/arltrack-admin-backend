@@ -192,9 +192,7 @@ export const createPenalty = async ({
     computedAmount, amount: finalAmount, overrideReason,
     status: "Confirmed",
     createdBy,
-    confirmedBy: createdBy,
     createdAt: now,
-    confirmedAt: now,
     updatedAt: now,
   });
 
@@ -647,7 +645,7 @@ export const getAllPenalties = async () => {
       bookingStart: booking ? toISO(booking.startDateTime) : null,
       bookingEnd:   booking ? toISO(booking.endDateTime)   : null,
       createdAt:    toISO(data.createdAt),
-      confirmedAt:  toISO(data.confirmedAt),
+      confirmedAt:  toISO(data.confirmedAt ?? data.createdAt),   // not stored on new penalties: confirmed when created
       paidAt:       toISO(data.paidAt),
       updatedAt:    toISO(data.updatedAt),
     };
