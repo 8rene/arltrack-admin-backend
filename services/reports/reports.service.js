@@ -244,7 +244,7 @@ export const generateReport = async (period, selection = {}) => {
   // always the only real total, same as everywhere else in this app.
   const paymentAmountByBookingID = {};
 
-  // Through the entries, so referenceNumber / proofUrl etc. still resolve after the moved fields are cleaned off.
+  // Through the entries, so the PayMongo ids / fees etc. still resolve after the moved fields are cleaned off.
   const payDocs = await hydratePayments(paySnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
   payDocs.forEach((p) => {
     const doc = { id: p.id };
@@ -291,7 +291,7 @@ export const generateReport = async (period, selection = {}) => {
       status,
       methodOfPayment: p.methodOfPayment || "—",
       paymentMethod:   p.paymentMethod   || "—",
-      referenceNumber: p.referenceNumber || "—",
+      referenceNumber: p.paymongoPaymentID || "—",   // latest PayMongo charge id, from the entries
       createdAt:       toDate(p.createdAt)?.toISOString() || null,
     });
   });

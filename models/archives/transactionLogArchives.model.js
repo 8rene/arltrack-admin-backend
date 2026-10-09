@@ -8,9 +8,9 @@ export const TransactionLogArchive = {
   paymentID: "",                // FK -> payments (new — lets an archived entry still be traced back)
   refundReqID: null,            // FK -> refundRequests (Refund via a refund request)
   paymentEntryID: null,         // FK -> paymentEntries (the row a Payment log settled)
-  maintenanceID: null,          // FK -> maintenance (Expense)
+  penaltyID: null,              // FK -> penalties (a payment that covered exactly one penalty)
   userID: "",
-  type: "",                     // "Payment" | "Refund" | "Deposit" | "DepositReturn" | "Discount" | "Expense"
+  type: "",                     // "Payment" | "Refund" | "Deposit" | "DepositReturn" | "Discount"
   amount: 0,
   status: "",                   // "Success" | "Failed" | "Pending" | "Refunded" | "Rejected"
   paymentMethod: "",
