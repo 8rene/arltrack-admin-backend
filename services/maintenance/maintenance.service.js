@@ -3,7 +3,7 @@ import admin from "firebase-admin";
 import { BASIS_OPTIONS, STATUS_OPTIONS, SERVICE_CATALOG } from "../../models/maintenance/maintenance.model.js";
 import { adminUpdateHistoryPartStatus } from "../inventory/inventory.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
-import { createTransactionLog, rejectTransactionLogsByRef } from "../transactionLogs/transactionLogs.service.js";
+import { createTransactionLog, rejectTransactionLogsByMaintenance } from "../transactionLogs/transactionLogs.service.js";
 import { notifyOwners } from "../notification/notification.service.js";
 import { ROLES } from "../../utils/roles/role.util.js";
 
@@ -298,8 +298,7 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
     status: "Success",
     description: `${basis} for ${carDoc.data().plateNumber || carID}: ${description || "no description"}`,
     performedBy: editedBy,
-    refID: ref.id,
-    refCollection: "maintenance",
+    maintenanceID: ref.id,
   }).catch((err) => console.error("[TXN] Maintenance expense log failed:", err.message));
 
   // A Supervisor scheduled this — let the Owner(s) know. Never blocks or fails the create.
@@ -436,7 +435,7 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
   // then logs the new absolute amount as a fresh entry — same "one final
   // settled amount, not a delta" rule every other type in this ledger follows.
   if (update.totalCost !== undefined && update.totalCost !== existing.totalCost) {
-    rejectTransactionLogsByRef(maintenanceID, "maintenance")
+    rejectTransactionLogsByMaintenance(maintenanceID)
       .catch((err) => console.error("[TXN] Maintenance expense rejection (pre-revision) failed:", err.message));
     createTransactionLog({
       type: "Expense",
@@ -444,8 +443,7 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
       status: "Success",
       description: `Revised maintenance cost for ${plate}: ₱${(existing.totalCost || 0).toFixed(2)} → ₱${update.totalCost.toFixed(2)}.`,
       performedBy: editedBy,
-      refID: maintenanceID,
-      refCollection: "maintenance",
+      maintenanceID,
     }).catch((err) => console.error("[TXN] Maintenance expense revision failed:", err.message));
   }
 
@@ -501,7 +499,7 @@ export const deleteMaintenance = async (maintenanceID, editedBy = null) => {
   // Rejects this record's live Expense entry (if any) so it stops
   // counting toward any Success-based total, without deleting it — the
   // ledger keeps it as history, just no longer "live".
-  rejectTransactionLogsByRef(maintenanceID, "maintenance")
+  rejectTransactionLogsByMaintenance(maintenanceID)
     .catch((err) => console.error("[TXN] Maintenance expense rejection (on delete) failed:", err.message));
 
   return { id: maintenanceID };

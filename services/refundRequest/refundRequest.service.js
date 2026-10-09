@@ -1104,10 +1104,10 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     const r = snap.data();
     if (r.status !== "Approved") throw fail(`Only an Approved refund can be marked as handed back (this one is ${r.status}).`, 409);
 
-    const rowSnap = await t.get(entryCol.where("refID", "==", refundRequestID));
+    const rowSnap = await t.get(entryCol.where("refundReqID", "==", refundRequestID));
     const rows = rowSnap.docs
       .map((d) => ({ id: d.id, ...d.data() }))
-      .filter((e) => e.refCollection === "refundRequests" && e.direction === "out");
+      .filter((e) => e.direction === "out");
     const manualRow = rows.find((e) => e.source === "in_person") || null;
 
     // The rows are the only source -- nothing is read from manualRefund / parts on the request document.
@@ -1142,8 +1142,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
   createTransactionLog({
     bookingID: r.bookingID,
     paymentID: r.paymentID,
-    refID: refundRequestID,
-    refCollection: "refundRequests",
+    refundReqID: refundRequestID,
     userID: r.userID,
     type: "Refund",
     amount: r.manualRefund.amount,
@@ -1206,8 +1205,7 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
   createTransactionLog({
     bookingID: refundRequest.bookingID,
     paymentID: refundRequest.paymentID,
-    refID: refundRequestID,
-    refCollection: "refundRequests",
+    refundReqID: refundRequestID,
     userID: refundRequest.userID,
     type: "Refund",
     amount: refundRequest.amount || 0,

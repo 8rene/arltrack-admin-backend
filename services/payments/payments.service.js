@@ -296,7 +296,6 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     // Cancelled but the customer's money is still held (e.g. auto-cancelled with
     // a paid deposit and no refund opened): staff need to see that.
     heldAfterCancel: bookingStatus === "cancelled" && amountPaid > 0 && String(payment.status || "").toLowerCase() !== "refunded" && !openRefund,
-    proofUrl: payment.proofUrl || "",
     rentalFee: Number(payment.rentalFee) || 0,
     extraFee: Number(payment.extraFee) || 0,
     driversFee: Number(payment.driversFee) || 0,
@@ -478,8 +477,7 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     description: `Cash payment of ₱${depositReceived.toLocaleString()} confirmed by staff for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: confirmedBy || "—",
     logID: `${data.paymentID || doc.id}_deposit`, // same key the customer app uses → never logged twice
-    refID: `${data.paymentID || doc.id}_deposit`, // the deposit paymentEntries row this log describes
-    refCollection: "paymentEntries",
+    paymentEntryID: `${data.paymentID || doc.id}_deposit`, // the deposit paymentEntries row this log describes
   });
 
   // Bookings now start at "to pay". A staff-confirmed cash deposit is the other
@@ -586,8 +584,7 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: collectedBy || "—",
     logID: `${data.paymentID || doc.id}_balance`,
-    refID: `${data.paymentID || doc.id}_balance`, // the balance paymentEntries row this log describes
-    refCollection: "paymentEntries",
+    paymentEntryID: `${data.paymentID || doc.id}_balance`, // the balance paymentEntries row this log describes
   });
 
   auditSafe({
@@ -886,7 +883,7 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
 
   // The cash handed back is money OUT, so it gets its own paymentEntries row -- otherwise the entry ledger
   // would never see that this money left. Same shape as a refund's in-person hand-back (<id>_manual), but it
-  // hangs off the payment (refCollection "payments"), not a refund request, because no request exists for a
+  // hangs off the payment (paymentID only; refundReqID stays null), because no request exists for a
   // discount spillover. Deterministic id => marking twice only rewrites the same row. It is committed in the
   // same batch as refundIssued, so the flag and the ledger can never disagree.
   const batch = db.batch();
@@ -902,11 +899,10 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
     paymentID,
     bookingID,
     userID: data.userID || null,
-    refID: paymentID,
-    refCollection: "payments",
+    refundReqID: null,
+    penaltyID: null,
     direction: "out",
     phase: data.balanceCollected ? "balance" : "deposit",
-    parentEntryID: null,
     source: "in_person",
     method: "cash",
     amount: refundDue,
@@ -914,14 +910,11 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
     referenceNumber: null,
     sessionID: null,
     transactionFee: null,
-    proofUrl: null,
     processedBy: issuedBy || null,
     processedAt: now,
     settledAt: now,
     groupID: null,
-    note: "Discount spillover handed back to the customer",
-    flags: ["discount_spillover"],
-    migratedFrom: null,
+    transactionErrorNote: null,
     createdAt: now,
     updatedAt: now,
   });

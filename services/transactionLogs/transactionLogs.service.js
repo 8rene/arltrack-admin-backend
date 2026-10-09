@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { normalizeMethod, nullIfSentinel } from "../paymentEntries/paymentEntries.mapper.js";
 
 const VALID_TYPES   = ["Payment", "Refund", "Deposit", "DepositReturn", "Discount", "Expense"];
 const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
@@ -25,7 +26,7 @@ const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 export const createTransactionLog = async ({
   bookingID,
   paymentID,
-  refundRequestID = null, // DEPRECATED input: no longer stored. Mapped to refID/refCollection = "refundRequests" below.
+  refundRequestID = null, // DEPRECATED input alias of refundReqID (kept so an old caller keeps working). Never stored under this name.
   userID,
   type,
   amount,
@@ -34,8 +35,10 @@ export const createTransactionLog = async ({
   referenceNumber = "",
   description = "",
   performedBy = null,
-  refID = null,           // the ONE link to the source record: a refundRequests doc, a paymentEntries doc, a maintenance doc...
-  refCollection = null,   // which collection refID points into: "refundRequests" | "paymentEntries" | "maintenance"
+  // The link to the record that caused this log. Set AT MOST ONE of these (there is no generic refID/refCollection pair):
+  refundReqID = null,     // refundRequests doc (type "Refund" via a refund request)
+  paymentEntryID = null,  // paymentEntries doc that was settled (type "Payment")
+  maintenanceID = null,   // maintenance doc (type "Expense")
   // Optional idempotency key: written with create() to a doc of exactly this id,
   // so a repeat attempt to log the same event is a harmless no-op instead of a
   // duplicate row. Omit for one-off entries.
@@ -51,9 +54,8 @@ export const createTransactionLog = async ({
       return null;
     }
 
-    // Old callers still pass refundRequestID. The log no longer has that column: the refund request is
-    // referenced through refID / refCollection like every other source record.
-    if (refundRequestID && !refID) { refID = refundRequestID; refCollection = "refundRequests"; }
+    // Old callers still pass refundRequestID: it is the same thing as refundReqID.
+    if (refundRequestID && !refundReqID) refundReqID = refundRequestID;
 
     const ref = logID ? db.collection("transactionLogs").doc(logID) : db.collection("transactionLogs").doc();
     const payload = {
@@ -61,13 +63,17 @@ export const createTransactionLog = async ({
       bookingID: bookingID || null,
       paymentID: paymentID || null,
       userID: userID || null,
-      refID,
-      refCollection,
+      refundReqID: refundReqID || null,
+      paymentEntryID: paymentEntryID || null,
+      maintenanceID: maintenanceID || null,
       type,
       amount: Number(amount) || 0,
       status,
-      paymentMethod,
-      referenceNumber,
+      // Same vocabulary as paymentEntries: a method CODE (gcash | maya | qrph | cash | bank_transfer) or "" when
+      // there is none ("PayMongo", "—" ...). Never a display label, so the ledger filters and groups cleanly.
+      paymentMethod: normalizeMethod(paymentMethod).method || "",
+      // "" when there is no reference -- never the "—" / "N/A" placeholders.
+      referenceNumber: nullIfSentinel(referenceNumber) || "",
       description,
       performedBy,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -89,18 +95,17 @@ export const createTransactionLog = async ({
   }
 };
 
-// Marks every still-"Success" entry tied to a given source record as
+// Marks every still-"Success" entry tied to a given maintenance record as
 // "Rejected" instead of deleting or writing a negative-amount reversal —
 // same status vocabulary refund requests already use for "this no longer
 // counts". Used when the record that caused an Expense entry (e.g. a
 // maintenance record) gets deleted, so it stops counting toward any
 // Success-based total while the original entry stays in the ledger as
 // history instead of disappearing.
-export const rejectTransactionLogsByRef = async (refID, refCollection) => {
+export const rejectTransactionLogsByMaintenance = async (maintenanceID) => {
   try {
     const snap = await db.collection("transactionLogs")
-      .where("refID", "==", refID)
-      .where("refCollection", "==", refCollection)
+      .where("maintenanceID", "==", maintenanceID)
       .where("status", "==", "Success")
       .get();
     if (snap.empty) return 0;
@@ -109,7 +114,7 @@ export const rejectTransactionLogsByRef = async (refID, refCollection) => {
     await batch.commit();
     return snap.size;
   } catch (err) {
-    console.error("rejectTransactionLogsByRef error:", err.message);
+    console.error("rejectTransactionLogsByMaintenance error:", err.message);
     return 0;
   }
 };
