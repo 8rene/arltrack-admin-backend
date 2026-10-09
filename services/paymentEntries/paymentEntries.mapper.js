@@ -6,7 +6,7 @@
 //
 // What lives here:
 //   buildPaymentEntries     legacy payments doc  -> deposit / balance "in" rows
-//   buildLegacyPenaltyEntry legacy penalties doc -> one "legacy_aggregate" row (or a review reason)
+//   buildLegacyPenaltyEntry legacy penalties doc -> one aggregate row (or a review reason)
 //   buildPenaltyPaymentEntry a NEW penalty payment -> row (used by recordShortfallPayment)
 //   mergeEntry              how a re-derived row is applied over an existing one
 //   hydratePayment / hydratePenalty  rows -> the OLD field names, so readers don't change
@@ -82,7 +82,6 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
   const ids = resolvePaymongoIDs(p);
   const payType = payTypeOf(p);
   const amount = num(p.amount);
-  const discount = num(p.discountAmount);
   const arr = Array.isArray(p.paymongoTransactions) ? p.paymongoTransactions : [];
   const arrOf = (phase) => arr.find((t) => t && t.phase === phase) || null;
 
@@ -136,7 +135,7 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
       method: m.method,
       amount: expectedDeposit,
       status,
-      referenceNumber: online ? (ids.deposit || null) : nullIfSentinel(p.referenceNumber),
+      referenceNumber: online ? (ids.deposit || null) : null,
       sessionID: online ? sessionOf("deposit") : null,
       transactionFee: online ? orNull(p.depositPaymongoFee) : null,
       processedBy: online ? null : nullIfSentinel(p.confirmedBy),
@@ -372,7 +371,6 @@ const hydratePayment = (payment, entries, opts = {}) => {
     } else {
       fill("confirmedBy", dep.processedBy);
       fill("confirmedAt", dep.processedAt);
-      fill("referenceNumber", dep.referenceNumber);
     }
     if (dep.status === "success") fill("paidAt", dep.settledAt);
   }
@@ -434,8 +432,8 @@ const hydratePenalty = (penalty, entries, opts = {}) => {
  *   <refundRequestID>_manual           staff handed money back in person (cash taken in person only)
  *   <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: nothing to refund -- NOT a hand-back
  *
- * An "out" row finds the "in" row it refunds through paymentID + phase (no parent pointer is stored).
- * A pending / rejected request has no parts yet, so it produces no rows.
+ * A refund row is tied to what it refunds by paymentID + phase (no separate parent link). A pending / rejected
+ * request has no parts yet, so it produces no rows.
  */
 const buildRefundEntries = (r, docID, opts = {}) => {
   r = r || {};

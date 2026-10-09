@@ -20,13 +20,13 @@
 // Money out -> direction "out" (a refund)
 //     <refundRequestID>_part<n>          one PayMongo refund        (source "online",    referenceNumber = re_...)
 //     <refundRequestID>_manual           staff hand-back in person  (source "in_person") -- cash taken in person ONLY
-//     <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: status "unrefundable", with the
+//     <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: status "unrefundable", with
 //                                        transactionErrorNote "Payment ID does not exist". It is reported, never
 //                                        handed back.
 //     <paymentID>_discountrefund         cash handed back for a staff discount that exceeded what was owed
-//                                        (source "in_person", method "cash", refundReqID null: no refund request
-//                                        exists for it). Written by markRefundIssued() in the same batch as
-//                                        payments.refundIssued.
+//                                        (source "in_person", method "cash", refundReqID null). No refund
+//                                        request exists for it. Written by markRefundIssued() in the same
+//                                        batch as payments.refundIssued.
 // The "out" rows ARE the source of truth for a refund: refundRequests no longer stores parts[] / manualRefund /
 // unrefundable[] (writeRefundEntries commits them with the status change; hydrateRefundRequests rebuilds the
 // old shape for readers). A request that still carries those fields (not yet cleaned up) wins in hydrate.
@@ -50,11 +50,11 @@ export const ENTRY_STATUSES   = ["pending", "success", "failed", "cancelled", "u
 export const PaymentEntry = {
   paymentEntryID: "",       // same as the Firestore doc ID. Deposit/balance rows: "<paymentID>_deposit" | "<paymentID>_balance"
                             // (same key the transaction-log idempotency already uses). Penalty / later attempts: auto ID.
-  paymentID:   null,        // FK -> payments.paymentID. ALWAYS the payment this money movement belongs to (null only for an old penalty whose payment is unknown)
+  paymentID:   null,        // FK -> payments.paymentID (every row)
   bookingID:   null,        // FK -> bookings.bookingID
   userID:      null,        // FK -> user (the customer)
-  refundReqID: null,        // FK -> refundRequests.refundRequestID. Set ONLY on "out" rows created by a refund request.
-  penaltyID:   null,        // FK -> penalties.penaltyID. Set ONLY on phase "penalty" rows.
+  refundReqID: null,        // FK -> refundRequests.refundRequestID. Set on a refund's "out" rows only.
+  penaltyID:   null,        // FK -> penalties.penaltyID. Set on "penalty" phase rows only.
   direction:   "in",        // "in" | "out"
   phase:       "deposit",   // "deposit" | "balance" | "penalty"   (for "out": the phase being refunded)
   source:      "online",    // "online" | "in_person"
@@ -70,16 +70,16 @@ export const PaymentEntry = {
   processedAt: null,
   settledAt:   null,        // when the money actually moved
   groupID:     null,        // rows created by ONE payment that covered several penalties share this
-  transactionErrorNote: null, // why this movement failed / could not be refunded (e.g. a PayMongo refund error,
-                            // "Payment ID does not exist"). null unless status is "failed" or "unrefundable".
+  transactionErrorNote: null, // why a movement failed / could not happen (a failed refund part's error,
+                            // "Payment ID does not exist"). null when nothing went wrong.
   createdAt:   null,
   updatedAt:   null,
 };
 
 // Indexes the app relies on (Firestore creates single-field ones automatically):
 //   paymentID + phase           list a payment's entries
-//   refundReqID                 a refund request's "out" rows (queried with `in`)
-//   penaltyID                   a penalty's rows (queried with `in`)
+//   refundReqID                 list a refund's "out" rows (queried `in` [...] and `==`)
+//   penaltyID                   list a penalty's payments (queried `in` [...])
 //   referenceNumber + direction webhook lookup (STEP 2)
 //   sessionID                   webhook lookup
 //   bookingID                   permanent-delete cleanup

@@ -36,8 +36,8 @@ export const PENALTY_STATUSES = ["Confirmed", "Voided", "Waived"];
 // "Deposit" / "DepositPartial" are set automatically by settleBooking();
 // the rest are set by whoever records the in-person payment.
 //
-// There is NO online (PayMongo) option: nothing in the customer app pays a penalty, so every penalty
-// payment is recorded by staff, in person. (Old documents that say "PayMongo" still read fine.)
+// A penalty can also be paid ONLINE by the customer (PayMongo checkout in the customer backend,
+// penaltyPayment.controller.js): that writes the same paymentEntries rows with source "online".
 //
 // The money itself lives in paymentEntries (phase "penalty", one row per penalty a payment covered, source
 // "in_person"). paymentMethod / referenceNumber / paidAt below are only a cache of the LATEST payment --

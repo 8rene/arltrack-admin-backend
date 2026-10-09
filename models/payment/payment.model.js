@@ -2,8 +2,9 @@
 export const Payment = {
   paymentID: "",
   bookingID: "",
-  paymentMethod: "",  // e.g. "Cash", "GCash"
-  referenceNumber: "", // "N/A" for cash
+  paymentMethod: "",  // e.g. "gcash", "maya", "qrph" -- the customer's chosen channel
+  // referenceNumber / proofUrl are NOT stored on a payment: the reference (pay_... / re_...) is
+  // paymentEntries.referenceNumber, and there is no proof upload -- PayMongo is the proof.
   amount: 0,          // deposit amount (partial)
   rentalFee: 0,
   serviceFee: 0,

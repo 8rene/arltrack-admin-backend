@@ -207,11 +207,10 @@ const buildTransactions = (payment) => {
   const list = [];
 
   // ── Deposit (or the single payment for Full) ──
-  const manualRef = p.referenceNumber && !["—", "N/A"].includes(p.referenceNumber) ? p.referenceNumber : null;
   const depositOnline = !!(ids.deposit || p.paymongoChannel || !["paid", "approved"].includes(low(p.status)));
   list.push({
     phase: "deposit",
-    ref: ids.deposit || manualRef || null,
+    ref: ids.deposit || null,
     amount: expectedDeposit,
     fee: p.depositPaymongoFee ?? null,
     channel: depositOnline ? (p.paymongoChannel || null) : (p.paymentMethod && p.paymentMethod !== "—" ? p.paymentMethod : null),
@@ -289,7 +288,6 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     refundIssued: !!payment.refundIssued,
     methodOfPayment: payment.methodOfPayment || "—",
     paymentMethod: payment.paymentMethod || "—",
-    referenceNumber: payment.referenceNumber || "—",
     paymongoPaymentID: payment.paymongoPaymentID || null,
     status,
     paymentStage,
@@ -473,7 +471,6 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     amount: depositReceived,
     status: "Success",
     paymentMethod,
-    referenceNumber: data.referenceNumber || "—",
     description: `Cash payment of ₱${depositReceived.toLocaleString()} confirmed by staff for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: confirmedBy || "—",
     logID: `${data.paymentID || doc.id}_deposit`, // same key the customer app uses → never logged twice
@@ -580,7 +577,6 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     // field is deliberately left alone here since it still describes the
     // original deposit, not this separate balance collection.
     paymentMethod,
-    referenceNumber: data.referenceNumber || "—",
     description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: collectedBy || "—",
     logID: `${data.paymentID || doc.id}_balance`,
@@ -883,7 +879,7 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
 
   // The cash handed back is money OUT, so it gets its own paymentEntries row -- otherwise the entry ledger
   // would never see that this money left. Same shape as a refund's in-person hand-back (<id>_manual), but it
-  // hangs off the payment (paymentID only; refundReqID stays null), because no request exists for a
+  // hangs off the payment (paymentID only, refundReqID stays null), because no request exists for a
   // discount spillover. Deterministic id => marking twice only rewrites the same row. It is committed in the
   // same batch as refundIssued, so the flag and the ledger can never disagree.
   const batch = db.batch();

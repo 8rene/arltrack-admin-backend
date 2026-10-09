@@ -1,6 +1,6 @@
 // paymentEntries -- bound to the real Firestore connection.
 // READERS: anything that reads a payment / penalty document and uses a field the PHASE 2 cleanup removes
-// (PayMongo payment ids, fees, channel, proofUrl, paidAt, confirmedBy ...) must load it through
+// (PayMongo payment ids, fees, channel, paidAt, confirmedBy ...) must load it through
 // hydratePayments / hydratePaymentData / hydratePenalties. See scripts/migrate-payment-entries.js.
 // STEP 1: the legacy payment fields stay the source of truth. After a payment is written,
 // syncPaymentEntries() re-derives its deposit / balance rows from the document, so the

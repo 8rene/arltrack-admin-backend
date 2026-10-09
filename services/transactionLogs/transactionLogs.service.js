@@ -1,6 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { normalizeMethod, nullIfSentinel } from "../paymentEntries/paymentEntries.mapper.js";
 
 const VALID_TYPES   = ["Payment", "Refund", "Deposit", "DepositReturn", "Discount", "Expense"];
 const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
@@ -26,7 +25,6 @@ const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 export const createTransactionLog = async ({
   bookingID,
   paymentID,
-  refundRequestID = null, // DEPRECATED input alias of refundReqID (kept so an old caller keeps working). Never stored under this name.
   userID,
   type,
   amount,
@@ -35,10 +33,10 @@ export const createTransactionLog = async ({
   referenceNumber = "",
   description = "",
   performedBy = null,
-  // The link to the record that caused this log. Set AT MOST ONE of these (there is no generic refID/refCollection pair):
-  refundReqID = null,     // refundRequests doc (type "Refund" via a refund request)
-  paymentEntryID = null,  // paymentEntries doc that was settled (type "Payment")
-  maintenanceID = null,   // maintenance doc (type "Expense")
+  // Link to the record that caused this entry. At most one is set; each has its own column:
+  refundReqID = null,     // a refundRequests doc
+  paymentEntryID = null,  // the paymentEntries row that was settled
+  maintenanceID = null,   // a maintenance record (type "Expense")
   // Optional idempotency key: written with create() to a doc of exactly this id,
   // so a repeat attempt to log the same event is a harmless no-op instead of a
   // duplicate row. Omit for one-off entries.
@@ -54,26 +52,20 @@ export const createTransactionLog = async ({
       return null;
     }
 
-    // Old callers still pass refundRequestID: it is the same thing as refundReqID.
-    if (refundRequestID && !refundReqID) refundReqID = refundRequestID;
-
     const ref = logID ? db.collection("transactionLogs").doc(logID) : db.collection("transactionLogs").doc();
     const payload = {
       transactionLogsID: ref.id,
       bookingID: bookingID || null,
       paymentID: paymentID || null,
       userID: userID || null,
-      refundReqID: refundReqID || null,
-      paymentEntryID: paymentEntryID || null,
-      maintenanceID: maintenanceID || null,
+      refundReqID,
+      paymentEntryID,
+      maintenanceID,
       type,
       amount: Number(amount) || 0,
       status,
-      // Same vocabulary as paymentEntries: a method CODE (gcash | maya | qrph | cash | bank_transfer) or "" when
-      // there is none ("PayMongo", "—" ...). Never a display label, so the ledger filters and groups cleanly.
-      paymentMethod: normalizeMethod(paymentMethod).method || "",
-      // "" when there is no reference -- never the "—" / "N/A" placeholders.
-      referenceNumber: nullIfSentinel(referenceNumber) || "",
+      paymentMethod,
+      referenceNumber,
       description,
       performedBy,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),

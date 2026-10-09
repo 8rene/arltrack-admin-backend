@@ -3,7 +3,6 @@ export const Payment = {
   paymentID: "",
   bookingID: "",
   paymentMethod: "",  // e.g. "Cash", "GCash"
-  referenceNumber: "", // "N/A" for cash
   amount: 0,          // deposit amount (partial)
   rentalFee: 0,
   serviceFee: 0,
