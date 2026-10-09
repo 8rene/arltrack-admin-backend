@@ -10,6 +10,7 @@ import { computeAmounts, derivePaymentStage } from "../../services/payments/paym
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
+import { getDepositView } from "../payments/depositView.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 import {
   bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
@@ -80,7 +81,7 @@ export const resolvePaymentInfo = async (bookingID) => {
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
 
-    const deposit = data.deposit || null;
+    const deposit = getDepositView(data);   // null = never recorded; same view for flat and old nested storage
     const depositAmount = deposit?.amount || 0;
     const depositStatus = deposit?.status || "—";
     const penalties = await listPenaltiesForBooking(bookingID);
@@ -95,9 +96,9 @@ export const resolvePaymentInfo = async (bookingID) => {
     // settled, report what actually happened instead: anything still unpaid
     // right now is owed by the customer (negative), otherwise it's the
     // amount that was handed back (settlement.net).
-    const settlement = deposit?.settlement?.status ? deposit.settlement : null;
+    const settlement = deposit?.settlement || null;
     const depositSettled = !!settlement;
-    const depositDeducted = settlement ? depositAmount - Math.max(0, settlement.net || 0) : 0;
+    const depositDeducted = deposit?.deducted || 0;
     const amountToReturn = settlement
       ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, settlement.net || 0))
       : depositAmount - confirmedPenaltyTotal;
@@ -112,14 +113,14 @@ export const resolvePaymentInfo = async (bookingID) => {
       gatewayFee:    data.gatewayFee    ?? 0,
       // Refundable deposit charged as part of `amount` (0 on older bookings).
       securityDeposit: Number(data.securityDeposit) || 0,
-      // The REAL security deposit (payments.deposit, written by
-      // penalty.service.js's recordDepositReceived/waiveDeposit) — a light
-      // read-only summary, not the raw object (it carries Firestore
-      // timestamps). null = never recorded yet. Not the legacy depositFee.
-      deposit: data.deposit ? {
-        amount:         Number(data.deposit.amount) || 0,
-        status:         data.deposit.status || "",
-        returnedAmount: Number(data.deposit.returned?.amount) || 0,
+      // The REAL security deposit (depositStatus & co on the payment, written by
+      // penalty.service.js's waiveDeposit/settleBooking) — a light read-only
+      // summary (no Firestore timestamps). null = never recorded yet. Not the
+      // legacy depositFee. The API shape is unchanged from when it was a nested object.
+      deposit: deposit ? {
+        amount:         deposit.amount,
+        status:         deposit.status,
+        returnedAmount: deposit.returnedAmount,
       } : null,
       amountPaid,
       balance,
@@ -437,11 +438,11 @@ const getDepositPosition = async (bID) => {
   const paymentData = paymentSnap.empty
     ? null
     : await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
-  const deposit = paymentData?.deposit || null;
+  const deposit = getDepositView(paymentData);
   const unpaidTotal = penalties
     .filter((p) => p.status === "Confirmed")
     .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
-  const alreadySettled = !!deposit?.settlement?.status;
+  const alreadySettled = !!deposit?.settlement;
   const depositAvailable = deposit?.status === "Held" && !alreadySettled ? (deposit.amount || 0) : 0;
   return {
     penalties, deposit, unpaidTotal, alreadySettled,
@@ -996,7 +997,7 @@ export const getReturnChecklist = async (docID) => {
 
   const droppedOff = !!session?.data?.droppedOffTime;
   const holdsDeposit = pos.deposit?.status === "Held" && !pos.alreadySettled;
-  const settlement = pos.deposit?.settlement?.status ? pos.deposit.settlement : null;
+  const settlement = pos.deposit?.settlement || null;
 
   const items = [
     {

@@ -1,4 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
+import admin from "firebase-admin";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { resolveNotification, createNotification } from "../notification/notification.service.js";
 import { ROLE_IDS } from "../../utils/roles/role.util.js";
@@ -11,6 +12,7 @@ import { resolveCurrentDriverID, completeActiveAssignment } from "../driverAssig
 import { recordDirectCancellation, inferCancelledBy } from "../cancellationRequests/cancellationRequests.service.js";
 import { writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { normalizeMethod } from "../paymentEntries/paymentEntries.mapper.js";
+import { getDepositView } from "../payments/depositView.js";
 
 // A refund's parts[] / manualRefund / unrefundable[] live ONLY in paymentEntries ("out" rows) now. Readers get
 // the old shape back through hydrate (it only fills what the request document does not carry).
@@ -101,13 +103,19 @@ const policyForRequest = (request, payment, { waiveForfeit = false } = {}) => {
 // inside the refund ("Refunded"). Without this the deposit would still look
 // Held and could be offered for return/settlement a second time.
 const markDepositAfterRefund = async (paymentRef, payment, forfeit) => {
-  const dep = payment && payment.deposit;
+  const dep = getDepositView(payment);
   if (!dep || dep.status !== "Held") return;
   const now = new Date();
   try {
-    await paymentRef.update(forfeit > 0
-      ? { "deposit.status": "Forfeited", "deposit.forfeitedAmount": forfeit, "deposit.forfeitedAt": now, updatedAt: now }
-      : { "deposit.status": "Refunded", "deposit.refundedAt": now, updatedAt: now });
+    // Status + when it left Held. The forfeited amount is not stored here: it is the refund request's
+    // depositForfeited. securityDeposit is written so the amount survives dropping the old nested object.
+    await paymentRef.update({
+      securityDeposit: dep.amount,
+      depositStatus: forfeit > 0 ? "Forfeited" : "Refunded",
+      depositSettledAt: now,
+      deposit: admin.firestore.FieldValue.delete(),
+      updatedAt: now,
+    });
   } catch (err) {
     console.error("[REFUND] failed to update the deposit status:", err.message);
   }

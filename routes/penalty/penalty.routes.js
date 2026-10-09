@@ -3,7 +3,6 @@ import {
   getBookingPenalties,
   postCreatePenalty,
   patchVoidOrWaivePenalty,
-  postDepositReceived,
   postWaiveDeposit,
   postSettleBooking,
   postShortfallPayment,
@@ -31,7 +30,6 @@ export const registerPenaltyRoutes = (app) => {
   app.post ("/api/penalties",                   verifyToken, requireRole(staff),      postCreatePenalty);
   app.patch("/api/penalties/:penaltyID/status", verifyToken, requireRole(supervisor), patchVoidOrWaivePenalty);
 
-  app.post("/api/penalties/deposit/received", verifyToken, requireRole(staff),      postDepositReceived);
   app.post("/api/penalties/deposit/waive",    verifyToken, requireRole(supervisor), postWaiveDeposit);
 
   app.post("/api/penalties/booking/:bookingID/settle", verifyToken, requireRole(supervisor), postSettleBooking);

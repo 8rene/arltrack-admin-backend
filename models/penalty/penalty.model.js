@@ -42,7 +42,7 @@ export const PENALTY_STATUSES = ["Confirmed", "Voided", "Waived"];
 // penaltyPayment.controller.js) or in person (recordShortfallPayment): both write paymentEntries rows
 // (phase "penalty", one row per penalty a payment covered). That is the only place the method, reference
 // and date of a payment live. A payment covered by the held deposit has no row: no money moved, it is an
-// offset recorded on payments.deposit.settlement (its date is settlement.settledAt).
+// offset recorded on the payment (its date is payments.depositSettledAt).
 export const PENALTY_PAYMENT_METHODS = [
   "Deposit",         // fully covered by the held deposit
   "DepositPartial",  // partially covered by the deposit, remainder recorded separately
@@ -84,7 +84,7 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   // paymentMethod / referenceNumber / paidAt are NOT stored on a penalty: each payment is a row in paymentEntries
   // (phase "penalty") and hydratePenalties() gives the latest method / reference / date back to readers. A
   // penalty covered by the held deposit stores nothing but paidAmount; settleBooking() records the offset on
-  // payments.deposit.settlement.
+  // payments.depositStatus / depositPenaltyTotal / depositSettledAt.
   paidAmount:      data.paidAmount      ?? 0,  // may be < amount if partially covered by deposit
 
   // confirmedBy / confirmedAt are NOT stored on a new penalty: a penalty is confirmed the moment it is created,

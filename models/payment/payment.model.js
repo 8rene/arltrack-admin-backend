@@ -63,16 +63,19 @@ export const Payment = {
   // "<paymentID>_discountrefund" entry (out-row), not a field here.
   refundIssued: false,
 
-  // The security deposit held for the booking (written by penalty.service.js: recordDepositReceived, waiveDeposit,
-  // settleBooking). Its `settlement` is also where a penalty paid from the deposit is recorded.
-  deposit: {
-    amount: 0,
-    status: "",          // "Held" | "Waived" | "Settled" ...
-    waivedReason: "",
-    received: { method: null, referenceNumber: "", by: null, at: null },
-    returned: { method: null, referenceNumber: "", by: null, at: null, amount: 0 },
-    settlement: { confirmedPenaltyTotal: 0, net: 0, status: "", settledBy: null, settledAt: null },
-  },
+  // The security deposit held for the booking. It is charged inside `amount` with the first payment, so the
+  // first payment's entry row already holds how it was paid. Flat fields (read them through getDepositView(),
+  // services/payments/depositView.js -- it also understands the old nested `deposit` object until
+  // scripts/migrate-deposit-flat.js has run):
+  //   securityDeposit      (above) the deposit amount
+  depositStatus: "",            // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
+  depositWaivedReason: "",      // Waived only
+  depositPenaltyTotal: 0,       // Settled only: every confirmed penalty owed at settlement. Can exceed the deposit,
+                                // which is what makes the result "OwedByCustomer". Deducted / net / result are derived.
+  depositSettledAt: null,       // when the deposit stopped being Held (settled, waived, forfeited or refunded)
+  depositSettledBy: null,       // staff uid (settled / waived)
+  // The deposit handed back at settlement is the "<paymentID>_depositreturn" out-row in paymentEntries
+  // (method, reference, processedBy, processedAt, amount). Written by settleBooking() in penalty.service.js.
 
   createdAt: null,
   updatedAt: null,

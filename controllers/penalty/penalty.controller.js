@@ -3,7 +3,6 @@ import {
   listPenaltiesForBooking,
   createPenalty as createPenaltyService,
   voidOrWaivePenalty as voidOrWaivePenaltyService,
-  recordDepositReceived as recordDepositReceivedService,
   waiveDeposit as waiveDepositService,
   settleBooking as settleBookingService,
   recordShortfallPayment as recordShortfallPaymentService,
@@ -97,17 +96,6 @@ export const patchVoidOrWaivePenalty = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[PENALTY] void/waive error:", error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-export const postDepositReceived = async (req, res) => {
-  try {
-    const result = await recordDepositReceivedService({ ...req.body, by: actorId(req) });
-    if (result.error) return res.status(400).json({ success: false, message: result.error });
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[PENALTY] deposit received error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
