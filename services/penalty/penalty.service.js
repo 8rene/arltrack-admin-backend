@@ -486,7 +486,8 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
 export const recordShortfallPayment = async ({ userID, amount, method, referenceNumber = "", performedBy, penaltyID = null }) => {
   amount = Number(amount);
   if (!(amount > 0)) return { error: "amount must be greater than 0." };
-  // Penalties are paid in person only -- nothing in the customer app pays one, so there is no online option.
+  // This is the in-person (staff) path. The customer can also pay penalties online -- see the customer backend's
+  // penaltyPayment.controller.js; both write the same paymentEntries rows.
   if (!PENALTY_SHORTFALL_METHODS.includes(method)) {
     return { error: `method must be one of: ${PENALTY_SHORTFALL_METHODS.join(", ")}.` };
   }
@@ -560,6 +561,7 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
   const first = touched[0];
   await createTransactionLog({
     bookingID: first?.bookingID || null, paymentID: first?.paymentID || null,
+    penaltyID: touched.length === 1 ? touched[0].penaltyID : null,   // one payment can cover several penalties
     userID, type: "Payment", amount: amount - remaining, status: "Success",
     paymentMethod: method, referenceNumber, performedBy,
     description: "Outstanding penalty balance paid.",

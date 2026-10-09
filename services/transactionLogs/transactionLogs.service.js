@@ -1,7 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 
-const VALID_TYPES   = ["Payment", "Refund", "Deposit", "DepositReturn", "Discount", "Expense"];
+const VALID_TYPES   = ["Payment", "Refund", "Deposit", "DepositReturn", "Discount"];
 const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 
 // Writes one entry to the transactionLogs collection. This is the single
@@ -11,12 +11,10 @@ const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 // state change (e.g. a refund sitting at "Pending" does NOT get an entry
 // here — see refundRequests for that in-progress state).
 //
-// "Expense" is the one type that isn't customer-facing — a company cost
-// (e.g. a maintenance bill) with no booking/payment/customer attached, so
-// bookingID/paymentID/userID are left null for those entries. Every type
-// here, Expense included, logs one final settled amount — never a delta —
-// so a later correction/reversal is its own separate entry with its own
-// full amount, not a diff against a previous one.
+// This ledger is money-only: every entry is money that moved between the customer and the business.
+// Company costs (e.g. a maintenance bill) are NOT logged here -- maintenance.totalCost is their only copy.
+// Every type logs one final settled amount -- never a delta -- so a later correction/reversal is its own
+// separate entry with its own full amount, not a diff against a previous one.
 //
 // Never throws — a logging failure should never block the real action
 // (a payment settling, a discount being applied) from completing. Callers
@@ -36,7 +34,8 @@ export const createTransactionLog = async ({
   // Link to the record that caused this entry. At most one is set; each has its own column:
   refundReqID = null,     // a refundRequests doc
   paymentEntryID = null,  // the paymentEntries row that was settled
-  maintenanceID = null,   // a maintenance record (type "Expense")
+  penaltyID = null,       // a penalties doc, when the payment covered exactly ONE penalty (several -> null; the
+                          //   per-penalty rows are the paymentEntries that share a groupID)
   // Optional idempotency key: written with create() to a doc of exactly this id,
   // so a repeat attempt to log the same event is a harmless no-op instead of a
   // duplicate row. Omit for one-off entries.
@@ -60,7 +59,7 @@ export const createTransactionLog = async ({
       userID: userID || null,
       refundReqID,
       paymentEntryID,
-      maintenanceID,
+      penaltyID,
       type,
       amount: Number(amount) || 0,
       status,
@@ -84,30 +83,6 @@ export const createTransactionLog = async ({
   } catch (err) {
     console.error("createTransactionLog error:", err.message);
     return null;
-  }
-};
-
-// Marks every still-"Success" entry tied to a given maintenance record as
-// "Rejected" instead of deleting or writing a negative-amount reversal —
-// same status vocabulary refund requests already use for "this no longer
-// counts". Used when the record that caused an Expense entry (e.g. a
-// maintenance record) gets deleted, so it stops counting toward any
-// Success-based total while the original entry stays in the ledger as
-// history instead of disappearing.
-export const rejectTransactionLogsByMaintenance = async (maintenanceID) => {
-  try {
-    const snap = await db.collection("transactionLogs")
-      .where("maintenanceID", "==", maintenanceID)
-      .where("status", "==", "Success")
-      .get();
-    if (snap.empty) return 0;
-    const batch = db.batch();
-    snap.docs.forEach((doc) => batch.update(doc.ref, { status: "Rejected" }));
-    await batch.commit();
-    return snap.size;
-  } catch (err) {
-    console.error("rejectTransactionLogsByMaintenance error:", err.message);
-    return 0;
   }
 };
 

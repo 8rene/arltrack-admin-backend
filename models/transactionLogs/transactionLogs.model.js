@@ -7,25 +7,25 @@
 // resolves (Refunded / Failed / Rejected) does the outcome land in this
 // ledger. See refundRequests for the in-progress workflow state.
 //
-// "Expense" entries are the one exception to "customer-facing": a company
-// cost (e.g. a maintenance bill) with no booking/payment/customer, so
-// bookingID/paymentID/userID are null on those. Every type, Expense
-// included, always logs one final settled amount, never a delta — a
-// correction or reversal is its own full-amount entry, not a diff.
+// Money-only: company costs (e.g. maintenance bills) are NOT in this ledger --
+// maintenance.totalCost is their only copy. Every type always logs one final
+// settled amount, never a delta — a correction or reversal is its own
+// full-amount entry, not a diff.
 export const TransactionLog = {
   transactionLogsID: "",     // Firestore doc ID
-  bookingID: "",          // FK -> bookings (null for "Expense")
-  paymentID: "",          // FK -> payments (null for "Expense")
-  userID: "",             // FK -> user, the customer the money event belongs to (null for "Expense")
+  bookingID: "",          // FK -> bookings
+  paymentID: "",          // FK -> payments
+  userID: "",             // FK -> user, the customer the money event belongs to
   // Link to the record that caused this entry -- one column per kind, at most one is set (there is no
   // refundRequestID / refID / refCollection column):
   refundReqID: null,      // FK -> refundRequests (type "Refund" via that flow)
   paymentEntryID: null,   // FK -> paymentEntries: the row that was settled (type "Payment"). A log that covers several
                           //   entries at once (one settled total) leaves this null; use paymentID to find them.
-  maintenanceID: null,    // FK -> maintenance (type "Expense")
-  // Discount / DepositReturn / discount-spillover refunds have no source record, so all three stay null.
+  penaltyID: null,        // FK -> penalties: a penalty payment that covered exactly ONE penalty. A payment that covered
+                          //   several leaves this null (its paymentEntries rows share a groupID).
+  // Discount / DepositReturn / discount-spillover refunds have no source record, so all four stay null.
 
-  type: "",               // "Payment" | "Refund" | "Deposit" | "DepositReturn" | "Discount" | "Expense"
+  type: "",               // "Payment" | "Refund" | "Deposit" | "DepositReturn" | "Discount"
   amount: 0,
   status: "",             // "Success" | "Failed" | "Pending" | "Refunded" | "Rejected"
 
