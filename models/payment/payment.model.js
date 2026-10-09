@@ -67,7 +67,7 @@ export const Payment = {
   // first payment's entry row already holds how it was paid. Flat fields (read them through getDepositView(),
   // services/payments/depositView.js -- it also understands the old nested `deposit` object until
   // scripts/migrate-deposit-flat.js has run):
-  //   securityDeposit      (above) the deposit amount
+  //   securityDeposit      (above  ) the deposit amount
   depositStatus: "",            // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
   depositSettled: 0,            // Settled only: pesos of the deposit USED to pay penalties (never more than the deposit;
                                 // penalties beyond it stay on the penalties, amount - paidAmount, with their reasons).
