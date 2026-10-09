@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { hydratePayments } from "../paymentEntries/paymentEntries.service.js";
+import { stripArchiveMeta } from "./archiveMeta.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -81,16 +82,9 @@ const restoreLinkedBooking = async (bookingID) => {
   if (snap.empty) return false;
 
   const bookingArchiveDoc = snap.docs[0];
-  const {
-    bookingArchivesId: _skip,
-    originalId,
-    archivedAt: _ba,
-    archivedBy: _bab,
-    restoredAt: _br,
-    restoredBy: _brb,
-    customerName: _bcn, // resolved field — not part of the original bookings schema
-    ...bookingOriginalData
-  } = bookingArchiveDoc.data();
+  const archived1 = bookingArchiveDoc.data();
+  const originalId = archived1.originalId;
+  const bookingOriginalData = stripArchiveMeta(archived1);
 
   const bookingActiveRef = originalId
     ? db.collection("bookings").doc(originalId)
@@ -115,16 +109,9 @@ export const restorePaymentsArchive = async (paymentsArchivesId, restoredBy = "a
 
   if (!archiveDoc.exists) throw new Error("Archived payment not found.");
 
-  const {
-    paymentsArchivesId: _skip,
-    originalId,
-    archivedAt,
-    archivedBy,
-    restoredAt,
-    restoredBy: _rb,
-    customerName,          // resolved field — not part of original payments schema
-    ...originalData
-  } = archiveDoc.data();
+  const archived2 = archiveDoc.data();
+  const originalId = archived2.originalId;
+  const originalData = stripArchiveMeta(archived2);
 
   const activeRef = originalId
     ? db.collection("payments").doc(originalId)

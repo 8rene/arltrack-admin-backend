@@ -220,10 +220,25 @@ export const createPenalty = async ({
 // Listing
 // ─────────────────────────────────────────────
 
+// A penalty paid from the held deposit has no paymentEntries row (no money moved) and no longer stores a date:
+// its paidAt is when the deposit was settled, which is kept on payments.deposit.settlement.settledAt.
+const withDepositPaidAt = async (penalties) => {
+  const need = penalties.filter((p) => !p.paidAt && (p.paymentMethod === "Deposit" || p.paymentMethod === "DepositPartial") && p.paymentID);
+  if (!need.length) return penalties;
+  const ids = [...new Set(need.map((p) => p.paymentID))];
+  const settledAt = new Map();
+  for (let i = 0; i < ids.length; i += 30) {
+    const snap = await db.collection("payments").where("paymentID", "in", ids.slice(i, i + 30)).get();
+    snap.docs.forEach((d) => settledAt.set(d.data().paymentID, d.data().deposit?.settlement?.settledAt || null));
+  }
+  return penalties.map((p) => (need.includes(p) && settledAt.get(p.paymentID) ? { ...p, paidAt: settledAt.get(p.paymentID) } : p));
+};
+
 export const listPenaltiesForBooking = async (bookingID) => {
   const snap = await db.collection("penalties").where("bookingID", "==", bookingID).get();
-  // paymentMethod / referenceNumber / paidAt come back from the payment entries once cleanup has removed them.
-  const hydrated = await hydratePenalties(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  // paymentMethod / referenceNumber / paidAt come back from the payment entries (and, for a deposit offset, from the
+  // deposit settlement): none of them is stored on the penalty.
+  const hydrated = await withDepositPaidAt(await hydratePenalties(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
   return hydrated.map(({ id: _docID, ...rest }) => rest);   // same shape as before: no extra id key
 };
 
@@ -403,9 +418,9 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       penaltyUpdates.push({
         ref: p.ref,
         paidAmount: newPaidAmount,
-        // Only when the deposit actually paid something is the method / date set (no entry row exists for a deposit
-        // offset). Otherwise the penalty's method / date are left exactly as they are, not rewritten with blanks.
-        depositPaid: fromDeposit > 0 ? { paymentMethod: fromDeposit === owed ? "Deposit" : "DepositPartial", paidAt: timestamp() } : null,
+        // A deposit offset moves no money, so it has no entry row -- and nothing is stored about it on the penalty
+        // either: paidAmount is the only fact. "Deposit" / "DepositPartial" and the date are derived on read
+        // (hydratePenalty + the deposit settlement's settledAt).
         stillOwed: owed - fromDeposit,
       });
     }
@@ -416,7 +431,6 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     penaltyUpdates.forEach((u) => {
       tx.update(u.ref, {
         paidAmount: u.paidAmount,
-        ...(u.depositPaid || {}),
         updatedAt: timestamp(),
       });
     });
@@ -628,7 +642,7 @@ export const getAllPenalties = async () => {
   };
 
   // Read through paymentEntries so paymentMethod / referenceNumber / paidAt survive the PHASE 2 cleanup.
-  const hydrated = await hydratePenalties(penaltiesSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  const hydrated = await withDepositPaidAt(await hydratePenalties(penaltiesSnap.docs.map((d) => ({ id: d.id, ...d.data() }))));
 
   return penaltiesSnap.docs.map((d, idx) => {
     const { id: _docID, ...data } = hydrated[idx];

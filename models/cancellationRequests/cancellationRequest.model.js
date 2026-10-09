@@ -21,7 +21,6 @@ export const CancellationRequest = {
   processedBy:  null, // uid of the staff member who approved/rejected
   processedAt:  null,
   rejectReason: null,
-  migratedFrom: null, // "booking.cancellationRequest*" -- only set by the migration script
   type:         "request", // "request" = customer asked to end an ongoing trip | "direct" = booking cancelled outright
   cancelledBy:  null,      // direct rows: "customer" | "staff" | "admin" | "system" | "refund" | "unknown"
 };

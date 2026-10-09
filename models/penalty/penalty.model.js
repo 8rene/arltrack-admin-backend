@@ -32,17 +32,17 @@
 
 export const PENALTY_STATUSES = ["Confirmed", "Voided", "Waived"];
 
-// How a confirmed penalty was actually settled once money changes hands.
-// "Deposit" / "DepositPartial" are set automatically by settleBooking();
-// the rest are set by whoever records the in-person payment.
+// How a confirmed penalty was settled. This list is only the LABELS readers get back (hydratePenalty derives
+// them); nothing here is stored on the penalty document.
+//   "Deposit" / "DepositPartial"  covered by the held deposit (derived: no entry row and paidAmount > 0)
+//   "InStore" / "GCash" / "Maya" / "BankTransfer"  the method of the latest penalty entry row
+//   "PayMongo"                    the latest penalty entry row is an online one
 //
-// A penalty can also be paid ONLINE by the customer (PayMongo checkout in the customer backend,
-// penaltyPayment.controller.js): that writes the same paymentEntries rows with source "online".
-//
-// The money itself lives in paymentEntries (phase "penalty", one row per penalty a payment covered, source
-// "in_person"). paymentMethod / referenceNumber / paidAt below are only a cache of the LATEST payment --
-// each payment used to overwrite them, so an installment's method and date were lost. A payment covered by
-// the held deposit has no paymentEntries row: no money moved, it is an offset on payments.deposit.settlement.
+// A penalty can be paid ONLINE by the customer (PayMongo checkout in the customer backend,
+// penaltyPayment.controller.js) or in person (recordShortfallPayment): both write paymentEntries rows
+// (phase "penalty", one row per penalty a payment covered). That is the only place the method, reference
+// and date of a payment live. A payment covered by the held deposit has no row: no money moved, it is an
+// offset recorded on payments.deposit.settlement (its date is settlement.settledAt).
 export const PENALTY_PAYMENT_METHODS = [
   "Deposit",         // fully covered by the held deposit
   "DepositPartial",  // partially covered by the deposit, remainder recorded separately
@@ -81,9 +81,10 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   status:       data.status       || "Confirmed",
   statusReason: data.statusReason || "", // required for Voided / Waived
 
-  // paymentMethod / referenceNumber / paidAt are NOT stored on a new penalty any more: each payment is a row in
-  // paymentEntries (phase "penalty") and hydratePenalties() gives the latest method / reference / date back to
-  // readers. A penalty covered by the held deposit gets paymentMethod / paidAt from settleBooking().
+  // paymentMethod / referenceNumber / paidAt are NOT stored on a penalty: each payment is a row in paymentEntries
+  // (phase "penalty") and hydratePenalties() gives the latest method / reference / date back to readers. A
+  // penalty covered by the held deposit stores nothing but paidAmount; settleBooking() records the offset on
+  // payments.deposit.settlement.
   paidAmount:      data.paidAmount      ?? 0,  // may be < amount if partially covered by deposit
 
   // confirmedBy / confirmedAt are NOT stored on a new penalty: a penalty is confirmed the moment it is created,

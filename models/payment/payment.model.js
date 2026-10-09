@@ -1,11 +1,14 @@
-// Matches the actual 'payments' collection in Firestore
+// Matches the actual 'payments' collection in Firestore.
+//
+// A payment document holds WHAT is owed and its STATE. Every money movement (who paid, how, when, how much, the
+// pay_... / re_... reference, PayMongo's fee) is a row in paymentEntries; hydratePayment() hands the old field
+// names back to readers (paymongoTransactions, balanceCollected, confirmedBy, paidAt ...), so none of them are
+// listed here.
 export const Payment = {
   paymentID: "",
   bookingID: "",
-  paymentMethod: "",  // e.g. "gcash", "maya", "qrph" -- the customer's chosen channel
-  // referenceNumber / proofUrl are NOT stored on a payment: the reference (pay_... / re_...) is
-  // paymentEntries.referenceNumber, and there is no proof upload -- PayMongo is the proof.
-  amount: 0,          // deposit amount (partial)
+  userID: "",
+  amount: 0,          // grand total of the booking
   rentalFee: 0,
   serviceFee: 0,
   extraFee: 0,
@@ -19,22 +22,35 @@ export const Payment = {
   gatewayFeeRate: 0,    // % of gatewayFeeBase
   gatewayFeeBase: 0,    // rental + extra + driver's + service fee + security deposit
 
-  // PayMongo's OWN fee (what PayMongo keeps; NOT the gateway fee the customer
-  // paid). Written by the customer backend when an online payment settles, or
-  // by its backfillPaymongoFees.js script. Admin only reads these. Absent on
-  // cash payments and on payments settled before fee tracking.
-  // Sales margin = gatewayFee - paymongoFeeTotal.
-  depositPaymongoFee: null,   // fee on the deposit-phase online charge
-  balancePaymongoFee: null,   // fee on the online balance charge (Partial only)
-  paymongoFeeTotal: null,     // deposit + balance
-  // LEGACY: rebuilt for readers from the paymentEntries rows (hydratePayment / entriesToLegacyTransactions).
-  // Nothing writes it any more -- the money movements live in paymentEntries (see models/paymentEntries).
-  paymongoTransactions: [],
-  status: "",         // "Paid" | "Pending" | "Refunded"
+  // What the customer chose at booking time.
+  methodOfPayment: "",  // "Full" | "Partial"
+  paymentMethod: "",    // the customer's chosen channel: "gcash" | "maya" | "qrph"
+
+  // The deposit (first) payment. Written in lowercase by the customer app / webhook ("pending" | "paid" | "failed" |
+  // "refunded" | "cancelled"); the admin side writes "Approved" / "Rejected" when staff confirm. Every reader compares
+  // it lowercase, so mixed casing is normal (see normalizePaymentStatus).
+  status: "",
+
+  // The PayMongo checkout currently open. The webhook finds the payment by the session id, so these stay here.
+  paymongoSessionID: "",
+  checkoutUrl: "",
+
+  // Live state of a Partial payment's balance. The customer backend's settle-once guard reads these inside a
+  // Firestore transaction, so they stay until that guard reads the entries instead.
+  currentPhase: "",     // "deposit" | "balance": which phase the open checkout is for
+  balanceStatus: "",    // "" | "not_due" | "pending" | "paid" | "failed" | "cancelled"
+  balanceAmount: 0,     // what the open balance checkout charges
+  // NOT stored here: balanceCollected / balanceCollectedAmount. "Staff collected the balance in person" is a settled
+  // in-person balance row in paymentEntries, and hydratePayment() derives both from it. Likewise refundIssuedBy /
+  // refundIssuedAt are the processedBy / processedAt of the "<paymentID>_discountrefund" row.
+
+  // A staff discount is an adjustment of what is owed, not a money movement, so it lives on the payment.
   discountAmount: 0,
   discountReason: "",
   discountBy: "",
   discountAt: null,
+  discountCorrectedBy: "",   // set by correctIssuedDiscount() when a discount is changed after its refund was issued
+  discountCorrectedAt: null,
   // Set by applyDiscount() when a discount is applied to a booking that's
   // already fully (or partially) paid past what the new discount covers —
   // the spillover is cash that's now owed back to the customer. 0 means
@@ -43,8 +59,21 @@ export const Payment = {
   refundDue: 0,
   // Flipped true via markRefundIssued() once staff or the driver holding
   // the cash actually hands it back. Drives the "Refund Due" banner in
-  // PaymentStatusModal and the Payments.jsx table/refund column.
+  // PaymentStatusModal and the Payments.jsx table/refund column. Who handed it back and when is the
+  // "<paymentID>_discountrefund" entry (out-row), not a field here.
   refundIssued: false,
+
+  // The security deposit held for the booking (written by penalty.service.js: recordDepositReceived, waiveDeposit,
+  // settleBooking). Its `settlement` is also where a penalty paid from the deposit is recorded.
+  deposit: {
+    amount: 0,
+    status: "",          // "Held" | "Waived" | "Settled" ...
+    waivedReason: "",
+    received: { method: null, referenceNumber: "", by: null, at: null },
+    returned: { method: null, referenceNumber: "", by: null, at: null, amount: 0 },
+    settlement: { confirmedPenaltyTotal: 0, net: 0, status: "", settledBy: null, settledAt: null },
+  },
+
   createdAt: null,
   updatedAt: null,
 };

@@ -377,9 +377,9 @@ const promoteBookingIfToPay = async (bookingID) => {
 // This lets Car Tracking / My Trips confirm cash on the spot instead of
 // requiring a trip to the Payments page just to click Approve.
 // ─────────────────────────────────────────────
-// Records a staff action in paymentEntries. WHO took the money, WHEN and HOW (confirmedBy / confirmedAt,
-// balanceMethod / balanceCollectedBy / balanceCollectedAt) are written to the entry row only -- never onto the
-// payment document, which keeps just the status and amounts. The sync is idempotent, so a failure is retried
+// Records a staff action in paymentEntries. WHO took the money, WHEN, HOW and HOW MUCH (confirmedBy / confirmedAt,
+// balanceCollected / balanceCollectedAmount / balanceMethod / balanceCollectedBy / balanceCollectedAt) are written to
+// the entry row only -- never onto the payment document, which keeps just the status and amounts. The sync is idempotent, so a failure is retried
 // once and then reported: the status change is already saved, and pressing the same action again (or the
 // next sync) writes the row. Nothing is ever put back on the document in the old shape.
 const recordInEntries = async (docRef, docID, fields) => {
@@ -435,7 +435,9 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
   // Approved but with no deposit row = an earlier confirmation saved the status and then failed to write the row.
   // Pressing Confirm again repairs it (writes the row, log and booking step) instead of refusing. An online
   // payment, or one that already has its row, really is confirmed.
-  const looksOnline = !!(data.paymongoChannel || data.depositPaymongoPaymentID || data.paymongoPaymentID);
+  // Online-ness comes from the entries (the payment document no longer stores the PayMongo fields).
+  const seen = await hydratePaymentData(data, doc.id);
+  const looksOnline = !!(seen.paymongoChannel || seen.depositPaymongoPaymentID || seen.paymongoPaymentID);
   if (wasApproved && (looksOnline || await hasSuccessRow(data, doc.id, "deposit"))) {
     throw new Error("This payment is already confirmed.");
   }
@@ -524,14 +526,20 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
       `Approve the payment first in the Payments page.`
     );
   }
-  // balanceCollected with no balance row = an earlier collection saved the flag and then failed to write the row:
-  // pressing the action again repairs it. With a row, it really is collected.
-  const repair = !!data.balanceCollected && !(await hasSuccessRow(data, doc.id, "balance"));
-  if (data.balanceCollected && !repair) {
+  // "Collected in person" is a settled in-person balance row, not a flag on the payment. Nothing is saved before
+  // the row is written, so a failed attempt leaves nothing behind and pressing the action again simply retries.
+  const alreadyPaid = await hasSuccessRow(data, doc.id, "balance");
+  // Old documents may still carry balanceCollected without a row (an earlier attempt saved the flag, then failed to
+  // write the row): pressing the action again writes the row. Disappears once the leftovers script has run.
+  const legacyRepair = !alreadyPaid && !!data.balanceCollected;
+  if (alreadyPaid) {
+    if (String(data.balanceStatus || "").toLowerCase() === "paid") {
+      throw new Error("The customer already paid the balance online — there is nothing left to collect.");
+    }
     throw new Error("This booking is already marked fully paid.");
   }
   let balance;
-  if (repair) {
+  if (legacyRepair) {
     balance = Number(data.balanceCollectedAmount) || 0;
   } else {
     // The customer can also pay the balance online (Pay Balance). If they did,
@@ -550,17 +558,17 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     }
   }
 
-  if (!repair) await doc.ref.update({
-    balanceCollected:   true,
-    // How it was paid + how much — previously only in the transaction log, so the
-    // Payments page couldn't show it and a later refund couldn't know which part
-    // was cash that PayMongo can't return.
-    balanceCollectedAmount: balance,
-    updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
-  });
-
   // Write the balance row: how it was paid, by whom and when go to the entry, not the payment document.
-  await recordInEntries(doc.ref, doc.id, { balanceMethod: paymentMethod, balanceCollectedBy: collectedBy || "—", balanceCollectedAt: new Date() });
+  // balanceCollected / balanceCollectedAmount are passed as fields too: they are what makes the mapper write this
+  // row as an in-person balance of exactly this amount (net of any discount), and they are never stored on the payment.
+  await recordInEntries(doc.ref, doc.id, {
+    balanceCollected: true,
+    balanceCollectedAmount: balance,
+    balanceMethod: paymentMethod,
+    balanceCollectedBy: collectedBy || "—",
+    balanceCollectedAt: new Date(),
+  });
+  await doc.ref.update({ updatedAt: admin.firestore.FieldValue.serverTimestamp() });
 
   createTransactionLog({
     bookingID,
@@ -618,7 +626,8 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   if (snap.empty) throw new Error("No payment record found for this booking.");
 
   const doc = snap.docs[0];
-  const existing = doc.data();
+  // Read through the entries: "balance collected in person" is no longer stored on the payment document.
+  const existing = await hydratePaymentData(doc.data(), doc.id);
 
   // Can't discount more than the booking is actually worth — previously
   // unbounded, so a discount larger than the total fee would spill past
@@ -815,7 +824,7 @@ export const correctIssuedDiscount = async (bookingID, amount, reason, corrected
   if (snap.empty) throw new Error("No payment record found for this booking.");
 
   const doc = snap.docs[0];
-  const existing = doc.data();
+  const existing = await hydratePaymentData(doc.data(), doc.id);
 
   if (!existing.refundIssued) {
     throw new Error(
@@ -867,7 +876,7 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
   if (snap.empty) throw new Error("No payment record found for this booking.");
 
   const doc  = snap.docs[0];
-  const data = doc.data();
+  const data = await hydratePaymentData(doc.data(), doc.id);   // balanceCollected comes from the balance row
 
   const { refundDue } = computeAmounts(data);
   if (refundDue <= 0) {
@@ -875,7 +884,6 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
   }
 
   const paymentID = data.paymentID || doc.id;
-  const handedBackBy = issuedBy || "—";
 
   // The cash handed back is money OUT, so it gets its own paymentEntries row -- otherwise the entry ledger
   // would never see that this money left. Same shape as a refund's in-person hand-back (<id>_manual), but it
@@ -883,10 +891,9 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
   // discount spillover. Deterministic id => marking twice only rewrites the same row. It is committed in the
   // same batch as refundIssued, so the flag and the ledger can never disagree.
   const batch = db.batch();
+  // Who handed it back and when are NOT stored on the payment: they are the out-row's processedBy / processedAt.
   batch.update(doc.ref, {
     refundIssued:   true,
-    refundIssuedBy: handedBackBy,
-    refundIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
   });
   const now = new Date();

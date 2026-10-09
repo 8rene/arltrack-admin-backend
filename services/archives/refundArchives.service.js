@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { hydrateRefundRequests } from "../paymentEntries/paymentEntries.service.js";
+import { stripArchiveMeta } from "./archiveMeta.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -55,16 +56,9 @@ const restoreLinkedBooking = async (bookingID) => {
   if (snap.empty) return false;
 
   const bookingArchiveDoc = snap.docs[0];
-  const {
-    bookingArchivesId: _skip,
-    originalId,
-    archivedAt: _ba,
-    archivedBy: _bab,
-    restoredAt: _br,
-    restoredBy: _brb,
-    customerName: _bcn,
-    ...bookingOriginalData
-  } = bookingArchiveDoc.data();
+  const archived1 = bookingArchiveDoc.data();
+  const originalId = archived1.originalId;
+  const bookingOriginalData = stripArchiveMeta(archived1);
 
   const bookingActiveRef = originalId
     ? db.collection("bookings").doc(originalId)
@@ -89,16 +83,9 @@ const restoreLinkedPayment = async (bookingID) => {
   if (snap.empty) return false;
 
   const paymentArchiveDoc = snap.docs[0];
-  const {
-    paymentsArchivesId: _skip,
-    originalId,
-    archivedAt: _pa,
-    archivedBy: _pab,
-    restoredAt: _pr,
-    restoredBy: _prb,
-    customerName: _pcn,
-    ...paymentOriginalData
-  } = paymentArchiveDoc.data();
+  const archived2 = paymentArchiveDoc.data();
+  const originalId = archived2.originalId;
+  const paymentOriginalData = stripArchiveMeta(archived2);
 
   const paymentActiveRef = originalId
     ? db.collection("payments").doc(originalId)
@@ -120,16 +107,9 @@ export const restoreRefundArchive = async (refundArchivesId, restoredBy = "admin
 
   if (!archiveDoc.exists) throw new Error("Archived refund request not found.");
 
-  const {
-    refundArchivesId: _skip,
-    originalId,
-    archivedAt,
-    archivedBy,
-    restoredAt,
-    restoredBy: _rb,
-    customerName,
-    ...originalData
-  } = archiveDoc.data();
+  const archived3 = archiveDoc.data();
+  const originalId = archived3.originalId;
+  const originalData = stripArchiveMeta(archived3);
 
   const activeRef = originalId
     ? db.collection("refundRequests").doc(originalId)

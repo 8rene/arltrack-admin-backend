@@ -17,5 +17,4 @@ export const DriverAssignment = {
   assignedBy:   "",  // username/uid of the Owner/Admin/Supervisor who assigned it
   endedAt:      null, // null while status === "assigned"
   endedBy:      null,
-  migratedFrom: null, // "booking.driverID" -- only set by scripts/migrate-driver-and-cancellation.js
 };

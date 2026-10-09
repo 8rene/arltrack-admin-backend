@@ -29,8 +29,11 @@ export const TransactionLog = {
   amount: 0,
   status: "",             // "Success" | "Failed" | "Pending" | "Refunded" | "Rejected"
 
-  paymentMethod: "",      // e.g. "GCash", "Cash", "Maya"
-  referenceNumber: "",
+  // The same codes as paymentEntries.method: "gcash" | "maya" | "qrph" | "cash" | "bank_transfer". null when the
+  // money did not move through a method (e.g. penalties deducted from the held deposit). createTransactionLog()
+  // normalizes whatever label it is given ("GCash", "InStore", "Bank Transfer" ...), so the column never mixes cases.
+  paymentMethod: null,
+  referenceNumber: null,  // pay_... / re_... / staff receipt no.; null when there is none (never "" / "—" / "N/A")
 
   description: "",        // short free-text context, e.g. "Discount applied at pickup"
   performedBy: null,      // admin userID if staff-triggered (discount, reject, expense); null if customer/webhook-triggered

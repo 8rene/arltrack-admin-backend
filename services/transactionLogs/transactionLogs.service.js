@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { normalizeMethod, nullIfSentinel } from "../paymentEntries/paymentEntries.mapper.js";
 
 const VALID_TYPES   = ["Payment", "Refund", "Deposit", "DepositReturn", "Discount"];
 const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
@@ -27,8 +28,8 @@ export const createTransactionLog = async ({
   type,
   amount,
   status,
-  paymentMethod = "",
-  referenceNumber = "",
+  paymentMethod = null,    // anything the caller has ("GCash", "Bank Transfer", "InStore" ...): stored as a method code
+  referenceNumber = null,  // "", "—", "N/A" are stored as null
   description = "",
   performedBy = null,
   // Link to the record that caused this entry. At most one is set; each has its own column:
@@ -51,6 +52,11 @@ export const createTransactionLog = async ({
       return null;
     }
 
+    // Same vocabulary as paymentEntries.method: gcash | maya | qrph | cash | bank_transfer, or null when the
+    // money did not move through a method (e.g. a deduction from the held deposit -- the description says so).
+    const { method, unmapped } = normalizeMethod(paymentMethod);
+    if (unmapped) console.warn(`createTransactionLog: unknown payment method "${unmapped}" stored as null`);
+
     const ref = logID ? db.collection("transactionLogs").doc(logID) : db.collection("transactionLogs").doc();
     const payload = {
       transactionLogsID: ref.id,
@@ -63,8 +69,8 @@ export const createTransactionLog = async ({
       type,
       amount: Number(amount) || 0,
       status,
-      paymentMethod,
-      referenceNumber,
+      paymentMethod: method,
+      referenceNumber: nullIfSentinel(referenceNumber),
       description,
       performedBy,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),

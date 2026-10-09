@@ -5,6 +5,7 @@ import { resolveUserNames } from "./resolveUserName.service.js";
 import { getAssignmentRefsForBooking } from "../driverAssignments/driverAssignments.service.js";
 import { getRequestRefsForBooking } from "../cancellationRequests/cancellationRequests.service.js";
 import { getEntryRefsForBooking } from "../paymentEntries/paymentEntries.service.js";
+import { stripArchiveMeta } from "./archiveMeta.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -133,16 +134,9 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   const archiveDoc = await archiveRef.get();
   if (!archiveDoc.exists) throw new Error("Archived booking not found.");
 
-  const {
-    bookingArchivesId: _skip,
-    originalId,
-    archivedAt,
-    archivedBy,
-    restoredAt,
-    restoredBy: _rb,
-    customerName, // resolved field — not in original schema
-    ...originalData
-  } = archiveDoc.data();
+  const archived1 = archiveDoc.data();
+  const originalId = archived1.originalId;
+  const originalData = stripArchiveMeta(archived1);
 
   const bookingID = originalData.bookingID ?? originalId;
 
@@ -163,17 +157,9 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   // this file has no reason to duplicate) ──
   const sessionArchiveDoc = await findLinkedBookingSessionArchive(bookingID);
   if (paymentArchiveDoc) {
-    const {
-      paymentsArchivesId: _ps,
-      paymentsArchivesID: _psi,
-      originalId: payOriginalId,
-      archivedAt: _pa,
-      archivedBy: _pab,
-      restoredAt: _pr,
-      restoredBy: _prb,
-      customerName: _pcn,
-      ...payOriginalData
-    } = paymentArchiveDoc.data();
+    const archived2 = paymentArchiveDoc.data();
+    const payOriginalId = archived2.originalId;
+    const payOriginalData = stripArchiveMeta(archived2);
 
     const paymentActiveRef = payOriginalId
       ? db.collection("payments").doc(payOriginalId)
