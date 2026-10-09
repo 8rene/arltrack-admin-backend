@@ -1142,7 +1142,8 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
   createTransactionLog({
     bookingID: r.bookingID,
     paymentID: r.paymentID,
-    refundRequestID,
+    refID: refundRequestID,
+    refCollection: "refundRequests",
     userID: r.userID,
     type: "Refund",
     amount: r.manualRefund.amount,
@@ -1205,7 +1206,8 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
   createTransactionLog({
     bookingID: refundRequest.bookingID,
     paymentID: refundRequest.paymentID,
-    refundRequestID,
+    refID: refundRequestID,
+    refCollection: "refundRequests",
     userID: refundRequest.userID,
     type: "Refund",
     amount: refundRequest.amount || 0,

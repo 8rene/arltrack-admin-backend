@@ -16,20 +16,26 @@ export const TransactionLog = {
   transactionLogsID: "",     // Firestore doc ID
   bookingID: "",          // FK -> bookings (null for "Expense")
   paymentID: "",          // FK -> payments (null for "Expense")
-  refundRequestID: null,  // FK -> refundRequests, only set when type === "Refund" via that flow
   userID: "",             // FK -> user, the customer the money event belongs to (null for "Expense")
-  refID: null,             // generic FK for non-booking types, e.g. a maintenance doc ID for "Expense"
-  refCollection: null,     // which collection refID points into, e.g. "maintenance"
+  // The record that caused this entry. At most ONE of these is set (the rest stay null):
+  refundReqID: null,      // FK -> refundRequests.refundRequestID (type "Refund" via a refund request)
+  paymentEntryID: null,   // FK -> paymentEntries.paymentEntryID, the row that was settled (type "Payment"). A log that covers
+                          // several entries at once (one settled total) leaves this null; use paymentID to find them.
+  maintenanceID: null,    // FK -> maintenance.maintenanceID (type "Expense")
+  // Discount / DepositReturn / discount-spillover refunds have no source record, so all three stay null.
 
-  type: "",               // "Payment" | "Refund" | "Deposit" | "Discount" | "Expense"
+  type: "",               // "Payment" | "Refund" | "Deposit" | "DepositReturn" | "Discount" | "Expense"
   amount: 0,
   status: "",             // "Success" | "Failed" | "Pending" | "Refunded" | "Rejected"
 
-  paymentMethod: "",      // e.g. "GCash", "Cash", "Maya"
-  referenceNumber: "",
+  paymentMethod: "",      // lowercase code, same enum as paymentEntries.method: "gcash" | "maya" | "qrph" | "cash" | "bank_transfer" | "" (none)
+  referenceNumber: "",    // pay_... / re_... / receipt code. "" when there is none (never "—" or "N/A")
 
   description: "",        // short free-text context, e.g. "Discount applied at pickup"
   performedBy: null,      // admin userID if staff-triggered (discount, reject, expense); null if customer/webhook-triggered
 
   createdAt: null,
 };
+
+// Indexes the app relies on (single-field ones are automatic; this one is composite and must be created):
+//   maintenanceID + status      rejectTransactionLogsByMaintenance() -- replaces the old refID + refCollection + status index

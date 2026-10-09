@@ -478,6 +478,8 @@ export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMetho
     description: `Cash payment of ₱${depositReceived.toLocaleString()} confirmed by staff for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: confirmedBy || "—",
     logID: `${data.paymentID || doc.id}_deposit`, // same key the customer app uses → never logged twice
+    refID: `${data.paymentID || doc.id}_deposit`, // the deposit paymentEntries row this log describes
+    refCollection: "paymentEntries",
   });
 
   // Bookings now start at "to pay". A staff-confirmed cash deposit is the other
@@ -584,6 +586,8 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID} via ${paymentMethod}.`,
     performedBy: collectedBy || "—",
     logID: `${data.paymentID || doc.id}_balance`,
+    refID: `${data.paymentID || doc.id}_balance`, // the balance paymentEntries row this log describes
+    refCollection: "paymentEntries",
   });
 
   auditSafe({

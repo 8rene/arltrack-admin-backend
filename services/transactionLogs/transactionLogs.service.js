@@ -25,7 +25,7 @@ const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 export const createTransactionLog = async ({
   bookingID,
   paymentID,
-  refundRequestID = null,
+  refundRequestID = null, // DEPRECATED input: no longer stored. Mapped to refID/refCollection = "refundRequests" below.
   userID,
   type,
   amount,
@@ -34,8 +34,8 @@ export const createTransactionLog = async ({
   referenceNumber = "",
   description = "",
   performedBy = null,
-  refID = null,           // generic FK for non-booking types (e.g. "Expense" -> a maintenance doc ID)
-  refCollection = null,   // which collection refID points into, e.g. "maintenance"
+  refID = null,           // the ONE link to the source record: a refundRequests doc, a paymentEntries doc, a maintenance doc...
+  refCollection = null,   // which collection refID points into: "refundRequests" | "paymentEntries" | "maintenance"
   // Optional idempotency key: written with create() to a doc of exactly this id,
   // so a repeat attempt to log the same event is a harmless no-op instead of a
   // duplicate row. Omit for one-off entries.
@@ -51,12 +51,15 @@ export const createTransactionLog = async ({
       return null;
     }
 
+    // Old callers still pass refundRequestID. The log no longer has that column: the refund request is
+    // referenced through refID / refCollection like every other source record.
+    if (refundRequestID && !refID) { refID = refundRequestID; refCollection = "refundRequests"; }
+
     const ref = logID ? db.collection("transactionLogs").doc(logID) : db.collection("transactionLogs").doc();
     const payload = {
       transactionLogsID: ref.id,
       bookingID: bookingID || null,
       paymentID: paymentID || null,
-      refundRequestID,
       userID: userID || null,
       refID,
       refCollection,

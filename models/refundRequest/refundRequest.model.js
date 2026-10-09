@@ -34,7 +34,7 @@ export const RefundRequest = {
   amount: 0,
   // parts[] (one PayMongo refund per online charge), manualRefund (the in-person hand-back) and unrefundable[]
   // (online money with no PayMongo payment id -- never refunded, never handed back) are NOT stored here any more:
-  // they are the "out" rows in paymentEntries (refID = this request, ids <id>_part<n> | _manual | _unrefundable<n>).
+  // they are the "out" rows in paymentEntries (refundReqID = this request, ids <id>_part<n> | _manual | _unrefundable<n>).
   // hydrateRefundRequests() rebuilds the old shape, incl. unrefundableAmount (their sum), for readers.
   // paymongoRefundIDs is only the lookup key the customer backend's refund.updated webhook queries.
   status: "Pending",

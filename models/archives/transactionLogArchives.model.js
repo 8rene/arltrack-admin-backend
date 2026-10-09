@@ -6,9 +6,11 @@ export const TransactionLogArchive = {
   transactionLogsID: "",
   bookingID: "",
   paymentID: "",                // FK -> payments (new — lets an archived entry still be traced back)
-  refundRequestID: null,        // FK -> refundRequests, only set when type === "Refund" via that flow
+  refundReqID: null,            // FK -> refundRequests (Refund via a refund request)
+  paymentEntryID: null,         // FK -> paymentEntries (the row a Payment log settled)
+  maintenanceID: null,          // FK -> maintenance (Expense)
   userID: "",
-  type: "",                     // "Payment" | "Refund" | "Deposit" | "Discount"
+  type: "",                     // "Payment" | "Refund" | "Deposit" | "DepositReturn" | "Discount" | "Expense"
   amount: 0,
   status: "",                   // "Success" | "Failed" | "Pending" | "Refunded" | "Rejected"
   paymentMethod: "",
