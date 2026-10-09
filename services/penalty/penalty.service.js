@@ -322,17 +322,40 @@ export const waiveDeposit = async ({ paymentID, reason, by }) => {
   if (!payment) return { error: "Payment not found." };
   if (!reason?.trim()) return { error: "A reason is required to waive the deposit." };
 
-  await payment.ref.update({
-    depositStatus: "Waived",
-    depositSettledAt: timestamp(),
-    deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
-  });
-
-  // The reason is not stored on the payment: it lives in the audit log, with who did it.
-  createAuditLog({
-    action: "update", userID: by, bookingID: payment.data.bookingID || null, paymentID,
-    description: `Waived the security deposit on booking ${payment.data.bookingID || paymentID}. Reason: ${reason.trim()}`,
-  }).catch((err) => console.error("[AuditLog] Deposit waive log failed:", err.message));
+  // Only a HELD deposit can be waived: waiving a settled / refunded / forfeited one would leave depositSettled,
+  // depositReturned and the _depositreturn row contradicting the new status. The reason is not stored on the payment,
+  // it lives ONLY in the audit log (with who did it), so the log is written in the same transaction as the status
+  // change: the deposit can never be waived without its reason being recorded.
+  const logRef = db.collection("auditLogs").doc();
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(payment.ref);
+      const current = snap.data() || {};
+      const dep = getDepositView(current);
+      if (!dep || dep.status !== "Held") {
+        throw Object.assign(new Error(`Only a held deposit can be waived (currently: ${dep?.status || "not recorded"}).`), { expected: true });
+      }
+      tx.update(payment.ref, {
+        securityDeposit: dep.amount,                    // survives dropping the old nested object
+        depositStatus: "Waived",
+        depositSettledAt: timestamp(),
+        deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
+      });
+      // Same document shape as createAuditLog() writes.
+      tx.set(logRef, {
+        auditLogsID: logRef.id,
+        action: "update",
+        description: `Waived the security deposit on booking ${current.bookingID || paymentID}. Reason: ${reason.trim()}`,
+        userID: by || null,
+        ...(current.bookingID ? { bookingID: current.bookingID } : {}),
+        paymentID,
+        createdAt: timestamp(),
+      });
+    });
+  } catch (err) {
+    if (err.expected) return { error: err.message };
+    throw err;
+  }
 
   return { paymentID };
 };
@@ -407,12 +430,12 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       });
     });
 
-    // Flat fields. Net, the amount deducted and the result (Refunded / Settled / OwedByCustomer) are derived from
-    // securityDeposit + depositSettled by getDepositView(), so they are not stored.
+    // Flat fields. depositSettled (used) + depositReturned = the deposit. The result (Refunded / Settled /
+    // OwedByCustomer) is derived by getDepositView() and not stored: the shortfall lives on the penalties.
     tx.update(paymentRef, {
       securityDeposit: deposit.amount,
       depositStatus: "Settled",
-      depositSettled: confirmedPenaltyTotal,
+      depositSettled: deposit.amount - remainingDeposit,   // used from the deposit; any shortfall stays on the penalties
       depositReturned: Math.max(0, net),
       depositSettledAt: timestamp(),
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one

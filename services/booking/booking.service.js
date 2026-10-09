@@ -81,13 +81,14 @@ export const resolvePaymentInfo = async (bookingID) => {
     let paymentStatus = data.status || "Pending";
     if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
 
-    const deposit = getDepositView(data);   // null = never recorded; same view for flat and old nested storage
-    const depositAmount = deposit?.amount || 0;
-    const depositStatus = deposit?.status || "—";
     const penalties = await listPenaltiesForBooking(bookingID);
     const confirmedPenaltyTotal = penalties
       .filter((p) => p.status === "Confirmed")
       .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
+    // null = never recorded; same view for flat and old nested storage. The unpaid total is the live shortfall.
+    const deposit = getDepositView(data, { unpaid: confirmedPenaltyTotal });
+    const depositAmount = deposit?.amount || 0;
+    const depositStatus = deposit?.status || "—";
     // Before settlement this is a live preview: deposit minus every unpaid
     // Confirmed penalty, still-negative-allowed (same as settleBooking()'s
     // `net`). AFTER settlement the deposit has already paid those penalties
@@ -95,12 +96,12 @@ export const resolvePaymentInfo = async (bookingID) => {
     // recomputing would show the FULL deposit as "to return" again. So once
     // settled, report what actually happened instead: anything still unpaid
     // right now is owed by the customer (negative), otherwise it's the
-    // amount that was handed back (settlement.net).
+    // amount that was handed back (depositReturned).
     const settlement = deposit?.settlement || null;
     const depositSettled = !!settlement;
     const depositDeducted = deposit?.deducted || 0;
     const amountToReturn = settlement
-      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, settlement.net || 0))
+      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, deposit.returnedAmount || 0))
       : depositAmount - confirmedPenaltyTotal;
 
     return {
@@ -438,14 +439,14 @@ const getDepositPosition = async (bID) => {
   const paymentData = paymentSnap.empty
     ? null
     : await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
-  const deposit = getDepositView(paymentData);
-  const unpaidTotal = penalties
-    .filter((p) => p.status === "Confirmed")
-    .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
+  const confirmed = penalties.filter((p) => p.status === "Confirmed");
+  const unpaidTotal = confirmed.reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
+  const confirmedTotal = confirmed.reduce((sum, p) => sum + (p.amount || 0), 0);   // all Confirmed penalties, paid or not
+  const deposit = getDepositView(paymentData, { unpaid: unpaidTotal });
   const alreadySettled = !!deposit?.settlement;
   const depositAvailable = deposit?.status === "Held" && !alreadySettled ? (deposit.amount || 0) : 0;
   return {
-    penalties, deposit, unpaidTotal, alreadySettled,
+    penalties, deposit, unpaidTotal, confirmedTotal, alreadySettled,
     depositStatus: deposit?.status || "—",
     depositAvailable,
     outstandingAfterDeposit: Math.max(0, unpaidTotal - depositAvailable),
@@ -1041,9 +1042,9 @@ export const getReturnChecklist = async (docID) => {
     depositHeld: pos.deposit?.amount ?? null,
     depositSettled: !!settlement,
     // Before settlement: deposit minus penalties (negative = customer owes).
-    // After settlement: what was actually returned / is still owed.
-    penaltyTotal: settlement ? settlement.confirmedPenaltyTotal : pos.unpaidTotal,
-    amountToReturn: settlement ? settlement.net : pos.amountToReturn,
+    // After settlement: what was actually returned (depositReturned) / is still owed (the unpaid penalties, live).
+    penaltyTotal: settlement ? pos.confirmedTotal : pos.unpaidTotal,
+    amountToReturn: settlement ? (pos.unpaidTotal > 0 ? -pos.unpaidTotal : pos.deposit.returnedAmount) : pos.amountToReturn,
     // Still-unpaid penalty money right now (includes penalties raised after settling).
     stillOwed: pos.unpaidTotal > pos.depositAvailable ? pos.unpaidTotal - pos.depositAvailable : 0,
     outstandingAfterDeposit: Math.max(0, pos.unpaidTotal - pos.depositAvailable),
