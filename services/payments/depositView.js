@@ -3,12 +3,13 @@
 // NEW (flat) shape on payments/{paymentID}:
 //   securityDeposit      the deposit amount charged with the first payment (already existed)
 //   depositStatus        "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
-//   depositWaivedReason  why it was waived (Waived only)
-//   depositPenaltyTotal  every confirmed penalty owed at settlement (Settled only). It can be MORE than the
-//                        deposit; that is how "OwedByCustomer" is told apart from "Settled".
-//   depositSettledAt / depositSettledBy   when / who closed the deposit
-// The money that left at settlement is the "<paymentID>_depositreturn" out-row in paymentEntries
-// (method, reference, who, when, amount). Nothing about it is stored on the payment.
+//   depositSettled       pesos of penalties settled against the deposit (Settled only). Every confirmed penalty owed,
+//                        so it can be MORE than the deposit: that is how "OwedByCustomer" differs from "Settled".
+//   depositReturned      pesos handed back to the customer (Settled only) = the _depositreturn row's amount
+//   depositSettledAt     when the deposit stopped being Held (settled, waived, forfeited or refunded)
+// Net, the amount deducted and the result (Refunded / Settled / OwedByCustomer) are derived. How it was returned,
+// the reference, who and when are the "<paymentID>_depositreturn" out-row in paymentEntries; who settled is the
+// DepositReturn transaction log.
 //
 // OLD (nested) shape, still read until scripts/migrate-deposit-flat.js has run:
 //   payments.deposit = { amount, status, waivedReason, received, returned, settlement }
@@ -27,18 +28,18 @@ export const settlementStatusFor = (net) => (net > 0 ? "Refunded" : net === 0 ? 
 const fromFlat = (p) => {
   const status = String(p.depositStatus);
   const amount = status === "Waived" ? 0 : (num(p.securityDeposit) || num(p.depositFee));
-  const penaltyTotal = status === "Settled" ? num(p.depositPenaltyTotal) : 0;
+  const penaltyTotal = status === "Settled" ? num(p.depositSettled) : 0;
   let settlement = null;
   if (status === "Settled") {
     const net = amount - penaltyTotal;
     settlement = {
       status: settlementStatusFor(net), net, confirmedPenaltyTotal: penaltyTotal,
-      settledBy: p.depositSettledBy ?? null, settledAt: p.depositSettledAt ?? null,
+      settledBy: null, settledAt: p.depositSettledAt ?? null,
     };
   } else if (status === "Waived") {
     settlement = {
       status: "Waived", net: 0, confirmedPenaltyTotal: 0,
-      settledBy: p.depositSettledBy ?? null, settledAt: p.depositSettledAt ?? null,
+      settledBy: null, settledAt: p.depositSettledAt ?? null,
     };
   }
   const net = settlement ? settlement.net : null;
@@ -46,13 +47,13 @@ const fromFlat = (p) => {
     shape: "flat",
     amount,
     status,
-    waivedReason: p.depositWaivedReason || "",
+    waivedReason: "",
     penaltyTotal,
     settlement,
     settled: !!settlement,
     net,
     deducted: status === "Settled" ? Math.min(amount, penaltyTotal) : 0,   // penalties actually taken from the deposit
-    returnedAmount: status === "Settled" ? Math.max(0, net) : 0,           // equals the _depositreturn row's amount
+    returnedAmount: status === "Settled" ? num(p.depositReturned) : 0,
     settledAt: p.depositSettledAt ?? null,
   };
 };

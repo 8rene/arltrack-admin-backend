@@ -84,7 +84,7 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   // paymentMethod / referenceNumber / paidAt are NOT stored on a penalty: each payment is a row in paymentEntries
   // (phase "penalty") and hydratePenalties() gives the latest method / reference / date back to readers. A
   // penalty covered by the held deposit stores nothing but paidAmount; settleBooking() records the offset on
-  // payments.depositStatus / depositPenaltyTotal / depositSettledAt.
+  // payments.depositStatus / depositSettled / depositSettledAt.
   paidAmount:      data.paidAmount      ?? 0,  // may be < amount if partially covered by deposit
 
   // confirmedBy / confirmedAt are NOT stored on a new penalty: a penalty is confirmed the moment it is created,

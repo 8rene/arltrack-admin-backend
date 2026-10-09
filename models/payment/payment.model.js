@@ -69,13 +69,12 @@ export const Payment = {
   // scripts/migrate-deposit-flat.js has run):
   //   securityDeposit      (above) the deposit amount
   depositStatus: "",            // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
-  depositWaivedReason: "",      // Waived only
-  depositPenaltyTotal: 0,       // Settled only: every confirmed penalty owed at settlement. Can exceed the deposit,
-                                // which is what makes the result "OwedByCustomer". Deducted / net / result are derived.
+  depositSettled: 0,            // Settled only: pesos of penalties settled against the deposit (every confirmed penalty
+                                // owed, so it can exceed the deposit -> "OwedByCustomer"). Net / deducted / result are derived.
+  depositReturned: 0,           // Settled only: pesos handed back to the customer
   depositSettledAt: null,       // when the deposit stopped being Held (settled, waived, forfeited or refunded)
-  depositSettledBy: null,       // staff uid (settled / waived)
-  // The deposit handed back at settlement is the "<paymentID>_depositreturn" out-row in paymentEntries
-  // (method, reference, processedBy, processedAt, amount). Written by settleBooking() in penalty.service.js.
+  // How the deposit was returned (method, reference, who, when) is the "<paymentID>_depositreturn" out-row in
+  // paymentEntries, written by settleBooking() in penalty.service.js. Who settled / waived it is in the logs.
 
   createdAt: null,
   updatedAt: null,

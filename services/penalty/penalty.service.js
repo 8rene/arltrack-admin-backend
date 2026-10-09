@@ -324,11 +324,15 @@ export const waiveDeposit = async ({ paymentID, reason, by }) => {
 
   await payment.ref.update({
     depositStatus: "Waived",
-    depositWaivedReason: reason,
     depositSettledAt: timestamp(),
-    depositSettledBy: by,
     deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
   });
+
+  // The reason is not stored on the payment: it lives in the audit log, with who did it.
+  createAuditLog({
+    action: "update", userID: by, bookingID: payment.data.bookingID || null, paymentID,
+    description: `Waived the security deposit on booking ${payment.data.bookingID || paymentID}. Reason: ${reason.trim()}`,
+  }).catch((err) => console.error("[AuditLog] Deposit waive log failed:", err.message));
 
   return { paymentID };
 };
@@ -404,13 +408,13 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     });
 
     // Flat fields. Net, the amount deducted and the result (Refunded / Settled / OwedByCustomer) are derived from
-    // securityDeposit + depositPenaltyTotal by getDepositView(), so they are not stored.
+    // securityDeposit + depositSettled by getDepositView(), so they are not stored.
     tx.update(paymentRef, {
       securityDeposit: deposit.amount,
       depositStatus: "Settled",
-      depositPenaltyTotal: confirmedPenaltyTotal,
+      depositSettled: confirmedPenaltyTotal,
+      depositReturned: Math.max(0, net),
       depositSettledAt: timestamp(),
-      depositSettledBy: actorUid || null,
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
     });
 

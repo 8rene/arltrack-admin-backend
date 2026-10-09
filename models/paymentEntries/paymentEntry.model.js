@@ -41,7 +41,7 @@
 //
 // Deposit offsets (penalties covered by the held security deposit) and staff
 // discounts are NOT entries: no money moves, they are adjustments and stay on
-// payments (depositPenaltyTotal / depositStatus, discountAmount ...).
+// payments (depositSettled / depositStatus, discountAmount ...).
 
 export const ENTRY_COLLECTION = "paymentEntries";
 
