@@ -1,4 +1,4 @@
-import { listBookings, editBooking, deleteBooking, markDroppedOff, deviceCheck, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
+import { listBookings, editBooking, deleteBooking, markDroppedOff, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -13,7 +13,6 @@ export const registerBookingRoutes = (app) => {
   app.get("/api/bookings",       verifyToken, requireRole(allowed), listBookings);
   app.patch("/api/bookings/:id", verifyToken, requireRole(allowed), editBooking);
   app.patch("/api/bookings/:id/dropoff", verifyToken, requireRole(allowed), markDroppedOff);
-  app.patch("/api/bookings/:id/device-check", verifyToken, requireRole(allowed), deviceCheck);
   app.patch("/api/bookings/:id/settle-deposit", verifyToken, requireRole(allowed), settleDepositHandler);
   app.get("/api/bookings/:id/return-checklist", verifyToken, requireRole(allowed), returnChecklist);
   app.patch("/api/bookings/:id/cancellation/approve", verifyToken, requireRole(allowed), approveCancellation);

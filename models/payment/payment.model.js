@@ -82,4 +82,7 @@ export const Payment = {
 
   createdAt: null,
   updatedAt: null,
+  restoredAt: null,   // only on a payment that was restored from paymentsArchives
+  // NOT stored here: refundedAt. When a refund completed is on its refundRequest (refundedAt); the payment only
+  // carries status "Refunded".
 };

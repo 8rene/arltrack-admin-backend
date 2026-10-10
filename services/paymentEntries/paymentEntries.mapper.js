@@ -599,6 +599,13 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
   if (missing("manualAmount")) out.manualAmount = rows.filter((e) => e.source === "in_person").reduce((s, e) => s + num(e.amount), 0);
   // A waived forfeit stores only the boolean; the amount it waived is the deposit that was not kept.
   if (out.forfeitWaived === true && missing("forfeitWaivedAmount") && num(out.depositAmount) > 0) out.forfeitWaivedAmount = num(out.depositAmount);
+  // refundedAt is stored when the admin side completes the request. One the customer backend's webhook completed has
+  // none, so it is the latest settledAt of the request's successful "out" rows.
+  if (out.status === "Refunded" && missing("refundedAt")) {
+    const settled = rows.filter((e) => e.status === "success" && e.settledAt)
+      .reduce((best, e) => { const t = e.settledAt.toMillis ? e.settledAt.toMillis() : new Date(e.settledAt).getTime(); return t > best.t ? { t, v: e.settledAt } : best; }, { t: -Infinity, v: null });
+    if (settled.v) out.refundedAt = settled.v;
+  }
   return out;
 };
 

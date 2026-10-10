@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myReturn, myCollectBalance, myConfirmPayment, myRefundIssued, myRemindInspection, myReturnChecklist, myDeviceCheck, myCreatePenalty, mySettleDeposit } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myReturn, myCollectBalance, myConfirmPayment, myRefundIssued, myRemindInspection, myReturnChecklist, myCreatePenalty, mySettleDeposit } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -24,7 +24,6 @@ export const registerDriverDispatchRoutes = (app) => {
   app.patch("/api/driver-dispatch/my-trips/:id/dropoff", verifyToken, requireRole(driverOnly), myDropoff);
   app.patch("/api/driver-dispatch/my-trips/:id/return",  verifyToken, requireRole(driverOnly), myReturn);
   app.get  ("/api/driver-dispatch/my-trips/:id/return-checklist", verifyToken, requireRole(driverOnly), myReturnChecklist);
-  app.patch("/api/driver-dispatch/my-trips/:id/device-check",     verifyToken, requireRole(driverOnly), myDeviceCheck);
   app.patch("/api/driver-dispatch/my-trips/:id/settle-deposit",   verifyToken, requireRole(driverOnly), mySettleDeposit);
   app.post ("/api/driver-dispatch/my-trips/:id/penalty",          verifyToken, requireRole(driverOnly), myCreatePenalty);
   app.patch("/api/driver-dispatch/my-trips/:id/collect-balance", verifyToken, requireRole(driverOnly), myCollectBalance);

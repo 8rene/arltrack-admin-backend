@@ -1,7 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
-import { updateBooking, markBookingDroppedOff, markDeviceChecked, settleDeposit, getReturnChecklist, resolvePaymentInfo as resolveBookingPaymentInfo } from "../../services/booking/booking.service.js";
+import { updateBooking, markBookingDroppedOff, settleDeposit, getReturnChecklist, resolvePaymentInfo as resolveBookingPaymentInfo } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
 import { getPhaseChecklist } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
@@ -639,13 +639,6 @@ export const driverReturnChecklist = async (bookingDocID, driverID) => {
 export const driverSettleDeposit = async (bookingDocID, driverID, body = {}) => {
   await assertOwnsBooking(bookingDocID, driverID);
   return settleDeposit(bookingDocID, { method: body.method, referenceNumber: body.referenceNumber }, driverID);
-};
-
-/** Driver recording the required GPS device check for their own trip. */
-export const driverDeviceCheck = async (bookingDocID, driverID, note = "") => {
-  await assertOwnsBooking(bookingDocID, driverID);
-  await markDeviceChecked(bookingDocID, note, driverID);
-  return { id: bookingDocID };
 };
 
 /**

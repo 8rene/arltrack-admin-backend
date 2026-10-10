@@ -266,9 +266,9 @@ export const getBookingRefundPreview = async (bookingID) => {
 // What actually happened the last time staff ran a refund/cancel against
 // this booking — used by getResolvedBookingsForCar() (services/fleet/
 // fleet.service.js) to label a booking in the "Already resolved" section.
-// Every staffRefundBooking()/staffCancelWithNoRefund() outcome writes a
-// refundRequests doc (source: "staff"), even the two where no money moved,
-// specifically so this lookup always has something to find.
+// staffRefundBooking()/staffCancelWithNoRefund() write a refundRequests doc (source: "staff") for every outcome
+// except "no_payment" (no payment, so nothing to describe). The two labels the document does not store are derived
+// here: "deposit_forfeited" = nothing_owed with returnDeposit:false, and "no_payment" = no refund doc and no payment.
 export const getStaffRefundOutcome = async (bookingID) => {
   // Two equality filters, no orderBy — avoids needing a composite Firestore
   // index. In practice there's only ever one of these per booking (once
@@ -284,7 +284,9 @@ export const getStaffRefundOutcome = async (bookingID) => {
     // shows a real outcome instead of a bare "Resolved".
     const anySnap = await db.collection("refundRequests").where("bookingID", "==", bookingID).get();
     const done = anySnap.docs.map((d) => d.data()).find((r) => ["Approved", "Refunded"].includes(r.status));
-    return done ? { outcome: "refunded", amount: amountOf(done) } : { outcome: null, amount: 0 };
+    if (done) return { outcome: "refunded", amount: amountOf(done) };
+    const paySnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+    return paySnap.empty ? { outcome: "no_payment", amount: 0 } : { outcome: null, amount: 0 };
   }
   const docs = snap.docs.map((d) => d.data());
   docs.sort((a, b) => {
@@ -292,7 +294,9 @@ export const getStaffRefundOutcome = async (bookingID) => {
     const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
     return bT - aT;
   });
-  return { outcome: docs[0].outcome || null, amount: amountOf(docs[0]) };
+  const latest = docs[0];
+  const outcome = latest.outcome === "nothing_owed" && latest.returnDeposit === false ? "deposit_forfeited" : (latest.outcome || null);
+  return { outcome, amount: amountOf(latest) };
 };
 
 // One PayMongo refund against one payment. Returns the PayMongo refund id.
@@ -455,7 +459,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
   });
   const cancelRow = await getCancellationInfoForBooking(claimed.bookingID).catch(() => null);
   const refundRequest = withCancellationInfo(claimed, cancelRow);
-  const releaseLock = () => reqRef.update({ approvalLockedAt: null }).catch(() => {});
+  const releaseLock = () => reqRef.update({ approvalLockedAt: admin.firestore.FieldValue.delete() }).catch(() => {});
 
   try {
     // ── 2. the plan, from the payment as it is now ──
@@ -519,7 +523,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
           status: "Failed",
           processedBy: adminUserID,
           updatedAt: failedAt,
-          approvalLockedAt: null,
+          approvalLockedAt: admin.firestore.FieldValue.delete(),
         });
         // The rows ARE the record of which parts already went out -- written in the same commit as the status.
         await writeRefundEntries(refundRequestID, {
@@ -557,7 +561,6 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       forfeitWaived: !!(policy && policy.waived),
       ...(decisionReason && canWriteDecisionReason(claimed, cancelRow) ? { reason: decisionReason } : {}),
       updatedAt: now,
-      approvalLockedAt: null,
     };
     // Who approved and when are not stored on the refund request: the booking's cancellation row carries them
     // (cancelBookingForRefund writes processedBy there). The "out" rows still get them -- they are passed to the
@@ -567,7 +570,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // status change. Strict: if the rows can't be written the request stays Pending-with-lock, never "Approved"
     // without the PayMongo refund ids.
     const approveBatch = db.batch();
-    approveBatch.update(reqRef, { ...approvedFields, processedBy: adminUserID, ...dropOldRefundNames() });
+    approveBatch.update(reqRef, { ...approvedFields, approvalLockedAt: admin.firestore.FieldValue.delete(), processedBy: adminUserID, ...dropOldRefundNames() });   // approval done: the lock field is removed, not left as null
     await writeRefundEntries(refundRequestID, {
       request: { ...refundRequest, ...approvedFields, ...approvedBy, refundRequestID: refundRequest.refundRequestID || refundRequestID },
       parts, manualRefund, unrefundable: plan.unrefundable,
@@ -638,24 +641,28 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
   const userID = payment?.userID || booking.userID || null;
   const now = new Date();
 
-  // Written even though nothing's actually being refunded — this is the one
-  // place the "Already resolved" list (getResolvedBookingsForCar) looks up
-  // what happened to a booking, so every outcome needs a record here to be
-  // found later, not just the ones where real money moved.
-  const refundRequestRef = db.collection("refundRequests").doc();
-  await refundRequestRef.set({
-    refundRequestID: refundRequestRef.id,
-    bookingID,
-    paymentID: payment?.paymentID || null,
-    // userID / reason live on the cancellation row cancelBookingForRefund writes below; the doc keeps only the refund's own fields.
-    source: "staff",
-    outcome,
-    ...extra,
-    toRefundAmount: 0,
-    status: "Refunded", // nothing left to do — no manual portion to issue later
-    createdAt: now,
-    updatedAt: now,
-  });
+  // A booking with NO payment record has no refund to describe, so no refundRequests doc is written for it: the
+  // staff cancellation row (written by cancelBookingForRefund below) already marks it resolved, and
+  // getStaffRefundOutcome() reads "no_payment" back from the missing payment. Every other no-money case keeps a doc,
+  // because the "Already resolved" list and a retry look it up. "outcome" is only ever "refunded" | "already_refunded" |
+  // "nothing_owed" on the document: a kept deposit is nothing_owed + returnDeposit:false (extra), and the
+  // "deposit_forfeited" label is derived when it is read back. The label still drives the messages below.
+  if (outcome !== "no_payment") {
+    const refundRequestRef = db.collection("refundRequests").doc();
+    await refundRequestRef.set({
+      refundRequestID: refundRequestRef.id,
+      bookingID,
+      paymentID: payment?.paymentID || null,
+      // userID / reason live on the cancellation row cancelBookingForRefund writes below; the doc keeps only the refund's own fields.
+      source: "staff",
+      outcome: outcome === "deposit_forfeited" ? "nothing_owed" : outcome,
+      ...extra,
+      toRefundAmount: 0,
+      status: "Refunded", // nothing left to do — no manual portion to issue later
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
 
   const cancel = await cancelBookingForRefund(bookingID, `Cancelled by staff: ${reason}`, staffUserID);
 
@@ -1045,7 +1052,6 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         refundRequestID,
         bookingID,
         paymentID,
-        contextLabel,
         source: "staff",
         outcome: "refunded",
         toRefundAmount: totalToRefund,
@@ -1093,7 +1099,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         failedBatch.update(reqRef, {
           status: "Failed",
           updatedAt: failedAt,
-          approvalLockedAt: null,
+          approvalLockedAt: admin.firestore.FieldValue.delete(),
         });
         await writeRefundEntries(refundRequestID, {
           request: { refundRequestID, bookingID, paymentID, userID, status: "Failed", processedBy: staffUserID || null, processedAt: failedAt, createdAt: claimedAt, updatedAt: failedAt },
@@ -1122,11 +1128,10 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
       updatedAt: now,
-      approvalLockedAt: null,
     };
     // Same rule as approveRefundRequest: the rows are the record, committed with the status, strict.
     const staffApproveBatch = db.batch();
-    staffApproveBatch.update(reqRef, { ...staffApprovedFields, ...dropOldRefundNames() });   // a placeholder from before the rename may still carry the old names
+    staffApproveBatch.update(reqRef, { ...staffApprovedFields, approvalLockedAt: admin.firestore.FieldValue.delete(), ...dropOldRefundNames() });   // a placeholder from before the rename may still carry the old names
     await writeRefundEntries(refundRequestID, {
       request: { refundRequestID, bookingID, paymentID, userID, ...staffApprovedFields, processedBy: staffUserID || null, processedAt: now, createdAt: claimedAt },   // the entry rows still record who / when
       parts, manualRefund, unrefundable: plan.unrefundable,
@@ -1153,7 +1158,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     // Unexpected failure (not one handled above): never leave the lock held.
     if (!err.handled && !approvedSaved) {
       if (parts.length === 0) { await reqRef.delete().catch(() => {}); await dropEarlyCancelRow(bookingID, refundRequestID); }   // nothing moved — retry starts clean
-      else await reqRef.update({ approvalLockedAt: null }).catch(() => {});  // parts went out but weren't saved yet
+      else await reqRef.update({ approvalLockedAt: admin.firestore.FieldValue.delete() }).catch(() => {});  // parts went out but weren't saved yet
     }
     // approvedSaved: doc is already "Approved" — a retry resumes the cancel/notify.
     throw err;
@@ -1203,7 +1208,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
 
     t.update(reqRef, {
       updatedAt: now,
-      ...(finalize ? { status: "Refunded" } : {}),
+      ...(finalize ? { status: "Refunded", refundedAt: now } : {}),
     });
     t.update(manualRef, {
       status: "success", method: normalizeMethod(method).method,
@@ -1244,7 +1249,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     const now = new Date();
     if (r.paymentID) {
       const pSnap = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
-      if (!pSnap.empty) await pSnap.docs[0].ref.update({ status: "Refunded", refundedAt: now, updatedAt: now });
+      if (!pSnap.empty) await pSnap.docs[0].ref.update({ status: "Refunded", updatedAt: now });
     }
     await notifyCustomer(r.userID, r.bookingID, "refund_completed", "Refund Completed", `Your refund of ${peso(amountOf(r))} has been returned.`);
   }

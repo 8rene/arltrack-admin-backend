@@ -7,7 +7,8 @@
 // a car's status to Maintenance/Inactive. Those docs carry source: "staff"
 // and an outcome field ("refunded" | "already_refunded" | "nothing_owed" —
 // the latter two mean no money actually moved, see staffRefundBooking()'s
-// comment) — status starts straight at "Approved" for a real refund, or
+// comment; a booking with no payment at all gets no refund doc, and a deposit
+// that was kept is nothing_owed + returnDeposit: false) — status starts straight at "Approved" for a real refund, or
 // goes directly to "Refunded" for the other two since there's nothing left
 // to do. No review step to sit in "Pending" for either way, since staff
 // already decided. getResolvedBookingsForCar() (services/fleet/fleet.
@@ -30,7 +31,8 @@ export const RefundRequest = {
   // carrying refundRequestID, or the booking's direct row once it is cancelled). Readers get them back through
   // withCancellationInfo / hydrate. The cancellation row only holds what the customer filled in.
   source: "customer", // "customer" (default) | "staff" — see comment above
-  outcome: null, // "refunded" | "already_refunded" | "nothing_owed" — staff-origin docs only
+  outcome: null, // "refunded" | "already_refunded" | "nothing_owed" — staff-origin docs only. (The fleet screen's
+                 // "no_payment" / "deposit_forfeited" labels are derived when read: no payment on record / nothing_owed with returnDeposit false.)
   toRefundAmount: 0,   // what goes back to the customer (was `amount`)
   bookingPaid: 0,      // everything the customer had paid before any forfeit (was `grossPaid`)
   returnDeposit: true, // the 48-hour rule's verdict when the request was made: true = the deposit goes back, false = it
@@ -62,6 +64,13 @@ export const RefundRequest = {
                         // The customer's own reason is on the cancellation row (the API returns it as customerReason).
   // rejectReason is the old name of `reason` for a rejection. It is no longer written, but old documents still carry it
   // (and an old document whose `reason` holds the customer's words keeps the staff's reason there), so readers accept both.
+  refundedAt: null,     // when the refund completed. Written when staff mark the in-person part handed back; a request the
+                        // customer backend's webhook completed has none stored, readers derive it from the latest settledAt
+                        // of its successful "out" rows (this replaces payments.refundedAt)
+  approvalLockedAt: null, // TEMPORARY 2-minute lock: set while an admin approves, so two admins can't approve the same refund and
+                        // send duplicate PayMongo refunds (reject is blocked meanwhile). Deleted when the approval ends, so a finished
+                        // request carries no such field
+  restoredAt: null,     // only on a request that was restored from refundArchives
   createdAt: null,
   updatedAt: null,
 };

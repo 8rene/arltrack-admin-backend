@@ -405,11 +405,6 @@ export const getAllBookings = async (statusFilter) => {
       pickupLocation:   histInfo.pickupLocation,
       dropoffLocation:  histInfo.dropoffLocation,
       geofenceZones:    histInfo.geofenceZones,
-      // Device-check requirement (see markDeviceChecked below) — lives
-      // directly on the booking doc since it's a one-off staff checkbox,
-      // not something with its own collection.
-      deviceCheckedAt:  b.deviceCheckedAt || null,
-      deviceCheckNote:  b.deviceCheckNote || "",
       // "Complete" now means photos AND the parts-condition record — see
       // getPhaseChecklist in vehicleDocumentation.service.js. The
       // per-half breakdown is included for UIs that want to say which half
@@ -930,49 +925,6 @@ const getDevicesStillAssigned = async (carID) => {
 
 const describeAssignedDevices = (devices) =>
   devices.map((d) => d.gpsName || d.gpsDeviceID).join(", ");
-
-// ─────────────────────────────────────────────
-// (Legacy) Device-check note at Return — no longer required for Return,
-// superseded by the GPS-unassigned check above. Kept so old clients that
-// still call the endpoint don't break. This is a required NOTE, not an
-// actual GPS device unassignment — it does not touch the gpsDevice
-// collection at all (a real unassign is a separate, deliberate action on
-// the GPS Devices page, and unassigning there detaches the tracker from
-// the CAR, affecting every future booking for it, not just this trip).
-// This just records that a human actually checked the device before the
-// car goes back out, and blocks Return until they have. One-shot, same
-// as drop-off: once recorded it isn't editable through this endpoint.
-// ─────────────────────────────────────────────
-export const markDeviceChecked = async (docID, note = "", performedBy = null) => {
-  const bookingRef = db.collection("bookings").doc(docID);
-  const bookingDoc = await bookingRef.get();
-  if (!bookingDoc.exists) throw new Error("Booking not found.");
-  const booking = bookingDoc.data();
-
-  if (booking.status?.toLowerCase() !== "ongoing") {
-    throw new Error(`Cannot record device check: booking status is "${booking.status}", not "ongoing".`);
-  }
-  if (booking.deviceCheckedAt) {
-    throw new Error("Device check already recorded for this booking — this can't be re-triggered or edited.");
-  }
-
-  await bookingRef.update({
-    deviceCheckedAt: admin.firestore.FieldValue.serverTimestamp(),
-    deviceCheckedBy: performedBy,
-    deviceCheckNote: note || "",
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-
-  const bID = booking.bookingID || docID;
-  createAuditLog({
-    action: "update",
-    userID: performedBy,
-    bookingID: bID,
-    description: `Recorded GPS device check on booking ${bID}${note ? `: ${note}` : "."}`,
-  }).catch((err) => console.error("[AuditLog] Device check log failed:", err.message));
-
-  return { id: docID };
-};
 
 // ─────────────────────────────────────────────
 // Read-only pre-return checklist — never blocks anything, just reports

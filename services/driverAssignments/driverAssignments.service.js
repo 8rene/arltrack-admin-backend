@@ -10,7 +10,6 @@ const COL = "driverAssignments";
 
 export const ASSIGNMENT_STATUS = {
   ASSIGNED:   "assigned",
-  REASSIGNED: "reassigned",
   UNASSIGNED: "unassigned",
   COMPLETED:  "completed",
 };
@@ -189,7 +188,7 @@ const pickPrimary = (docs) => {
 /**
  * Puts `driverID` on the booking. A booking has ONE row, updated in place: a new driver, a new assignedAt /
  * assignedBy and status "assigned" -- also when the row was "unassigned" or "completed" before. If it is
- * already this driver nothing changes. Any OTHER row an older bug left "assigned" is set to "reassigned", so a
+ * already this driver nothing changes. Any OTHER row an older bug left "assigned" is set to "unassigned", so a
  * booking never ends up with two current drivers. Nothing records when a row ended or who ended it.
  *
  * Optional bookingRef + bookingPatch are applied in the same transaction
@@ -227,7 +226,7 @@ export const createAssignment = async ({ bookingKey, driverID, assignedBy, booki
     }
     docs.forEach((d) => {
       if (d.id !== (primary && primary.id) && d.data().status === ASSIGNMENT_STATUS.ASSIGNED) {
-        t.update(d.ref, { status: ASSIGNMENT_STATUS.REASSIGNED });
+        t.update(d.ref, { status: ASSIGNMENT_STATUS.UNASSIGNED });
       }
     });
     if (bookingRef && bookingPatch) t.update(bookingRef, bookingPatch);
