@@ -402,12 +402,14 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     let remainingDeposit = deposit.amount;
     let confirmedPenaltyTotal = 0;
     const penaltyUpdates = [];
+    const coveredPenalties = [];   // [{ penaltyID, amount }] -- what the deposit paid toward each penalty
 
     for (const p of unpaidConfirmed) {
       const owed = p.data.amount - (p.data.paidAmount || 0);
       confirmedPenaltyTotal += owed;
       const fromDeposit = Math.min(remainingDeposit, owed);
       remainingDeposit -= fromDeposit;
+      if (fromDeposit > 0) coveredPenalties.push({ penaltyID: p.data.penaltyID || p.ref.id, amount: fromDeposit });
       const newPaidAmount = (p.data.paidAmount || 0) + fromDeposit;
       penaltyUpdates.push({
         ref: p.ref,
@@ -472,11 +474,12 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     }
 
     const outstandingAfterDeposit = Math.max(0, -net); // > 0 only when net is negative
-    return { confirmedPenaltyTotal, net, settlementStatus, outstandingAfterDeposit, userID: payment.userID };
+    return { confirmedPenaltyTotal, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, userID: payment.userID };
   });
 
   // Logged once the transaction has actually committed — same
   // "log the final state" convention as everywhere else in this app.
+  // 1) The money handed back, if any.
   if (result.net > 0) {
     await createTransactionLog({
       bookingID, paymentID, userID: result.userID,
@@ -485,13 +488,16 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       description: "Security deposit returned after settlement.",
       logID: `${paymentID}_deposit_settled`,
     });
-  } else if (result.confirmedPenaltyTotal > 0) {
+  }
+  // 2) One log per penalty the deposit paid toward, with that penalty's own penaltyID and the amount the deposit
+  //    covered -- whether or not money was also handed back. The logID makes a repeat a harmless no-op.
+  for (const c of result.coveredPenalties) {
     await createTransactionLog({
-      bookingID, paymentID, userID: result.userID,
-      type: "Payment", amount: Math.min(result.confirmedPenaltyTotal, /* covered-by-deposit portion */ result.confirmedPenaltyTotal - result.outstandingAfterDeposit),
-      status: "Success", paymentMethod: "Deposit", performedBy: actorUid,
-      description: "Penalties deducted from security deposit at settlement.",
-      logID: `${paymentID}_deposit_settled`,
+      bookingID, paymentID, userID: result.userID, penaltyID: c.penaltyID,
+      type: "Payment", amount: c.amount, status: "Success",
+      paymentMethod: "Deposit", performedBy: actorUid,
+      description: "Penalty paid from security deposit at settlement.",
+      logID: `${paymentID}_deposit_penalty_${c.penaltyID}`,
     });
   }
 
@@ -559,6 +565,7 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
   let remaining = amount;
   const batch = db.batch();
   const touched = [];
+  const applications = [];   // [{ penalty, amount }] -- what this payment put toward each penalty
   // One payment can cover several penalties: every row it creates shares this groupID.
   const groupID = db.collection(ENTRY_COLLECTION).doc().id;
 
@@ -568,6 +575,7 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
     const apply = Math.min(owed, remaining);
     remaining -= apply;
     touched.push(p);
+    applications.push({ penalty: p, amount: apply });
     batch.update(db.collection("penalties").doc(p.penaltyID), {
       paidAmount: (p.paidAmount || 0) + apply,
       updatedAt: timestamp(),
@@ -591,13 +599,18 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
   // Link the log to the booking/payment of the penalty that was paid so it
   // shows up against the right rental (previously this log had neither).
   const first = touched[0];
-  await createTransactionLog({
-    bookingID: first?.bookingID || null, paymentID: first?.paymentID || null,
-    penaltyID: touched.length === 1 ? touched[0].penaltyID : null,   // one payment can cover several penalties
-    userID, type: "Payment", amount: amount - remaining, status: "Success",
-    paymentMethod: method, referenceNumber, performedBy,
-    description: "Outstanding penalty balance paid.",
-  });
+  // One log per penalty the payment covered, each with its own penaltyID / bookingID / paymentID and the amount
+  // put toward THAT penalty. They share the payment's method and reference number (it was one real payment) --
+  // the paymentEntries rows of the same payment share a groupID.
+  for (const a of applications) {
+    await createTransactionLog({
+      bookingID: a.penalty.bookingID || null, paymentID: a.penalty.paymentID || null,
+      penaltyID: a.penalty.penaltyID,
+      userID, type: "Payment", amount: a.amount, status: "Success",
+      paymentMethod: method, referenceNumber, performedBy,
+      description: "Outstanding penalty balance paid.",
+    });
+  }
   createAuditLog?.({
     action: "update", userID: performedBy,
     bookingID: first?.bookingID || null, paymentID: first?.paymentID || null,
