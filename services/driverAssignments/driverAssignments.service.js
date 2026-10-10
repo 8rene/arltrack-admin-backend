@@ -176,32 +176,44 @@ export const resolveCurrentDriverID = async (bookingData, docID) => {
 // first and the booking cleanup ran as a second, separate write.
 
 /**
- * Puts `driverID` on the booking. Any current assignment is closed as
- * "reassigned" (or left alone if it is already this driver) and a new
- * "assigned" row is created, so a booking never ends up with two current
- * drivers. Extra "assigned" rows left by an older bug are closed too.
+ * The ONE row a booking keeps. Normally a booking has exactly one; if older data left several, the one that is
+ * currently "assigned" wins, otherwise the most recently assigned. (Reassigning no longer adds a row: it is
+ * updated in place, so the previous driver's history for that booking is not kept.)
+ */
+const pickPrimary = (docs) => {
+  const byRecent = (a, b) => millis(b.data().assignedAt) - millis(a.data().assignedAt);
+  const assigned = docs.filter((d) => d.data().status === ASSIGNMENT_STATUS.ASSIGNED).sort(byRecent);
+  return assigned[0] || docs.slice().sort(byRecent)[0] || null;
+};
+
+/**
+ * Puts `driverID` on the booking. A booking has ONE row, updated in place: a new driver, a new assignedAt /
+ * assignedBy and status "assigned" -- also when the row was "unassigned" or "completed" before. If it is
+ * already this driver nothing changes. Any OTHER row an older bug left "assigned" is set to "reassigned", so a
+ * booking never ends up with two current drivers. Nothing records when a row ended or who ended it.
  *
  * Optional bookingRef + bookingPatch are applied in the same transaction
  * (used to drop the legacy driver fields off the booking doc).
  */
 export const createAssignment = async ({ bookingKey, driverID, assignedBy, bookingRef = null, bookingPatch = null }) => {
-  const activeQuery = db.collection(COL)
-    .where("bookingID", "==", bookingKey)
-    .where("status", "==", ASSIGNMENT_STATUS.ASSIGNED);
+  const rowsQuery = db.collection(COL).where("bookingID", "==", bookingKey);
 
   return db.runTransaction(async (t) => {
-    const active = (await t.get(activeQuery)).docs;
-    const alreadyThisDriver = active.length === 1 && active[0].data().driverID === driverID;
+    const docs = (await t.get(rowsQuery)).docs;
+    const primary = pickPrimary(docs);
 
     let result;
-    if (alreadyThisDriver) {
-      result = shape(active[0]); // nothing to change
+    if (primary && primary.data().status === ASSIGNMENT_STATUS.ASSIGNED && primary.data().driverID === driverID) {
+      result = shape(primary); // nothing to change
+    } else if (primary) {
+      t.update(primary.ref, {
+        driverID,
+        status:     ASSIGNMENT_STATUS.ASSIGNED,
+        assignedAt: serverNow(),
+        assignedBy: assignedBy || "admin",
+      });
+      result = { id: primary.id, bookingID: bookingKey, driverID };
     } else {
-      active.forEach((d) => t.update(d.ref, {
-        status:  ASSIGNMENT_STATUS.REASSIGNED,
-        endedAt: serverNow(),
-        endedBy: assignedBy || "admin",
-      }));
       const ref = db.collection(COL).doc();
       t.set(ref, {
         assignmentID: ref.id,
@@ -210,11 +222,14 @@ export const createAssignment = async ({ bookingKey, driverID, assignedBy, booki
         status:       ASSIGNMENT_STATUS.ASSIGNED,
         assignedAt:   serverNow(),
         assignedBy:   assignedBy || "admin",
-        endedAt:      null,
-        endedBy:      null,
       });
       result = { id: ref.id, bookingID: bookingKey, driverID };
     }
+    docs.forEach((d) => {
+      if (d.id !== (primary && primary.id) && d.data().status === ASSIGNMENT_STATUS.ASSIGNED) {
+        t.update(d.ref, { status: ASSIGNMENT_STATUS.REASSIGNED });
+      }
+    });
     if (bookingRef && bookingPatch) t.update(bookingRef, bookingPatch);
     return result;
   });
@@ -228,7 +243,7 @@ export const createAssignment = async ({ bookingKey, driverID, assignedBy, booki
  */
 export const endActiveAssignment = async (
   bookingKey,
-  { status = ASSIGNMENT_STATUS.UNASSIGNED, endedBy = null, bookingRef = null, bookingPatch = null } = {},
+  { status = ASSIGNMENT_STATUS.UNASSIGNED, bookingRef = null, bookingPatch = null } = {},
 ) => {
   const activeQuery = bookingKey
     ? db.collection(COL).where("bookingID", "==", bookingKey).where("status", "==", ASSIGNMENT_STATUS.ASSIGNED)
@@ -236,15 +251,15 @@ export const endActiveAssignment = async (
 
   return db.runTransaction(async (t) => {
     const active = activeQuery ? (await t.get(activeQuery)).docs : [];
-    active.forEach((d) => t.update(d.ref, { status, endedAt: serverNow(), endedBy: endedBy || null }));
+    active.forEach((d) => t.update(d.ref, { status }));   // the row stays (one per booking); no ended-at / ended-by
     if (bookingRef && bookingPatch) t.update(bookingRef, bookingPatch);
     return active.length ? shape(active[0]) : null;
   });
 };
 
 /** Marks the current assignment "completed" once the trip is over (completed/cancelled/stolen). Best effort. */
-export const completeActiveAssignment = async (bookingKey, endedBy = null) =>
-  endActiveAssignment(bookingKey, { status: ASSIGNMENT_STATUS.COMPLETED, endedBy });
+export const completeActiveAssignment = async (bookingKey) =>
+  endActiveAssignment(bookingKey, { status: ASSIGNMENT_STATUS.COMPLETED });
 
 /**
  * Doc refs of EVERY assignment row (any status) for a booking. Only used by the

@@ -1111,7 +1111,7 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
     console.error("[BOOKINGS] approveCancellationRequest: failed to sync bookingSession:", err.message);
   }
 
-  completeActiveAssignment(booking.bookingID || docID, performedBy).catch((err) =>
+  completeActiveAssignment(booking.bookingID || docID).catch((err) =>
     console.error("[BOOKINGS] approveCancellationRequest: failed to close driver assignment:", err.message)
   );
 

@@ -337,7 +337,7 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
     throw err;
   }
 
-  // The assignment is its own row (closing any previous driver as "reassigned").
+  // The booking's ONE assignment row is updated in place (a different driver replaces the previous one).
   // The three old fields on the booking are dropped in the SAME transaction, so the
   // table is the only source of truth and the two writes cannot half-succeed.
   await createAssignment({
@@ -391,7 +391,6 @@ export const unassignDriver = async (bookingDocID, editedBy = null) => {
   // Closing the row and dropping the legacy booking fields commit together.
   const ended = await endActiveAssignment(bookingKeyOf(bookingDocID, booking), {
     status: ASSIGNMENT_STATUS.UNASSIGNED,
-    endedBy: editedBy,
     bookingRef,
     bookingPatch: legacyDriverFieldsPatch(),
   });

@@ -349,7 +349,10 @@ const MOVED_PAYMENT_FIELDS = [
   "balanceCollected", "balanceCollectedAmount", "refundIssuedBy", "refundIssuedAt",
 ];
 const MOVED_PENALTY_FIELDS = ["paymentMethod", "referenceNumber", "paidAt"];
-const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefundableAmount", "paymongoRefundID"];
+// onlineAmount / manualAmount / forfeitWaivedAmount are derived too (sums of the "out" rows, the deposit that was not kept):
+// refund requests no longer store them, hydrateRefundRequest puts them back for readers.
+const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefundableAmount", "paymongoRefundID",
+                              "onlineAmount", "manualAmount", "forfeitWaivedAmount"];
 
 /**
  * opts.rowsOnly  READ mode: the rows are the ONLY source. Whatever the document still carries in the moved fields
@@ -587,6 +590,15 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
   if (unref.length) {
     out.unrefundableAmount = unref.reduce((s, e) => s + e.amount, 0);
   }
+
+  // onlineAmount / manualAmount are not stored on the request any more: they are the sums of its rows. A request
+  // that still carries them (not cleaned up yet) keeps its stored value. Failed parts never moved money, so they
+  // are left out; a pending PayMongo part counts (it is on its way).
+  const missing = (k) => out[k] === undefined || out[k] === null;
+  if (missing("onlineAmount")) out.onlineAmount = online.filter((e) => e.status !== "failed").reduce((s, e) => s + num(e.amount), 0);
+  if (missing("manualAmount")) out.manualAmount = rows.filter((e) => e.source === "in_person").reduce((s, e) => s + num(e.amount), 0);
+  // A waived forfeit stores only the boolean; the amount it waived is the deposit that was not kept.
+  if (out.forfeitWaived === true && missing("forfeitWaivedAmount") && num(out.depositAmount) > 0) out.forfeitWaivedAmount = num(out.depositAmount);
   return out;
 };
 

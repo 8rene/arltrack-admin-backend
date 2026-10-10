@@ -306,7 +306,7 @@ const cancelBookingForRefund = async (bookingID, reason, processedBy = null) => 
   // then close it -- the other cancel paths (updateBooking, approveCancellationRequest) already do,
   // this one used to leave the row "assigned" on a cancelled booking.
   const driverID = await resolveCurrentDriverID(b, snap.id);
-  completeActiveAssignment(b.bookingID || snap.id, processedBy).catch((err) =>
+  completeActiveAssignment(b.bookingID || snap.id).catch((err) =>
     console.error("[REFUND] failed to close driver assignment on cancel:", err.message)
   );
   return { cancelled: true, driverID };
@@ -315,8 +315,7 @@ const cancelBookingForRefund = async (bookingID, reason, processedBy = null) => 
 // Resolves true only if the notification was actually written (or an identical
 // active one already existed); false if there was nobody to notify or the write
 // failed. Never throws — a notification problem must not fail the refund action
-// itself — but callers that stamp customerNotified use the result, so the flag
-// reflects what really happened.
+// itself. Nothing is stored about whether the customer was told: it is not data about the refund.
 // renotify: if an active card of this type already exists for the booking, bump it
 // (new message, unread again) instead of silently dropping the new one — e.g. a
 // second rejection after the customer re-requested a refund.
@@ -494,18 +493,16 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     const approvedFields = {
       status: "Approved",
       amount: plan.total,
-      onlineAmount,
-      manualAmount: plan.manualAmount,
+      // onlineAmount / manualAmount are NOT stored: they are the sums of the request's "out" rows in paymentEntries
+      // (hydrateRefundRequest derives them for readers). A waived forfeit stores only the boolean; its amount is the
+      // deposit that was not kept and the staff reason is in the audit log line written below.
       grossPaid: plan.grossPaid,
       depositForfeited: forfeit,
       forfeitWaived: !!(policy && policy.waived),
-      forfeitWaivedAmount: policy && policy.waived ? policy.waivedAmount : 0,
-      forfeitWaivedReason: policy && policy.waived ? String(waiveReason).trim() : null,
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
       processedBy: adminUserID,
       processedAt: now,
       updatedAt: now,
-      customerNotified: false, // flipped to true below, only once the customer has actually been notified
       approvalLockedAt: null,
     };
     // parts / manualRefund / unrefundable go ONLY to paymentEntries ("out" rows), committed together with the
@@ -523,7 +520,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // cancel below. The PayMongo refund has already gone out, so a failure in those
     // later steps must never leave the customer without an answer. (This replaces the
     // old daily customer-backend cron that used to sweep up missed notifications.)
-    const customerTold = await notifyCustomer(
+    await notifyCustomer(
       refundRequest.userID, refundRequest.bookingID, "refund_approved", "Refund Approved",
       (manualRefund
         ? `Your refund of ${peso(plan.total)} has been approved. ${peso(onlineAmount)} will be returned through PayMongo and ${peso(plan.manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
@@ -532,10 +529,6 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       + unrefundableSentence(plan.unrefundableAmount),
       { renotify: true }
     );
-    if (customerTold) {
-      await reqRef.update({ customerNotified: true })
-        .catch((err) => console.error("[REFUND] failed to stamp customerNotified:", err.message));
-    }
 
     await markDepositAfterRefund(paymentSnap.docs[0].ref, payment, forfeit);
 
@@ -609,12 +602,9 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     outcome,
     ...extra,
     amount: 0,
-    onlineAmount: 0,
-    manualAmount: 0,
     status: "Refunded", // nothing left to do — no manual portion to issue later
     processedBy: staffUserID,
     processedAt: now,
-    customerNotified: true,
     createdAt: now,
     updatedAt: now,
   });
@@ -727,9 +717,13 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Everything AFTER the money is committed: cancel the booking, tell the
-// customer/driver, audit. Safe to run twice (customerNotified gates the
-// notifications) — this is also what a retry runs when the first attempt died
-// between "refund saved" and "booking cancelled".
+// customer/driver, audit. Safe to run twice: the notifications go out only when THIS call is the one that
+// cancelled the booking (cancel.cancelled), so a second run finds it already cancelled and sends nothing.
+// This is also what a retry runs when the first attempt died between "refund saved" and "booking cancelled"
+// (it throws before notifying, so the retry is the first and only time the customer is told).
+// If the booking was cancelled by someone else in between, nobody is re-notified here (accepted trade-off:
+// a missed message is better than a duplicate email, and the cancel path itself notifies).
+// onlineAmount / manualAmount are derived by the caller (first run) or by hydrateRefundRequest (retry).
 const finishStaffRefund = async (r) => {
   let cancel;
   try {
@@ -738,7 +732,7 @@ const finishStaffRefund = async (r) => {
     throw fail(`The refund for ${r.bookingID} went through, but cancelling the booking failed: ${e.message}. Retry to finish — the refund will NOT be sent again.`, 502);
   }
 
-  if (!r.customerNotified) {
+  if (cancel.cancelled) {
     const manualAmount = Number(r.manualAmount) || 0;
     const onlineAmount = Number(r.onlineAmount) || 0;
 
@@ -781,10 +775,6 @@ const finishStaffRefund = async (r) => {
       paymentID: r.paymentID,
       refundRequestID: r.refundRequestID,
     });
-
-    await db.collection("refundRequests").doc(r.refundRequestID)
-      .update({ customerNotified: true, updatedAt: new Date() })
-      .catch((err) => console.error("[REFUND] failed to stamp customerNotified:", err.message));
   }
 
   return {
@@ -965,8 +955,6 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         source: "staff",
         outcome: "refunded",
         amount: totalToRefund,
-        onlineAmount,
-        manualAmount,
         grossPaid: plan.grossPaid,
         depositForfeited: forfeit,
         policyTier: noShowPolicy ? noShowPolicy.tier : null,
@@ -975,7 +963,6 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         processedBy: null,
         processedAt: null,
         rejectReason: null,
-        customerNotified: false,
         approvalLockedAt: claimedAt,
         createdAt: claimedAt,
         updatedAt: claimedAt,
@@ -1044,8 +1031,6 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     const staffApprovedFields = {
       status: "Approved",
       amount: totalToRefund,
-      onlineAmount,
-      manualAmount,
       grossPaid: plan.grossPaid,
       depositForfeited: forfeit,
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
@@ -1077,7 +1062,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       refundRequestID, bookingID, paymentID, userID, reason,
       amount: totalToRefund, onlineAmount, manualAmount, manualRefund, unrefundableAmount: plan.unrefundableAmount, contextLabel, skipDriverNotify,
       depositForfeited: forfeit,
-      processedBy: staffUserID || null, customerNotified: false,
+      processedBy: staffUserID || null,
     });
   } catch (err) {
     // Unexpected failure (not one handled above): never leave the lock held.
@@ -1205,7 +1190,6 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
       processedBy: adminUserID,
       processedAt: now,
       updatedAt: now,
-      customerNotified: false, // flipped to true below, once the customer has actually been notified
     });
     return r;
   });
@@ -1234,15 +1218,11 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
     refundRequestID,
   });
 
-  const customerTold = await notifyCustomer(
+  await notifyCustomer(
     refundRequest.userID, refundRequest.bookingID, "refund_rejected", "Refund Rejected",
     rejectReason ? `Your refund request was rejected: ${rejectReason}` : "Your refund request was rejected.",
     { renotify: true }
   );
-  if (customerTold) {
-    await reqRef.update({ customerNotified: true })
-      .catch((err) => console.error("[REFUND] failed to stamp customerNotified:", err.message));
-  }
 
   resolveNotification("refund_request", refundRequestID)
     .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));

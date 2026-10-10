@@ -37,6 +37,15 @@ export const RefundRequest = {
   // they are the "out" rows in paymentEntries (refundReqID = this request, ids <id>_part<n> | _manual | _unrefundable<n>).
   // hydrateRefundRequests() rebuilds the old shape, incl. unrefundableAmount (their sum), for readers.
   // paymongoRefundIDs is only the lookup key the customer backend's refund.updated webhook queries.
+  //
+  // ALSO NOT STORED (derived, so there is one place for each fact):
+  //   onlineAmount / manualAmount   sums of this request's "out" rows (hydrateRefundRequest fills them for readers)
+  //   forfeitWaivedAmount           the deposit that was not kept; only the boolean forfeitWaived is stored. The staff
+  //                                 reason for a waive is in the audit log line written when the request is approved.
+  //   customerNotified              whether the customer was told is not data about the refund: the notification goes
+  //                                 out when the status moves to Approved / Rejected (a staff-refund retry sends it only
+  //                                 if that call is the one that cancelled the booking).
+  //   requestedAt                   same moment as createdAt; readers use createdAt (old docs may still carry it).
   status: "Pending",
   paymongoRefundIDs: [],
   processedBy: null,
