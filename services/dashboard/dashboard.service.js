@@ -28,7 +28,7 @@ export const getActiveBookings = async () => {
 export const getPendingBookings = async () => {
   // Pending cancellation requests live in the cancellationRequests table.
   const pending = await db.collection("cancellationRequests").where("status", "==", "pending").get();
-  const keys = new Set(pending.docs.map((d) => d.data().bookingID));
+  const keys = new Set(pending.docs.filter((d) => !d.data().refundRequestID).map((d) => d.data().bookingID));   // refund-linked rows are counted as refunds
   return keys.size;
 };
 

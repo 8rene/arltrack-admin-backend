@@ -16,13 +16,18 @@ export const CancellationRequest = {
   bookingID:    "",   // FK -> bookings.bookingID (falls back to the booking doc ID for very old bookings)
   userID:       "",   // the customer who asked
   reason:       "",   // the customer's own free text
+  refundRequestID: null, // set on a row that belongs to a refund request: that row is decided through the refund, so the
+                         // mid-trip request screens and the pending count skip it
+  notes:        "",   // refund requests only: the customer's extra notes (moved here from refundRequests)
   status:       "",   // "pending" | "approved" | "rejected"
-  requestedAt:  null,
+  createdAt:    null, // was requestedAt (old rows still carry that name; every reader accepts both)
+  updatedAt:    null, // set when a request row is resolved; direct rows never change, so they don't carry it
   processedBy:  null, // uid of the staff member who approved/rejected
   processedAt:  null,
   rejectReason: null,
-  type:         "request", // "request" = customer asked to end an ongoing trip | "direct" = booking cancelled outright
-  cancelledBy:  null,      // direct rows: "customer" | "staff" | "admin" | "system" | "refund" | "unknown"
+  cancelledBy:  null, // direct rows only: "customer" | "staff" | "admin" | "system" | "refund" | "unknown".
+                      // There is no `type` field: a row with cancelledBy is a direct cancellation, any other row
+                      // is a customer request to end an ongoing trip.
 };
 // A direct row is written with status "approved" at the moment the booking is
 // cancelled (doc ID = the booking key); its `reason` is why the booking was

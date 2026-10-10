@@ -9,7 +9,7 @@ import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.ser
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
 import { resolveCurrentDriverID, completeActiveAssignment } from "../driverAssignments/driverAssignments.service.js";
-import { recordDirectCancellation, inferCancelledBy } from "../cancellationRequests/cancellationRequests.service.js";
+import { recordDirectCancellation, inferCancelledBy, getRequestsByBookingKeys, getCancellationInfoForBooking, recordRefundRejection } from "../cancellationRequests/cancellationRequests.service.js";
 import { writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { normalizeMethod } from "../paymentEntries/paymentEntries.mapper.js";
 import { getDepositView } from "../payments/depositView.js";
@@ -81,6 +81,26 @@ const fail = (message, status) => { const err = new Error(message); err.status =
 // switched, still carry the old names, so every read goes through these. What the API returns carries BOTH names for
 // now, so the web apps keep working until they read the new ones.
 const amountOf = (r) => Number(r && (r.toRefundAmount ?? r.amount)) || 0;
+// A refund request is the same event as a cancellation, so who asked (userID), why (reason, notes) and the decision
+// (processedBy, processedAt, rejectReason) live on the booking's cancellationRequests row. A refund document that still
+// carries them (written before, or by the customer backend until it moves) wins; the row only fills the gaps. The
+// decision is only taken from the row once the request is no longer Pending.
+const withCancellationInfo = (r, row) => {
+  if (!r || !row) return r;
+  const decided = r.status && r.status !== "Pending";
+  return {
+    ...r,
+    userID: r.userID || row.userID || null,
+    reason: r.reason || row.reason || "",
+    notes: r.notes || row.notes || "",
+    ...(decided ? {
+      processedBy: r.processedBy || row.processedBy || null,
+      processedAt: r.processedAt || row.processedAt || null,
+      rejectReason: r.rejectReason || row.rejectReason || null,
+    } : {}),
+  };
+};
+
 const withRefundAliases = (r) => {
   if (!r) return r;
   const out = { ...r };
@@ -160,10 +180,11 @@ export const getAllRefundRequests = async (status) => {
   let query = db.collection("refundRequests");
   if (status) query = query.where("status", "==", status);
   const snap = await query.get();
+  const cancellationRows = await getRequestsByBookingKeys(snap.docs.map((d) => d.data().bookingID));
 
   const requests = await Promise.all(
     snap.docs.map(async (doc) => {
-      const data = doc.data();
+      const data = withCancellationInfo(doc.data(), (cancellationRows.get(doc.data().bookingID) || [])[0]);
       const customerName = await resolveCustomerName(data.userID);
       const row = withRefundAliases({ ...data, refundRequestID: data.refundRequestID || doc.id, customerName });
 
@@ -407,7 +428,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
 
   // ── 1. claim ──
-  const refundRequest = await db.runTransaction(async (t) => {
+  const claimed = await db.runTransaction(async (t) => {
     const snap = await t.get(reqRef);
     if (!snap.exists) throw fail("Refund request not found.", 404);
     const r = snap.data();
@@ -416,6 +437,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     t.update(reqRef, { approvalLockedAt: new Date() });
     return r;
   });
+  const refundRequest = withCancellationInfo(claimed, await getCancellationInfoForBooking(claimed.bookingID).catch(() => null));
   const releaseLock = () => reqRef.update({ approvalLockedAt: null }).catch(() => {});
 
   try {
@@ -519,18 +541,20 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       depositForfeited: forfeit,
       forfeitWaived: !!(policy && policy.waived),
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
-      processedBy: adminUserID,
-      processedAt: now,
       updatedAt: now,
       approvalLockedAt: null,
     };
+    // Who approved and when are not stored on the refund request: the booking's cancellation row carries them
+    // (cancelBookingForRefund writes processedBy there). The "out" rows still get them -- they are passed to the
+    // rows' writer below, which is the only thing that reads them from the request.
+    const approvedBy = { processedBy: adminUserID, processedAt: now };
     // parts / manualRefund / unrefundable go ONLY to paymentEntries ("out" rows), committed together with the
     // status change. Strict: if the rows can't be written the request stays Pending-with-lock, never "Approved"
     // without the PayMongo refund ids.
     const approveBatch = db.batch();
     approveBatch.update(reqRef, { ...approvedFields, ...dropOldRefundNames() });
     await writeRefundEntries(refundRequestID, {
-      request: { ...refundRequest, ...approvedFields, refundRequestID: refundRequest.refundRequestID || refundRequestID },
+      request: { ...refundRequest, ...approvedFields, ...approvedBy, refundRequestID: refundRequest.refundRequestID || refundRequestID },
       parts, manualRefund, unrefundable: plan.unrefundable,
     }, { batch: approveBatch });
     await approveBatch.commit();
@@ -1197,7 +1221,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
 export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectReason) => {
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
 
-  const refundRequest = await db.runTransaction(async (t) => {
+  const claimedRequest = await db.runTransaction(async (t) => {
     const snap = await t.get(reqRef);
     if (!snap.exists) throw fail("Refund request not found.", 404);
     const r = snap.data();
@@ -1207,14 +1231,14 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
     // AFTER the money had already gone out.
     if (isLocked(r)) throw fail("This refund is being approved right now. Refresh in a moment.", 409);
     const now = new Date();
-    t.update(reqRef, {
-      status: "Rejected",
-      rejectReason: rejectReason || null,
-      processedBy: adminUserID,
-      processedAt: now,
-      updatedAt: now,
-    });
+    // Only the status is the refund's own; who rejected it, when and why go on the cancellation row below.
+    t.update(reqRef, { status: "Rejected", updatedAt: now });
     return r;
+  });
+  const refundRequest = withCancellationInfo(claimedRequest, await getCancellationInfoForBooking(claimedRequest.bookingID).catch(() => null));
+  await recordRefundRejection(refundRequest.bookingID, {
+    refundRequestID, userID: refundRequest.userID || null, reason: refundRequest.reason, notes: refundRequest.notes,
+    processedBy: adminUserID, rejectReason,
   });
 
   createTransactionLog({

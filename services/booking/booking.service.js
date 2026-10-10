@@ -278,11 +278,11 @@ export const getAllBookings = async (statusFilter) => {
   const requestMap = await getRequestsByBookingKeys(rows.map((b) => bookingKeyOf(b.id, b)));
   rows = rows.map((b) => {
     const all     = requestMap.get(bookingKeyOf(b.id, b)) || [];
-    const reqs    = all.filter((r) => r.type !== "direct");          // real customer requests only
+    const reqs    = all.filter((r) => !r.cancelledBy && !r.refundRequestID);          // real customer requests only
     const latest  = reqs[0] || null;
     const pending = reqs.some((r) => r.status === REQUEST_STATUS.PENDING);
     // Why the booking was cancelled: the direct-cancellation row, else the approved request's reason.
-    const reasonRow = all.find((r) => r.type === "direct") || all.find((r) => r.status === REQUEST_STATUS.APPROVED && r.reason);
+    const reasonRow = all.find((r) => r.cancelledBy) || all.find((r) => r.status === REQUEST_STATUS.APPROVED && r.reason);
     const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs, cancellationReason: reasonRow?.reason || "" };
     return pending && (b.status || "").toLowerCase() !== "cancelled"
       ? { ...out, actualStatus: b.status, status: "cancellation_request" }

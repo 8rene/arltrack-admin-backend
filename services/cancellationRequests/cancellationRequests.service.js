@@ -39,12 +39,18 @@ export const presentRequest = (doc) => {
     bookingID:    d.bookingID,
     userID:       d.userID || null,
     reason:       d.reason || "",
+    notes:        d.notes || "",          // the customer's extra notes on a refund request
+    refundRequestID: d.refundRequestID || null,   // set when the row belongs to a refund request (not a mid-trip request)
     status:       d.status,
-    requestedAt:  toIso(d.requestedAt),
+    createdAt:    toIso(d.createdAt ?? d.requestedAt),   // old rows still carry requestedAt
+    requestedAt:  toIso(d.createdAt ?? d.requestedAt),   // same value, sent under the old name until the web apps read createdAt
+    updatedAt:    toIso(d.updatedAt),
     processedBy:  d.processedBy || null,
     processedAt:  toIso(d.processedAt),
     rejectReason: d.rejectReason || null,
-    type:         d.type || "request",       // "request" (customer asked mid-trip) | "direct" (cancelled outright)
+    // Not stored: a row with cancelledBy is a direct cancellation, any other row is a customer request.
+    // (Old rows may still carry type; it is ignored.) Sent so the web apps keep working.
+    type:         d.cancelledBy ? "direct" : "request",
     cancelledBy:  d.cancelledBy || null,     // direct rows only: customer | staff | admin | system | refund | unknown
   };
 };
@@ -55,15 +61,16 @@ export const getPendingRequest = async (bookingKey) => {
   const snap = await db.collection(COL)
     .where("bookingID", "==", bookingKey)
     .where("status", "==", REQUEST_STATUS.PENDING)
-    .limit(1)
     .get();
-  return snap.empty ? null : { id: snap.docs[0].id, ref: snap.docs[0].ref, ...snap.docs[0].data() };
+  // A pending row that belongs to a refund request (refundRequestID) is decided through the refund, not here.
+  const doc = snap.docs.find((d) => !d.data().refundRequestID);
+  return doc ? { id: doc.id, ref: doc.ref, ...doc.data() } : null;
 };
 
 /** Every pending request (the set that needs staff action). */
 export const getAllPendingRequests = async () => {
   const snap = await db.collection(COL).where("status", "==", REQUEST_STATUS.PENDING).get();
-  return snap.docs.map((d) => ({ id: d.id, ref: d.ref, ...d.data() }));
+  return snap.docs.filter((d) => !d.data().refundRequestID).map((d) => ({ id: d.id, ref: d.ref, ...d.data() }));
 };
 
 /**
@@ -82,7 +89,7 @@ export const getRequestsByBookingKeys = async (bookingKeys) => {
   );
   const all = [];
   snaps.forEach((s) => s.forEach((d) => all.push(d)));
-  all.sort((a, b) => millis(b.data().requestedAt) - millis(a.data().requestedAt));
+  all.sort((a, b) => millis(b.data().createdAt ?? b.data().requestedAt) - millis(a.data().createdAt ?? a.data().requestedAt));
   all.forEach((d) => {
     const k = d.data().bookingID;
     if (!map.has(k)) map.set(k, []);
@@ -91,12 +98,53 @@ export const getRequestsByBookingKeys = async (bookingKeys) => {
   return map;
 };
 
+/** The booking's newest cancellation row (presented), or null. Refund requests read who / why / the decision from it. */
+export const getCancellationInfoForBooking = async (bookingKey) => {
+  if (!bookingKey) return null;
+  const map = await getRequestsByBookingKeys([bookingKey]);
+  return (map.get(bookingKey) || [])[0] || null;
+};
+
+/**
+ * Records that staff rejected a customer's refund request. The decision lives here, not on the refund request:
+ * the booking's pending row is resolved, or -- when the customer backend did not write one -- a rejected
+ * request row is created (no cancelledBy, so it reads as a request, not a cancellation).
+ */
+export const recordRefundRejection = async (bookingKey, { refundRequestID = null, userID = null, reason = "", notes = "", processedBy = null, rejectReason = "" } = {}) => {
+  if (!bookingKey) return null;
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  const snap = await db.collection(COL).where("bookingID", "==", bookingKey).where("status", "==", REQUEST_STATUS.PENDING).get();
+  const pending = snap.docs.find((d) => refundRequestID && d.data().refundRequestID === refundRequestID);
+  if (pending) {
+    return pending.ref.update({
+      status: REQUEST_STATUS.REJECTED, processedBy, processedAt: now, updatedAt: now,
+      rejectReason: rejectReason || "", refundRequestID,
+    });
+  }
+  const ref = db.collection(COL).doc();
+  return ref.set({
+    cancellationRequestID: ref.id,
+    refundRequestID,
+    bookingID: bookingKey,
+    userID,
+    reason: reason || "",
+    notes: notes || "",
+    status: REQUEST_STATUS.REJECTED,
+    createdAt: now,
+    updatedAt: now,
+    processedBy,
+    processedAt: now,
+    rejectReason: rejectReason || "",
+  });
+};
+
 /** Marks a request approved/rejected. Pass a Firestore batch OR transaction to commit it together with other writes. */
 export const resolveRequest = (request, { status, processedBy = null, rejectReason = null }, batch = null) => {
   const patch = {
     status,
     processedBy,
     processedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     rejectReason: status === REQUEST_STATUS.REJECTED ? (rejectReason || "") : null,
   };
   if (batch) { batch.update(request.ref, patch); return null; }
@@ -115,9 +163,9 @@ export const getRequestRefsForBooking = async (bookingKey) => {
 };
 
 // -- Direct cancellations ---------------------------------------------------
-// Every cancellation reason now lives here (type "direct", status "approved"),
+// Every cancellation reason now lives here (a row with cancelledBy, status "approved"),
 // not on the booking. A customer request that staff approve keeps its own row
-// (type "request") and its reason, so approving one adds no second row.
+// (no cancelledBy) and its reason, so approving one adds no second row.
 
 /** Who cancelled, guessed from the reason text. Only used for the migration and for staff/admin/refund writers. */
 export const inferCancelledBy = (reason) => {
@@ -137,13 +185,12 @@ export const recordDirectCancellation = (bookingKey, { userID = null, reason = "
   const now = admin.firestore.FieldValue.serverTimestamp();
   const data = {
     cancellationRequestID: ref.id,
-    type: "direct",
     bookingID: bookingKey,
     userID,
     reason: reason || "",
     status: REQUEST_STATUS.APPROVED,
     cancelledBy,
-    requestedAt: now,
+    createdAt: now,
     processedBy,
     processedAt: now,
     rejectReason: null,
