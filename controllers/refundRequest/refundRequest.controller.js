@@ -22,8 +22,9 @@ export const approveRefund = async (req, res) => {
     const adminUserID = req.user?.userID || req.user?.uid || null;
     // Optional staff override of the 48-hour deposit forfeit (goodwill, duplicate charge…).
     // A reason is mandatory — it is stored on the request and in the audit log.
-    const { waiveForfeit, waiveReason } = req.body || {};
-    const data = await approveRefundRequest(id, adminUserID, { waiveForfeit: waiveForfeit === true, waiveReason });
+    // `reason` is the staff's reason for the decision (optional note on approve; waiveReason is the old name for it).
+    const { waiveForfeit, waiveReason, reason } = req.body || {};
+    const data = await approveRefundRequest(id, adminUserID, { waiveForfeit: waiveForfeit === true, waiveReason, reason });
     return res.status(200).json({
       success: true,
       message: data.manualAmount > 0
@@ -40,9 +41,10 @@ export const approveRefund = async (req, res) => {
 export const rejectRefund = async (req, res) => {
   try {
     const { id } = req.params;
-    const { rejectReason } = req.body;
+    // `reason` is the one field for the staff's reason; rejectReason is the old name and still accepted.
+    const { reason, rejectReason } = req.body || {};
     const adminUserID = req.user?.userID || req.user?.uid || null;
-    const data = await rejectRefundRequest(id, adminUserID, rejectReason);
+    const data = await rejectRefundRequest(id, adminUserID, reason ?? rejectReason);
     return res.status(200).json({ success: true, message: "Refund request rejected.", data });
   } catch (error) {
     console.error("[REFUND] reject error:", error);

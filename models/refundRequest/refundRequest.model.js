@@ -26,9 +26,9 @@ export const RefundRequest = {
   refundRequestID: "",
   bookingID: "",
   paymentID: "",
-  userID: "",
-  reason: "",
-  notes: "",
+  // userID / reason / notes are NOT stored here: they are on the booking's cancellationRequests row (the pending row
+  // carrying refundRequestID, or the booking's direct row once it is cancelled). Readers get them back through
+  // withCancellationInfo / hydrate. The cancellation row only holds what the customer filled in.
   source: "customer", // "customer" (default) | "staff" — see comment above
   outcome: null, // "refunded" | "already_refunded" | "nothing_owed" — staff-origin docs only
   toRefundAmount: 0,   // what goes back to the customer (was `amount`)
@@ -41,7 +41,8 @@ export const RefundRequest = {
   // (online money with no PayMongo payment id -- never refunded, never handed back) are NOT stored here any more:
   // they are the "out" rows in paymentEntries (refundReqID = this request, ids <id>_part<n> | _manual | _unrefundable<n>).
   // hydrateRefundRequests() rebuilds the old shape, incl. unrefundableAmount (their sum), for readers.
-  // paymongoRefundIDs is only the lookup key the customer backend's refund.updated webhook queries.
+  // No PayMongo id is stored here: the customer backend's refund.updated webhook finds the request through the
+  // "out" row's referenceNumber (re_...) -> refundReqID.
   //
   // ALSO NOT STORED (derived, so there is one place for each fact):
   //   onlineAmount / manualAmount   sums of this request's "out" rows (hydrateRefundRequest fills them for readers)
@@ -56,10 +57,11 @@ export const RefundRequest = {
   //   amount / grossPaid            old names of toRefundAmount / bookingPaid. Old documents and the customer backend
   //                                 still use them, so every reader accepts both and the API returns both for now.
   status: "Pending",
-  paymongoRefundIDs: [],
-  processedBy: null,
-  processedAt: null,
-  rejectReason: null,
+  processedBy: null,    // staff userID who approved / rejected it (processedAt is not stored: the entry rows and the audit log carry the time)
+  reason: null,         // the STAFF's reason for the decision: why it was rejected, or the note / waive reason given on approve.
+                        // The customer's own reason is on the cancellation row (the API returns it as customerReason).
+  // rejectReason is the old name of `reason` for a rejection. It is no longer written, but old documents still carry it
+  // (and an old document whose `reason` holds the customer's words keeps the staff's reason there), so readers accept both.
   createdAt: null,
   updatedAt: null,
 };

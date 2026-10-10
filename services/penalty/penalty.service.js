@@ -11,7 +11,7 @@ import { createNotification, notifyStaff } from "../notification/notification.se
 import { getSystemSettings } from "../systemSettings/systemSettings.service.js";
 import { getSessionByBookingID } from "../booking/bookingSession.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
-import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
+import { ENTRY_COLLECTION, ENTRY_METHODS } from "../../models/paymentEntries/paymentEntry.model.js";
 import { buildPenaltyPaymentEntry } from "../paymentEntries/paymentEntries.mapper.js";
 import { getDepositView } from "../payments/depositView.js";
 import { hydratePenalties } from "../paymentEntries/paymentEntries.service.js";
@@ -440,8 +440,36 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
     });
 
-    // No paymentEntries row is written for the deposit going back: depositReturned (above) is the amount, and how it
-    // was returned (method, reference), who did it and when are on the DepositReturn transaction log written below.
+    // The deposit going back is saved as a paymentEntries row (phase "deposit_return"), in the same transaction.
+    if (net > 0) {
+      const entryRef = db.collection(ENTRY_COLLECTION).doc();
+      const methodKey = String(returnMethod || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+      const now = new Date();
+      tx.set(entryRef, {
+        paymentEntryID: entryRef.id,
+        paymentID,
+        bookingID,
+        userID: payment.userID || null,
+        refundReqID: null,
+        penaltyID: null,
+        direction: "out",
+        phase: "deposit_return",
+        source: "in_person",
+        method: ENTRY_METHODS.includes(methodKey) ? methodKey : null,
+        amount: net,
+        status: "success",
+        referenceNumber: String(returnReferenceNumber || "").trim() || null,
+        sessionID: null,
+        transactionFee: null,
+        processedBy: actorUid || null,
+        processedAt: now,
+        settledAt: now,
+        groupID: null,
+        transactionErrorNote: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
 
     const outstandingAfterDeposit = Math.max(0, -net); // > 0 only when net is negative
     return { confirmedPenaltyTotal, net, settlementStatus, outstandingAfterDeposit, userID: payment.userID };

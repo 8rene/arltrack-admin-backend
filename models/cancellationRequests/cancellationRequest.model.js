@@ -29,6 +29,7 @@ export const CancellationRequest = {
                       // There is no `type` field: a row with cancelledBy is a direct cancellation, any other row
                       // is a customer request to end an ongoing trip.
 };
-// A direct row is written with status "approved" at the moment the booking is
+// A direct row is written (with no status / processedBy / processedAt / rejectReason -- cancelledBy says who did it;
+// older rows may still carry them) at the moment the booking is
 // cancelled (doc ID = the booking key); its `reason` is why the booking was
 // cancelled. This replaces bookings.cancellationReason.

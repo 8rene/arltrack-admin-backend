@@ -41,7 +41,9 @@ export const presentRequest = (doc) => {
     reason:       d.reason || "",
     notes:        d.notes || "",          // the customer's extra notes on a refund request
     refundRequestID: d.refundRequestID || null,   // set when the row belongs to a refund request (not a mid-trip request)
-    status:       d.status,
+    // A direct cancellation row no longer stores status / processedBy / processedAt / rejectReason (it is always
+    // a finished cancellation), so it is presented as approved. Rows that carry a status keep it.
+    status:       d.status ?? (d.cancelledBy ? REQUEST_STATUS.APPROVED : undefined),
     createdAt:    toIso(d.createdAt ?? d.requestedAt),   // old rows still carry requestedAt
     requestedAt:  toIso(d.createdAt ?? d.requestedAt),   // same value, sent under the old name until the web apps read createdAt
     updatedAt:    toIso(d.updatedAt),
@@ -106,20 +108,18 @@ export const getCancellationInfoForBooking = async (bookingKey) => {
 };
 
 /**
- * Records that staff rejected a customer's refund request. The decision lives here, not on the refund request:
- * the booking's pending row is resolved, or -- when the customer backend did not write one -- a rejected
- * request row is created (no cancelledBy, so it reads as a request, not a cancellation).
+ * Marks the row of a rejected refund request as rejected. This collection holds only what the customer filled in
+ * (reason, notes): the reject reason is the refund request's own `rejectReason`, so it is not copied here. The
+ * booking's pending row is marked rejected, or -- when the customer backend did not write one -- a rejected
+ * row is created from the request's reason / notes (no cancelledBy, so it reads as a request, not a cancellation).
  */
-export const recordRefundRejection = async (bookingKey, { refundRequestID = null, userID = null, reason = "", notes = "", processedBy = null, rejectReason = "" } = {}) => {
+export const recordRefundRejection = async (bookingKey, { refundRequestID = null, userID = null, reason = "", notes = "" } = {}) => {
   if (!bookingKey) return null;
   const now = admin.firestore.FieldValue.serverTimestamp();
   const snap = await db.collection(COL).where("bookingID", "==", bookingKey).where("status", "==", REQUEST_STATUS.PENDING).get();
   const pending = snap.docs.find((d) => refundRequestID && d.data().refundRequestID === refundRequestID);
   if (pending) {
-    return pending.ref.update({
-      status: REQUEST_STATUS.REJECTED, processedBy, processedAt: now, updatedAt: now,
-      rejectReason: rejectReason || "", refundRequestID,
-    });
+    return pending.ref.update({ status: REQUEST_STATUS.REJECTED, updatedAt: now, refundRequestID });
   }
   const ref = db.collection(COL).doc();
   return ref.set({
@@ -132,9 +132,6 @@ export const recordRefundRejection = async (bookingKey, { refundRequestID = null
     status: REQUEST_STATUS.REJECTED,
     createdAt: now,
     updatedAt: now,
-    processedBy,
-    processedAt: now,
-    rejectReason: rejectReason || "",
   });
 };
 
@@ -163,7 +160,7 @@ export const getRequestRefsForBooking = async (bookingKey) => {
 };
 
 // -- Direct cancellations ---------------------------------------------------
-// Every cancellation reason now lives here (a row with cancelledBy, status "approved"),
+// Every cancellation reason now lives here (a row with cancelledBy, no status),
 // not on the booking. A customer request that staff approve keeps its own row
 // (no cancelledBy) and its reason, so approving one adds no second row.
 
@@ -179,7 +176,9 @@ export const inferCancelledBy = (reason) => {
 };
 
 /** Writes the cancellation row for a booking that was cancelled outright. Pass a batch to commit it with the booking update. */
-export const recordDirectCancellation = (bookingKey, { userID = null, reason = "", cancelledBy = "unknown", processedBy = null } = {}, batch = null) => {
+// A direct row is a finished cancellation, so it carries no status / processedBy / processedAt / rejectReason --
+// cancelledBy says who did it. (Old rows that still have those fields are left as they are.)
+export const recordDirectCancellation = (bookingKey, { userID = null, reason = "", cancelledBy = "unknown" } = {}, batch = null) => {
   if (!bookingKey) return null;
   const ref = db.collection(COL).doc(String(bookingKey));
   const now = admin.firestore.FieldValue.serverTimestamp();
@@ -188,12 +187,8 @@ export const recordDirectCancellation = (bookingKey, { userID = null, reason = "
     bookingID: bookingKey,
     userID,
     reason: reason || "",
-    status: REQUEST_STATUS.APPROVED,
     cancelledBy,
     createdAt: now,
-    processedBy,
-    processedAt: now,
-    rejectReason: null,
   };
   if (batch) { batch.set(ref, data); return null; }
   return ref.set(data);

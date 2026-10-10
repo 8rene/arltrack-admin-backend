@@ -16,9 +16,8 @@ import { getDepositView } from "../payments/depositView.js";
 
 // A refund's parts[] / manualRefund / unrefundable[] live ONLY in paymentEntries ("out" rows) now. Readers get
 // the old shape back through hydrate (it only fills what the request document does not carry).
-//   paymongoRefundIDs stays on the request as the lookup key the customer backend's refund.updated webhook
-//   queries (array-contains). It is a key, not data; drop it once that webhook looks rows up by
-//   paymentEntries.referenceNumber instead.
+//   The request stores no PayMongo id: the customer backend's refund.updated webhook finds it through the "out"
+//   row's referenceNumber (re_...) -> refundReqID.
 const hydrateOne = async (data, docID) => {
   if (!data) return data;
   const [h] = await hydrateRefundRequests([{ ...data, refundRequestID: data.refundRequestID || docID }]);
@@ -81,25 +80,40 @@ const fail = (message, status) => { const err = new Error(message); err.status =
 // switched, still carry the old names, so every read goes through these. What the API returns carries BOTH names for
 // now, so the web apps keep working until they read the new ones.
 const amountOf = (r) => Number(r && (r.toRefundAmount ?? r.amount)) || 0;
-// A refund request is the same event as a cancellation, so who asked (userID), why (reason, notes) and the decision
-// (processedBy, processedAt, rejectReason) live on the booking's cancellationRequests row. A refund document that still
-// carries them (written before, or by the customer backend until it moves) wins; the row only fills the gaps. The
-// decision is only taken from the row once the request is no longer Pending.
+// Who asked (userID) and why (customerReason, notes) live on the booking's cancellationRequests row (what the
+// customer filled in). The refund request's own `reason` is the STAFF's reason for the decision: the reject reason, or
+// the note / waive reason given on approve. One field for every decision.
+// Old refund documents (and staff-created ones) still carry the customer's fields on the document itself: userID,
+// notes, and the customer's reason inside `reason`, with the staff's reject reason in `rejectReason`. A document that
+// carries userID / notes / rejectReason is read that way; the row only fills the gaps. Old rows may also carry the
+// decision (processedBy, processedAt, rejectReason), taken from the row only once the request is no longer Pending.
+const isLegacyRefundDoc = (r) => !!(r && (r.userID || r.notes || r.rejectReason));
 const withCancellationInfo = (r, row) => {
-  if (!r || !row) return r;
-  const decided = r.status && r.status !== "Pending";
+  if (!r) return r;
+  const decided = !!(r.status && r.status !== "Pending");
+  const legacy = isLegacyRefundDoc(r);
+  const customerReason = (legacy ? r.reason : "") || (row && row.reason) || "";
+  const decisionReason = (legacy ? r.rejectReason : r.reason) || (decided && row ? row.rejectReason : "") || "";
   return {
     ...r,
-    userID: r.userID || row.userID || null,
-    reason: r.reason || row.reason || "",
-    notes: r.notes || row.notes || "",
-    ...(decided ? {
-      processedBy: r.processedBy || row.processedBy || null,
-      processedAt: r.processedAt || row.processedAt || null,
-      rejectReason: r.rejectReason || row.rejectReason || null,
+    ...(row ? {
+      userID: r.userID || row.userID || null,
+      notes: r.notes || row.notes || "",
+      ...(decided ? {
+        processedBy: r.processedBy || row.processedBy || null,
+        processedAt: r.processedAt || row.processedAt || null,
+      } : {}),
     } : {}),
+    customerReason,
+    reason: decisionReason,
+    // old name, kept in the response only so the web apps keep working until they read `reason`
+    rejectReason: r.status === "Rejected" ? (decisionReason || null) : (r.rejectReason ?? null),
   };
 };
+// Is it safe to write the staff's decision into `reason`? On an old document `reason` still holds the customer's
+// words, so it is only overwritten when the cancellation row has the same text (nothing is lost).
+const canWriteDecisionReason = (doc, row) =>
+  !isLegacyRefundDoc(doc) || !doc.reason || (!!row && String(row.reason || "") === String(doc.reason || ""));
 
 const withRefundAliases = (r) => {
   if (!r) return r;
@@ -111,7 +125,7 @@ const withRefundAliases = (r) => {
   return out;
 };
 // Removes the old names from a stored document in the same update that writes the new ones.
-const dropOldRefundNames = () => ({ amount: admin.firestore.FieldValue.delete(), grossPaid: admin.firestore.FieldValue.delete() });
+const dropOldRefundNames = () => ({ amount: admin.firestore.FieldValue.delete(), grossPaid: admin.firestore.FieldValue.delete(), paymongoRefundIDs: admin.firestore.FieldValue.delete(), customerNotified: admin.firestore.FieldValue.delete() });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 48-hour refund policy (see paymentBreakdown.js → getRefundPolicy).
@@ -331,7 +345,7 @@ const cancelBookingForRefund = async (bookingID, reason, processedBy = null) => 
   if (!["to pay", "upcoming"].includes(lower(b.status))) {
     return { cancelled: false, driverID: await resolveCurrentDriverID(b, snap.id), status: b.status };
   }
-  // The reason lives in cancellationRequests (type "direct"), not on the booking.
+  // The reason lives in cancellationRequests (a row with cancelledBy), not on the booking.
   const cancelBatch = db.batch();
   cancelBatch.update(ref, { status: "cancelled", updatedAt: new Date() });
   recordDirectCancellation(b.bookingID || snap.id, { userID: b.userID || null, reason, cancelledBy: inferCancelledBy(reason), processedBy }, cancelBatch);
@@ -424,8 +438,10 @@ export const resolveCustomerContact = async (userID) => {
 // PayMongo part has settled (customer backend's refund webhook) AND any manual
 // portion is marked issued.
 // ─────────────────────────────────────────────────────────────────────────────
-export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason, skipDriverNotify = false, waiveForfeit = false, waiveReason = "" } = {}) => {
+export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason, skipDriverNotify = false, waiveForfeit = false, waiveReason = "", reason = "" } = {}) => {
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
+  // The staff's reason for approving: an optional note, or the waive reason when the forfeit is waived.
+  const decisionReason = String(reason || waiveReason || "").trim();
 
   // ── 1. claim ──
   const claimed = await db.runTransaction(async (t) => {
@@ -437,7 +453,8 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     t.update(reqRef, { approvalLockedAt: new Date() });
     return r;
   });
-  const refundRequest = withCancellationInfo(claimed, await getCancellationInfoForBooking(claimed.bookingID).catch(() => null));
+  const cancelRow = await getCancellationInfoForBooking(claimed.bookingID).catch(() => null);
+  const refundRequest = withCancellationInfo(claimed, cancelRow);
   const releaseLock = () => reqRef.update({ approvalLockedAt: null }).catch(() => {});
 
   try {
@@ -488,7 +505,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
         const paymongoRefundID = await createPaymongoRefund({
           paymongoPaymentID: part.paymongoPaymentID,
           amount: part.amount,
-          reason: refundRequest.reason,
+          reason: refundRequest.customerReason,
         });
         parts.push({ kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID, status: "pending" });
       } catch (e) {
@@ -500,9 +517,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
         const failedBatch = db.batch();
         failedBatch.update(reqRef, {
           status: "Failed",
-          paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
           processedBy: adminUserID,
-          processedAt: failedAt,
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
@@ -540,7 +555,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
       forfeitWaived: !!(policy && policy.waived),
-      paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
+      ...(decisionReason && canWriteDecisionReason(claimed, cancelRow) ? { reason: decisionReason } : {}),
       updatedAt: now,
       approvalLockedAt: null,
     };
@@ -552,7 +567,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // status change. Strict: if the rows can't be written the request stays Pending-with-lock, never "Approved"
     // without the PayMongo refund ids.
     const approveBatch = db.batch();
-    approveBatch.update(reqRef, { ...approvedFields, ...dropOldRefundNames() });
+    approveBatch.update(reqRef, { ...approvedFields, processedBy: adminUserID, ...dropOldRefundNames() });
     await writeRefundEntries(refundRequestID, {
       request: { ...refundRequest, ...approvedFields, ...approvedBy, refundRequestID: refundRequest.refundRequestID || refundRequestID },
       parts, manualRefund, unrefundable: plan.unrefundable,
@@ -632,22 +647,12 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     refundRequestID: refundRequestRef.id,
     bookingID,
     paymentID: payment?.paymentID || null,
-    userID,
-    reason,
-    notes: outcome === "deposit_forfeited"
-      ? "Staff-initiated: marked as a no-show; the payment only covered the non-refundable deposit, so nothing is refunded."
-      : outcome === "already_refunded"
-      ? "Staff-initiated: payment was already refunded earlier; booking cancelled to match."
-      : outcome === "no_payment"
-        ? "Staff-initiated: no payment record was found for this booking; booking cancelled, nothing to refund."
-        : "Staff-initiated: nothing had been paid; booking cancelled, no refund needed.",
+    // userID / reason live on the cancellation row cancelBookingForRefund writes below; the doc keeps only the refund's own fields.
     source: "staff",
     outcome,
     ...extra,
     toRefundAmount: 0,
     status: "Refunded", // nothing left to do — no manual portion to issue later
-    processedBy: staffUserID,
-    processedAt: now,
     createdAt: now,
     updatedAt: now,
   });
@@ -767,11 +772,40 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
 // If the booking was cancelled by someone else in between, nobody is re-notified here (accepted trade-off:
 // a missed message is better than a duplicate email, and the cancel path itself notifies).
 // onlineAmount / manualAmount are derived by the caller (first run) or by hydrateRefundRequest (retry).
+// A staff refund keeps who / why / the customer on its cancellationRequests row (doc ID = the booking key), not on the
+// refund doc: the row is written in the same step as the placeholder, before any money moves, and the final
+// "booking cancelled" write (recordDirectCancellation) replaces it. Refund docs from before this change still carry
+// the fields, so they win when present.
+const cancelRowRef = (bookingID) => db.collection("cancellationRequests").doc(String(bookingID));
+
+const staffRefundContext = async (r) => {
+  let { userID, reason, processedBy } = r;
+  if (!reason || !userID || !processedBy) {
+    const snap = await cancelRowRef(r.bookingID).get();
+    const row = snap.exists && snap.data().refundRequestID === r.refundRequestID ? snap.data() : {};
+    userID = userID || row.userID || null;
+    reason = reason || row.reason || "";
+    processedBy = processedBy || row.processedBy || null;
+  }
+  return { userID, reason: reason || "Staff cancellation", processedBy };
+};
+
+// Abort cleanup: the placeholder refund is being deleted, so its early row goes too. Only ever deletes OUR early row
+// (same refundRequestID, not a finished cancellation).
+const dropEarlyCancelRow = async (bookingID, refundRequestID) => {
+  try {
+    const ref = cancelRowRef(bookingID);
+    const snap = await ref.get();
+    if (snap.exists && snap.data().refundRequestID === refundRequestID && !snap.data().cancelledBy) await ref.delete();
+  } catch (e) { console.error("[REFUND] could not remove the early cancellation row:", e.message); }
+};
+
 const finishStaffRefund = async (r) => {
+  const { userID, reason, processedBy } = await staffRefundContext(r);
   const refundTotal = amountOf(r);
   let cancel;
   try {
-    cancel = await cancelBookingForRefund(r.bookingID, `Cancelled by staff: ${r.reason}`, r.processedBy || null);
+    cancel = await cancelBookingForRefund(r.bookingID, `Cancelled by staff: ${reason}`, processedBy || null);
   } catch (e) {
     throw fail(`The refund for ${r.bookingID} went through, but cancelling the booking failed: ${e.message}. Retry to finish — the refund will NOT be sent again.`, 502);
   }
@@ -781,15 +815,15 @@ const finishStaffRefund = async (r) => {
     const onlineAmount = Number(r.onlineAmount) || 0;
 
     await notifyCustomer(
-      r.userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Approved",
+      userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Approved",
       (manualAmount > 0
-        ? `Your booking was cancelled: ${r.reason}. A refund has been approved: ${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
-        : `Your booking was cancelled: ${r.reason}. A refund of ${peso(refundTotal)} has been approved — please allow up to 24 hours for PayMongo to process it. We'll notify you once it has been returned.`)
+        ? `Your booking was cancelled: ${reason}. A refund has been approved: ${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
+        : `Your booking was cancelled: ${reason}. A refund of ${peso(refundTotal)} has been approved — please allow up to 24 hours for PayMongo to process it. We'll notify you once it has been returned.`)
       + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
       + unrefundableSentence(r.unrefundableAmount)
     );
 
-    const { email: customerEmail, name: customerName } = await resolveCustomerContact(r.userID);
+    const { email: customerEmail, name: customerName } = await resolveCustomerContact(userID);
     if (customerEmail) {
       sendRefundEmail({
         toEmail: customerEmail,
@@ -798,7 +832,7 @@ const finishStaffRefund = async (r) => {
         amount: refundTotal,
         manualAmount,
         depositForfeited: Number(r.depositForfeited) || 0,
-        reason: r.reason,
+        reason: reason,
       }).catch((err) => console.error("[REFUND] staff refund email failed:", err.message));
     }
 
@@ -806,15 +840,15 @@ const finishStaffRefund = async (r) => {
       createNotification({
         type: "refund_request", refID: r.refundRequestID, refCollection: "refundRequests",
         title: "Booking cancelled",
-        message: `A booking you were assigned to (${r.bookingID}) was cancelled by staff: ${r.reason}.`,
+        message: `A booking you were assigned to (${r.bookingID}) was cancelled by staff: ${reason}.`,
         userID: cancel.driverID,
       }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
     }
 
     auditSafe({
       action: "update",
-      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(refundTotal)} refunded — ${r.contextLabel || "car status change"}: ${r.reason}.`,
-      userID: r.processedBy || null,
+      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(refundTotal)} refunded — ${r.contextLabel || "car status change"}: ${reason}.`,
+      userID: processedBy || null,
       bookingID: r.bookingID,
       paymentID: r.paymentID,
       refundRequestID: r.refundRequestID,
@@ -985,19 +1019,32 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   const claimedAt = new Date();
   await db.runTransaction(async (t) => {
     const snap = await t.get(reqRef);
+    const cancelRef = cancelRowRef(bookingID);
+    const cancelSnap = await t.get(cancelRef);
     if (snap.exists) {
       const r = snap.data();
       if (r.status !== "Pending") throw fail(`Refund for this booking is already ${r.status}.`, 409);
       if (isLocked(r)) throw fail("This booking's refund is already being processed. Refresh in a moment.", 409);
       t.update(reqRef, { approvalLockedAt: claimedAt });
     } else {
+      // Who / why lives on the cancellation row. It has refundRequestID and no cancelledBy / status, so it is not a
+      // finished cancellation and not a mid-trip request until the cancel step replaces it.
+      if (!cancelSnap.exists) {
+        t.set(cancelRef, {
+          cancellationRequestID: cancelRef.id,
+          refundRequestID,
+          bookingID,
+          userID,
+          reason,
+          notes: startNotes,
+          processedBy: staffUserID || null,
+          createdAt: claimedAt,
+        });
+      }
       t.set(reqRef, {
         refundRequestID,
         bookingID,
         paymentID,
-        userID,
-        reason,
-        notes: startNotes,
         contextLabel,
         source: "staff",
         outcome: "refunded",
@@ -1006,10 +1053,6 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         depositForfeited: forfeit,
         returnDeposit: forfeit === 0,   // false only for a no-show where the deposit is kept
         status: "Pending",
-        paymongoRefundIDs: [],
-        processedBy: null,
-        processedAt: null,
-        rejectReason: null,
         approvalLockedAt: claimedAt,
         createdAt: claimedAt,
         updatedAt: claimedAt,
@@ -1033,6 +1076,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         if (parts.length === 0) {
           // Nothing went out — drop the placeholder so a retry starts clean.
           await reqRef.delete().catch(() => {});
+          await dropEarlyCancelRow(bookingID, refundRequestID);
           auditSafe({
             action: "update",
             description: `Staff refund for booking ${bookingID} failed at PayMongo for the ${part.kind} part (${e.message}). Nothing was refunded.`,
@@ -1048,9 +1092,6 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         const failedBatch = db.batch();
         failedBatch.update(reqRef, {
           status: "Failed",
-          paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
-          processedBy: staffUserID || null,
-          processedAt: failedAt,
           updatedAt: failedAt,
           approvalLockedAt: null,
         });
@@ -1080,9 +1121,6 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       toRefundAmount: totalToRefund,
       bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
-      paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
-      processedBy: staffUserID || null,
-      processedAt: now,
       updatedAt: now,
       approvalLockedAt: null,
     };
@@ -1090,7 +1128,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     const staffApproveBatch = db.batch();
     staffApproveBatch.update(reqRef, { ...staffApprovedFields, ...dropOldRefundNames() });   // a placeholder from before the rename may still carry the old names
     await writeRefundEntries(refundRequestID, {
-      request: { refundRequestID, bookingID, paymentID, userID, ...staffApprovedFields, createdAt: claimedAt },
+      request: { refundRequestID, bookingID, paymentID, userID, ...staffApprovedFields, processedBy: staffUserID || null, processedAt: now, createdAt: claimedAt },   // the entry rows still record who / when
       parts, manualRefund, unrefundable: plan.unrefundable,
     }, { batch: staffApproveBatch });
     await staffApproveBatch.commit();
@@ -1114,7 +1152,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   } catch (err) {
     // Unexpected failure (not one handled above): never leave the lock held.
     if (!err.handled && !approvedSaved) {
-      if (parts.length === 0) await reqRef.delete().catch(() => {});          // nothing moved — retry starts clean
+      if (parts.length === 0) { await reqRef.delete().catch(() => {}); await dropEarlyCancelRow(bookingID, refundRequestID); }   // nothing moved — retry starts clean
       else await reqRef.update({ approvalLockedAt: null }).catch(() => {});  // parts went out but weren't saved yet
     }
     // approvedSaved: doc is already "Approved" — a retry resumes the cancel/notify.
@@ -1218,9 +1256,14 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
 // Reject a refund request — purely local, never touches PayMongo, and leaves
 // the booking and payment exactly as they were.
 // ─────────────────────────────────────────────────────────────────────────────
-export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectReason) => {
+export const rejectRefundRequest = async (refundRequestID, adminUserID, reasonInput) => {
+  const rejectReason = String(reasonInput || "").trim();
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
 
+  const cancelRow = await (async () => {
+    const pre = await reqRef.get();
+    return pre.exists ? getCancellationInfoForBooking(pre.data().bookingID).catch(() => null) : null;
+  })();
   const claimedRequest = await db.runTransaction(async (t) => {
     const snap = await t.get(reqRef);
     if (!snap.exists) throw fail("Refund request not found.", 404);
@@ -1231,14 +1274,18 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
     // AFTER the money had already gone out.
     if (isLocked(r)) throw fail("This refund is being approved right now. Refresh in a moment.", 409);
     const now = new Date();
-    // Only the status is the refund's own; who rejected it, when and why go on the cancellation row below.
-    t.update(reqRef, { status: "Rejected", updatedAt: now });
+    // The status, who rejected it and why are the refund's own. (The cancellation row only keeps what the customer filled in.)
+    // One field for the staff's reason: `reason`. An old document that still holds the customer's words in `reason`
+    // keeps them, and the staff's reason goes to the old `rejectReason` instead.
+    const reasonFields = canWriteDecisionReason(r, cancelRow)
+      ? { reason: rejectReason || null, rejectReason: admin.firestore.FieldValue.delete() }
+      : { rejectReason: rejectReason || null };
+    t.update(reqRef, { status: "Rejected", processedBy: adminUserID, ...reasonFields, updatedAt: now });
     return r;
   });
-  const refundRequest = withCancellationInfo(claimedRequest, await getCancellationInfoForBooking(claimedRequest.bookingID).catch(() => null));
+  const refundRequest = withCancellationInfo(claimedRequest, cancelRow);
   await recordRefundRejection(refundRequest.bookingID, {
-    refundRequestID, userID: refundRequest.userID || null, reason: refundRequest.reason, notes: refundRequest.notes,
-    processedBy: adminUserID, rejectReason,
+    refundRequestID, userID: refundRequest.userID || null, reason: refundRequest.customerReason, notes: refundRequest.notes,
   });
 
   createTransactionLog({
@@ -1297,7 +1344,7 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
       .catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
   }
 
-  return { ...refundRequest, status: "Rejected", rejectReason: rejectReason || null };
+  return { ...refundRequest, status: "Rejected", reason: rejectReason || "", rejectReason: rejectReason || null };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

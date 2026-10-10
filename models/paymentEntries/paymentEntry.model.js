@@ -29,8 +29,9 @@
 //                                        (source "in_person", method "cash", refundReqID null). No refund
 //                                        request exists for it. Written by markRefundIssued() in the same
 //                                        batch as payments.refundIssued.
-//     (There is no row for the security deposit handed back at settlement: payments.depositReturned is the amount, and
-//     the DepositReturn transaction log holds the method, reference, who and when.)
+//     (auto ID)                          the security deposit handed back at settlement: phase "deposit_return", source
+//                                        "in_person", refundReqID null. One row each time settleBooking() returns money
+//                                        (net > 0), written in the same transaction as payments.depositReturned.
 // The "out" rows ARE the source of truth for a refund: refundRequests no longer stores parts[] / manualRefund /
 // unrefundable[] (writeRefundEntries commits them with the status change; hydrateRefundRequests rebuilds the
 // old shape for readers). A request that still carries those fields (not yet cleaned up) wins in hydrate.
@@ -45,7 +46,7 @@
 export const ENTRY_COLLECTION = "paymentEntries";
 
 export const ENTRY_DIRECTIONS = ["in", "out"];
-export const ENTRY_PHASES     = ["deposit", "balance", "penalty"];
+export const ENTRY_PHASES     = ["deposit", "balance", "penalty", "deposit_return"];
 export const ENTRY_SOURCES    = ["online", "in_person"];            // PayMongo | staff collected / handed back
 export const ENTRY_METHODS    = ["gcash", "maya", "qrph", "cash", "bank_transfer"];   // customers can only pay online via gcash / maya / qrph
 // "unrefundable" is only used by direction "out" rows (an amount with no PayMongo payment id).
@@ -60,7 +61,7 @@ export const PaymentEntry = {
   refundReqID: null,        // FK -> refundRequests.refundRequestID. Set on a refund's "out" rows only.
   penaltyID:   null,        // FK -> penalties.penaltyID. Set on "penalty" phase rows only.
   direction:   "in",        // "in" | "out"
-  phase:       "deposit",   // "deposit" | "balance" | "penalty"   (for "out": the phase being refunded)
+  phase:       "deposit",   // "deposit" | "balance" | "penalty" | "deposit_return"   (for "out": the phase being refunded)
   source:      "online",    // "online" | "in_person"
   method:      null,        // gcash | maya | qrph | cash | bank_transfer | null (online, channel unknown)
   amount:      0,           // pesos moved by THIS entry
