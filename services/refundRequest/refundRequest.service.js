@@ -4,7 +4,7 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { resolveNotification, createNotification } from "../notification/notification.service.js";
 import { ROLE_IDS } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
-import { computeRefundPlan, getRefundPolicy, resolvePickupAt, getDepositAmount, PAYMENT_ID_MISSING_NOTE } from "../payments/paymentBreakdown.js";
+import { computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, resolvePickupAt, getDepositAmount, PAYMENT_ID_MISSING_NOTE } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
@@ -76,21 +76,39 @@ const resolveCustomerName = async (userID) => {
 
 const fail = (message, status) => { const err = new Error(message); err.status = status; return err; };
 
+// Field names on a refundRequests document: toRefundAmount (was amount), bookingPaid (was grossPaid) and
+// returnDeposit (was policyTier). Documents written before the rename, and by the customer backend until it is
+// switched, still carry the old names, so every read goes through these. What the API returns carries BOTH names for
+// now, so the web apps keep working until they read the new ones.
+const amountOf = (r) => Number(r && (r.toRefundAmount ?? r.amount)) || 0;
+const withRefundAliases = (r) => {
+  if (!r) return r;
+  const out = { ...r };
+  const amt = r.toRefundAmount ?? r.amount;
+  if (amt !== undefined) { out.toRefundAmount = amt; out.amount = amt; }
+  const paid = r.bookingPaid ?? r.grossPaid;
+  if (paid !== undefined) { out.bookingPaid = paid; out.grossPaid = paid; }
+  return out;
+};
+// Removes the old names from a stored document in the same update that writes the new ones.
+const dropOldRefundNames = () => ({ amount: admin.firestore.FieldValue.delete(), grossPaid: admin.firestore.FieldValue.delete() });
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 48-hour refund policy (see paymentBreakdown.js → getRefundPolicy).
 //
-// A customer's request carries a policy SNAPSHOT (policyTier, pickupAt,
-// requestedAt …) written by the customer backend at the moment they asked. The
-// tier is always judged from THAT moment — never from when staff approve — so a
-// request made 50 hours before pickup and approved 40 hours before is still a
-// full refund.
+// A customer's request carries the verdict of that rule, written at the moment they asked:
+// returnDeposit (true = the deposit goes back, false = it is kept). It is always judged from THAT moment — never
+// from when staff approve — so a request made 50 hours before pickup and approved 40 hours before is still a full
+// refund. Requests written before returnDeposit existed carry the older snapshot (policyTier, pickupAt,
+// requestedAt …); that is still read, and judged from the snapshot, until the cleanup script converts it.
 //
-// Requests without a snapshot (created before the policy existed, or opened
-// automatically for a payment that arrived after cancellation) are refunded in
-// full: the customer was never shown a forfeit for them.
+// Requests with neither (created before the policy existed, or opened automatically for a payment that arrived
+// after cancellation) are refunded in full: the customer was never shown a forfeit for them.
 // ─────────────────────────────────────────────────────────────────────────────
 const policyForRequest = (request, payment, { waiveForfeit = false } = {}) => {
-  if (!request || !request.policyTier) return null;
+  if (!request) return null;
+  if (typeof request.returnDeposit === "boolean") return getRefundPolicyFromFlag(payment, { returnDeposit: request.returnDeposit, waiveForfeit });
+  if (!request.policyTier) return null;
   return getRefundPolicy(payment, {
     pickupAt: request.pickupAt,
     requestedAt: request.requestedAt || request.createdAt,
@@ -147,7 +165,7 @@ export const getAllRefundRequests = async (status) => {
     snap.docs.map(async (doc) => {
       const data = doc.data();
       const customerName = await resolveCustomerName(data.userID);
-      const row = { ...data, refundRequestID: data.refundRequestID || doc.id, customerName };
+      const row = withRefundAliases({ ...data, refundRequestID: data.refundRequestID || doc.id, customerName });
 
       if (data.status === "Pending" && data.paymentID) {
         try {
@@ -161,7 +179,8 @@ export const getAllRefundRequests = async (status) => {
               onlineAmount: plan.total - plan.manualAmount,
               manualAmount: plan.manualAmount,
               unrefundableAmount: plan.unrefundableAmount,   // paid online, no PayMongo payment id on record
-              grossPaid: plan.grossPaid,
+              bookingPaid: plan.grossPaid,
+              grossPaid: plan.grossPaid,                   // old name, same value, until the web apps read bookingPaid
               forfeit: plan.forfeit,                       // deposit kept under the 48-hour policy
               tier: policy ? policy.tier : null,           // "full" | "late" | "no_show" | null (no policy snapshot)
               hoursBeforePickup: policy ? policy.hoursBeforePickup : null,
@@ -174,7 +193,7 @@ export const getAllRefundRequests = async (status) => {
     })
   );
 
-  const hydrated = await hydrateRefundRequests(requests);   // parts / manualRefund / unrefundable from the rows
+  const hydrated = (await hydrateRefundRequests(requests)).map(withRefundAliases);   // parts / manualRefund / unrefundable from the rows
 
   hydrated.sort((a, b) => {
     const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
@@ -230,7 +249,7 @@ export const getStaffRefundOutcome = async (bookingID) => {
     // shows a real outcome instead of a bare "Resolved".
     const anySnap = await db.collection("refundRequests").where("bookingID", "==", bookingID).get();
     const done = anySnap.docs.map((d) => d.data()).find((r) => ["Approved", "Refunded"].includes(r.status));
-    return done ? { outcome: "refunded", amount: done.amount || 0 } : { outcome: null, amount: 0 };
+    return done ? { outcome: "refunded", amount: amountOf(done) } : { outcome: null, amount: 0 };
   }
   const docs = snap.docs.map((d) => d.data());
   docs.sort((a, b) => {
@@ -238,7 +257,7 @@ export const getStaffRefundOutcome = async (bookingID) => {
     const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
     return bT - aT;
   });
-  return { outcome: docs[0].outcome || null, amount: docs[0].amount || 0 };
+  return { outcome: docs[0].outcome || null, amount: amountOf(docs[0]) };
 };
 
 // One PayMongo refund against one payment. Returns the PayMongo refund id.
@@ -434,7 +453,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     if (plan.total <= 0) {
       throw fail(
         forfeit > 0
-          ? `Nothing to refund: the customer's payment only covers the ${peso(forfeit)} non-refundable deposit (requested ${policy.tier === "no_show" ? "after the pickup time" : "under 48 hours before pickup"}). Reject this request, or waive the forfeit.`
+          ? `Nothing to refund: the customer's payment only covers the ${peso(forfeit)} non-refundable deposit (requested ${policy.tier === "no_show" ? "after the pickup time" : policy.fromFlag ? "inside the 48-hour cut-off" : "under 48 hours before pickup"}). Reject this request, or waive the forfeit.`
           : "There is nothing to refund on this payment.",
         400
       );
@@ -492,11 +511,11 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 
     const approvedFields = {
       status: "Approved",
-      amount: plan.total,
+      toRefundAmount: plan.total,
       // onlineAmount / manualAmount are NOT stored: they are the sums of the request's "out" rows in paymentEntries
       // (hydrateRefundRequest derives them for readers). A waived forfeit stores only the boolean; its amount is the
       // deposit that was not kept and the staff reason is in the audit log line written below.
-      grossPaid: plan.grossPaid,
+      bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
       forfeitWaived: !!(policy && policy.waived),
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
@@ -509,7 +528,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // status change. Strict: if the rows can't be written the request stays Pending-with-lock, never "Approved"
     // without the PayMongo refund ids.
     const approveBatch = db.batch();
-    approveBatch.update(reqRef, approvedFields);
+    approveBatch.update(reqRef, { ...approvedFields, ...dropOldRefundNames() });
     await writeRefundEntries(refundRequestID, {
       request: { ...refundRequest, ...approvedFields, refundRequestID: refundRequest.refundRequestID || refundRequestID },
       parts, manualRefund, unrefundable: plan.unrefundable,
@@ -561,7 +580,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     resolveNotification("refund_request", refundRequestID)
       .catch((err) => console.error("[REFUND] Failed to resolve notification:", err.message));
 
-    return { ...refundRequest, status: "Approved", amount: plan.total, onlineAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount, grossPaid: plan.grossPaid, depositForfeited: forfeit, parts, manualRefund, bookingCancelled: cancel.cancelled };
+    return { ...refundRequest, status: "Approved", toRefundAmount: plan.total, amount: plan.total, onlineAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount, bookingPaid: plan.grossPaid, grossPaid: plan.grossPaid, depositForfeited: forfeit, parts, manualRefund, bookingCancelled: cancel.cancelled };
   } catch (err) {
     await releaseLock(); // safe even if an update above already cleared it
     throw err;
@@ -601,7 +620,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     source: "staff",
     outcome,
     ...extra,
-    amount: 0,
+    toRefundAmount: 0,
     status: "Refunded", // nothing left to do — no manual portion to issue later
     processedBy: staffUserID,
     processedAt: now,
@@ -652,7 +671,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
     paymentID: payment?.paymentID || null,
   });
 
-  return { outcome, bookingID, amount: 0, manualAmount: 0, bookingCancelled: cancel.cancelled };
+  return { outcome, bookingID, toRefundAmount: 0, amount: 0, manualAmount: 0, bookingCancelled: cancel.cancelled };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -725,6 +744,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
 // a missed message is better than a duplicate email, and the cancel path itself notifies).
 // onlineAmount / manualAmount are derived by the caller (first run) or by hydrateRefundRequest (retry).
 const finishStaffRefund = async (r) => {
+  const refundTotal = amountOf(r);
   let cancel;
   try {
     cancel = await cancelBookingForRefund(r.bookingID, `Cancelled by staff: ${r.reason}`, r.processedBy || null);
@@ -740,7 +760,7 @@ const finishStaffRefund = async (r) => {
       r.userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Approved",
       (manualAmount > 0
         ? `Your booking was cancelled: ${r.reason}. A refund has been approved: ${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
-        : `Your booking was cancelled: ${r.reason}. A refund of ${peso(r.amount)} has been approved — please allow up to 24 hours for PayMongo to process it. We'll notify you once it has been returned.`)
+        : `Your booking was cancelled: ${r.reason}. A refund of ${peso(refundTotal)} has been approved — please allow up to 24 hours for PayMongo to process it. We'll notify you once it has been returned.`)
       + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
       + unrefundableSentence(r.unrefundableAmount)
     );
@@ -751,7 +771,7 @@ const finishStaffRefund = async (r) => {
         toEmail: customerEmail,
         toName: customerName,
         bookingID: r.bookingID,
-        amount: r.amount,
+        amount: refundTotal,
         manualAmount,
         depositForfeited: Number(r.depositForfeited) || 0,
         reason: r.reason,
@@ -769,7 +789,7 @@ const finishStaffRefund = async (r) => {
 
     auditSafe({
       action: "update",
-      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(r.amount)} refunded — ${r.contextLabel || "car status change"}: ${r.reason}.`,
+      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(refundTotal)} refunded — ${r.contextLabel || "car status change"}: ${r.reason}.`,
       userID: r.processedBy || null,
       bookingID: r.bookingID,
       paymentID: r.paymentID,
@@ -780,7 +800,8 @@ const finishStaffRefund = async (r) => {
   return {
     outcome: "refunded",
     bookingID: r.bookingID,
-    amount: r.amount,
+    toRefundAmount: refundTotal,
+    amount: refundTotal,
     onlineAmount: r.onlineAmount,
     manualAmount: r.manualAmount,
     manualRefund: r.manualRefund || null,
@@ -863,6 +884,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         outcome: "refunded",
         approvedExisting: true,
         bookingID,
+        toRefundAmount: approved.amount,
         amount: approved.amount,
         onlineAmount: approved.onlineAmount,
         manualAmount: approved.manualAmount,
@@ -884,7 +906,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       outcome: "refunded",
       approvedExisting: true,
       bookingID,
-      amount: openCustomerRequest.amount || 0,
+      toRefundAmount: amountOf(openCustomerRequest),
+      amount: amountOf(openCustomerRequest),
       onlineAmount: openCustomerRequest.onlineAmount || 0,
       manualAmount: openCustomerRequest.manualAmount || 0,
       manualRefund: openCustomerRequest.manualRefund || null,
@@ -906,7 +929,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   // Everything the customer paid is the non-refundable deposit → nothing to send back.
   if (totalToRefund === 0 && forfeit > 0) {
     await markDepositAfterRefund(paymentRef, payment, forfeit);
-    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "deposit_forfeited", contextLabel, skipDriverNotify, { depositForfeited: forfeit, grossPaid: plan.grossPaid, policyTier: "no_show" });
+    return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "deposit_forfeited", contextLabel, skipDriverNotify, { depositForfeited: forfeit, bookingPaid: plan.grossPaid, returnDeposit: false });
   }
 
   // Everything the customer paid was ONLINE but no PayMongo payment id is on record: nothing can be refunded
@@ -954,10 +977,10 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         contextLabel,
         source: "staff",
         outcome: "refunded",
-        amount: totalToRefund,
-        grossPaid: plan.grossPaid,
+        toRefundAmount: totalToRefund,
+        bookingPaid: plan.grossPaid,
         depositForfeited: forfeit,
-        policyTier: noShowPolicy ? noShowPolicy.tier : null,
+        returnDeposit: forfeit === 0,   // false only for a no-show where the deposit is kept
         status: "Pending",
         paymongoRefundIDs: [],
         processedBy: null,
@@ -1030,8 +1053,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     const now = new Date();
     const staffApprovedFields = {
       status: "Approved",
-      amount: totalToRefund,
-      grossPaid: plan.grossPaid,
+      toRefundAmount: totalToRefund,
+      bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
       paymongoRefundIDs: parts.map((p) => p.paymongoRefundID),   // webhook lookup key (see hydrateOne)
       processedBy: staffUserID || null,
@@ -1041,7 +1064,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     };
     // Same rule as approveRefundRequest: the rows are the record, committed with the status, strict.
     const staffApproveBatch = db.batch();
-    staffApproveBatch.update(reqRef, staffApprovedFields);
+    staffApproveBatch.update(reqRef, { ...staffApprovedFields, ...dropOldRefundNames() });   // a placeholder from before the rename may still carry the old names
     await writeRefundEntries(refundRequestID, {
       request: { refundRequestID, bookingID, paymentID, userID, ...staffApprovedFields, createdAt: claimedAt },
       parts, manualRefund, unrefundable: plan.unrefundable,
@@ -1060,7 +1083,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     // ── 4. cancel the booking + notify (also what a retry re-runs) ──
     return await finishStaffRefund({
       refundRequestID, bookingID, paymentID, userID, reason,
-      amount: totalToRefund, onlineAmount, manualAmount, manualRefund, unrefundableAmount: plan.unrefundableAmount, contextLabel, skipDriverNotify,
+      toRefundAmount: totalToRefund, onlineAmount, manualAmount, manualRefund, unrefundableAmount: plan.unrefundableAmount, contextLabel, skipDriverNotify,
       depositForfeited: forfeit,
       processedBy: staffUserID || null,
     });
@@ -1161,7 +1184,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
       const pSnap = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
       if (!pSnap.empty) await pSnap.docs[0].ref.update({ status: "Refunded", refundedAt: now, updatedAt: now });
     }
-    await notifyCustomer(r.userID, r.bookingID, "refund_completed", "Refund Completed", `Your refund of ${peso(r.amount)} has been returned.`);
+    await notifyCustomer(r.userID, r.bookingID, "refund_completed", "Refund Completed", `Your refund of ${peso(amountOf(r))} has been returned.`);
   }
 
   return { ...r, refundCompleted: outcome.finalize };
@@ -1200,7 +1223,7 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
     refundReqID: refundRequestID,
     userID: refundRequest.userID,
     type: "Refund",
-    amount: refundRequest.amount || 0,
+    amount: amountOf(refundRequest),
     status: "Rejected",
     description: rejectReason
       ? `Refund request rejected: ${rejectReason}`
@@ -1211,7 +1234,7 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, rejectRe
 
   auditSafe({
     action: "update",
-    description: `Refund ${refundRequestID} REJECTED (${peso(refundRequest.amount)})${rejectReason ? `: ${rejectReason}` : ""}.`,
+    description: `Refund ${refundRequestID} REJECTED (${peso(amountOf(refundRequest))})${rejectReason ? `: ${rejectReason}` : ""}.`,
     userID: adminUserID,
     bookingID: refundRequest.bookingID,
     paymentID: refundRequest.paymentID,
@@ -1339,9 +1362,9 @@ export const getAdminBookingRefundPreview = async (docID) => {
       const gross   = computeRefundPlan(payment).grossPaid;
       const forfeit = Math.min(getDepositAmount(payment), gross);
       const plan    = computeRefundPlan(payment, { forfeit });
-      noShow = { pickupPassed, pickupAt, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount };
+      noShow = { pickupPassed, pickupAt, bookingPaid: gross, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount };
     } else {
-      noShow = { pickupPassed, pickupAt, grossPaid: 0, forfeit: 0, total: 0, onlineAmount: 0, manualAmount: 0 };
+      noShow = { pickupPassed, pickupAt, bookingPaid: 0, grossPaid: 0, forfeit: 0, total: 0, onlineAmount: 0, manualAmount: 0 };
     }
   }
   return { bookingID, status: booking.status, eligible, ...preview, noShow };

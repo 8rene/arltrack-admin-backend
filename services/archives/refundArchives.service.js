@@ -27,9 +27,14 @@ export const getAllRefundArchives = async () => {
 
   return snapshot.docs.map((doc, i) => {
     const data = hydrated[i];
+    // Archives made before the rename carry amount / grossPaid; newer ones toRefundAmount / bookingPaid. Both names go out.
+    const amt = data.toRefundAmount ?? data.amount;
+    const paid = data.bookingPaid ?? data.grossPaid;
     return {
       refundArchivesId: doc.id,
       ...data,
+      ...(amt !== undefined ? { toRefundAmount: amt, amount: amt } : {}),
+      ...(paid !== undefined ? { bookingPaid: paid, grossPaid: paid } : {}),
       customerName: data.userID ? (nameMap[data.userID] || "—") : "—",
       createdAt:   toISO(data.createdAt),
       updatedAt:   toISO(data.updatedAt),

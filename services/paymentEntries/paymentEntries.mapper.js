@@ -489,7 +489,7 @@ const buildRefundEntries = (r, docID, opts = {}) => {
   let parts = Array.isArray(r.parts) && r.parts.length ? r.parts : null;
   if (!parts && nullIfSentinel(r.paymongoRefundID)) {
     parts = [{
-      kind: "deposit", paymongoRefundID: r.paymongoRefundID, amount: num(r.onlineAmount) || num(r.amount),
+      kind: "deposit", paymongoRefundID: r.paymongoRefundID, amount: num(r.onlineAmount) || num(r.toRefundAmount) || num(r.amount),
       status: low(r.status) === "refunded" ? "succeeded" : low(r.status) === "failed" ? "failed" : "pending",
     }];
   }

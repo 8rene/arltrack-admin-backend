@@ -12,7 +12,7 @@ import { getSystemSettings } from "../systemSettings/systemSettings.service.js";
 import { getSessionByBookingID } from "../booking/bookingSession.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
-import { buildPenaltyPaymentEntry, normalizeMethod, nullIfSentinel } from "../paymentEntries/paymentEntries.mapper.js";
+import { buildPenaltyPaymentEntry } from "../paymentEntries/paymentEntries.mapper.js";
 import { getDepositView } from "../payments/depositView.js";
 import { hydratePenalties } from "../paymentEntries/paymentEntries.service.js";
 
@@ -323,7 +323,7 @@ export const waiveDeposit = async ({ paymentID, reason, by }) => {
   if (!reason?.trim()) return { error: "A reason is required to waive the deposit." };
 
   // Only a HELD deposit can be waived: waiving a settled / refunded / forfeited one would leave depositSettled,
-  // depositReturned and the _depositreturn row contradicting the new status. The reason is not stored on the payment,
+  // depositSettled and depositReturned contradicting the new status. The reason is not stored on the payment,
   // it lives ONLY in the audit log (with who did it), so the log is written in the same transaction as the status
   // change: the deposit can never be waived without its reason being recorded.
   const logRef = db.collection("auditLogs").doc();
@@ -385,7 +385,6 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     .filter((p) => p.data.status === "Confirmed" && (p.data.paidAmount || 0) < (p.data.amount || 0))
     .sort((a, b) => (a.data.createdAt?.toMillis?.() ?? 0) - (b.data.createdAt?.toMillis?.() ?? 0));
 
-  let returnEntryID = null;   // set inside the transaction (reset on every retry) when a _depositreturn row is written
   const result = await db.runTransaction(async (tx) => {
     const paymentRef = db.collection("payments").doc(paymentID);
     const paymentSnap = await tx.get(paymentRef);
@@ -441,39 +440,8 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
     });
 
-    // The deposit leaving is money OUT, so the entry ledger gets its own row (same as _discountrefund): how it was
-    // returned, the reference, who and when. Deterministic id => settling twice can only rewrite the same row.
-    // Written in the same transaction as depositStatus, so the flag and the ledger can never disagree.
-    // Nothing is written when there is nothing to hand back (penalties used all of it, or the customer owes more).
-    returnEntryID = null;
-    if (net > 0) {
-      returnEntryID = `${paymentID}_depositreturn`;
-      const now = new Date();
-      tx.set(db.collection(ENTRY_COLLECTION).doc(returnEntryID), {
-        paymentEntryID: returnEntryID,
-        paymentID,
-        bookingID,
-        userID: payment.userID || null,
-        refundReqID: null,
-        penaltyID: null,
-        direction: "out",
-        phase: "deposit",
-        source: "in_person",
-        method: normalizeMethod(returnMethod).method,
-        amount: net,
-        status: "success",
-        referenceNumber: nullIfSentinel(returnReferenceNumber),
-        sessionID: null,
-        transactionFee: null,
-        processedBy: actorUid || null,
-        processedAt: now,
-        settledAt: now,
-        groupID: null,
-        transactionErrorNote: null,
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
+    // No paymentEntries row is written for the deposit going back: depositReturned (above) is the amount, and how it
+    // was returned (method, reference), who did it and when are on the DepositReturn transaction log written below.
 
     const outstandingAfterDeposit = Math.max(0, -net); // > 0 only when net is negative
     return { confirmedPenaltyTotal, net, settlementStatus, outstandingAfterDeposit, userID: payment.userID };
@@ -486,7 +454,6 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       bookingID, paymentID, userID: result.userID,
       type: "DepositReturn", amount: result.net, status: "Success",
       paymentMethod: returnMethod, referenceNumber: returnReferenceNumber, performedBy: actorUid,
-      paymentEntryID: returnEntryID,
       description: "Security deposit returned after settlement.",
       logID: `${paymentID}_deposit_settled`,
     });

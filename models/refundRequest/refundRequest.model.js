@@ -31,7 +31,12 @@ export const RefundRequest = {
   notes: "",
   source: "customer", // "customer" (default) | "staff" — see comment above
   outcome: null, // "refunded" | "already_refunded" | "nothing_owed" — staff-origin docs only
-  amount: 0,
+  toRefundAmount: 0,   // what goes back to the customer (was `amount`)
+  bookingPaid: 0,      // everything the customer had paid before any forfeit (was `grossPaid`)
+  returnDeposit: true, // the 48-hour rule's verdict when the request was made: true = the deposit goes back, false = it
+                       // is kept. Replaces policyTier / pickupAt / hoursBeforePickup. A missing value = a full refund.
+  depositForfeited: 0,
+  forfeitWaived: false,
   // parts[] (one PayMongo refund per online charge), manualRefund (the in-person hand-back) and unrefundable[]
   // (online money with no PayMongo payment id -- never refunded, never handed back) are NOT stored here any more:
   // they are the "out" rows in paymentEntries (refundReqID = this request, ids <id>_part<n> | _manual | _unrefundable<n>).
@@ -46,6 +51,10 @@ export const RefundRequest = {
   //                                 out when the status moves to Approved / Rejected (a staff-refund retry sends it only
   //                                 if that call is the one that cancelled the booking).
   //   requestedAt                   same moment as createdAt; readers use createdAt (old docs may still carry it).
+  //   policyTier / pickupAt / hoursBeforePickup   replaced by returnDeposit. Until the customer backend writes it,
+  //                                 requests still carry the old snapshot and the admin reads that (policyForRequest).
+  //   amount / grossPaid            old names of toRefundAmount / bookingPaid. Old documents and the customer backend
+  //                                 still use them, so every reader accepts both and the API returns both for now.
   status: "Pending",
   paymongoRefundIDs: [],
   processedBy: null,

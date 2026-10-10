@@ -5,13 +5,13 @@
 //   depositStatus        "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
 //   depositSettled       pesos of the deposit USED to pay penalties (Settled only). Never more than the deposit:
 //                        penalties beyond it stay on the penalties (amount - paidAmount), with their reasons.
-//   depositReturned      pesos handed back to the customer (Settled only) = the _depositreturn row's amount
+//   depositReturned      pesos handed back to the customer (Settled only); no paymentEntries row is written for it
 //   depositSettledAt     when the deposit stopped being Held (settled, waived, forfeited or refunded)
 // Used + returned = the deposit, so nothing else is stored. The result (Refunded / Settled / OwedByCustomer) is
 // derived and is NOT saved: "OwedByCustomer" is live (it clears when the customer pays the shortfall), so it needs
 // the unpaid Confirmed penalty total, passed in as getDepositView(payment, { unpaid }). How the deposit was returned
-// (method, reference, who, when) is the "<paymentID>_depositreturn" out-row in paymentEntries; who settled is the
-// DepositReturn transaction log; why a waive happened is the audit log.
+// (method, reference), who settled it and when are on the DepositReturn transaction log; why a waive happened is the
+// audit log.
 //
 // OLD (nested) shape, still read until scripts/migrate-deposit-flat.js has run:
 //   payments.deposit = { amount, status, waivedReason, received, returned, settlement }

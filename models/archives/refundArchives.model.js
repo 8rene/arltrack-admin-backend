@@ -20,7 +20,7 @@ export const RefundArchive = {
 
   reason: "",
   notes: "",
-  amount: 0,
+  toRefundAmount: 0,        // was `amount`; archives made before the rename still carry amount (readers accept both)
   status: "",              // whatever it was at time of deletion: Pending | Approved | Refunded | Rejected | Failed
 
   paymongoRefundID: null,

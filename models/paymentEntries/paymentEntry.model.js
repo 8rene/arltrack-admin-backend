@@ -29,11 +29,8 @@
 //                                        (source "in_person", method "cash", refundReqID null). No refund
 //                                        request exists for it. Written by markRefundIssued() in the same
 //                                        batch as payments.refundIssued.
-//     <paymentID>_depositreturn          the security deposit handed back at settlement (source "in_person", method =
-//                                        how it was returned, refundReqID null). Amount = deposit minus the penalties
-//                                        taken from it. Written by settleBooking() in the same transaction as
-//                                        payments.depositStatus = "Settled". NOT written when nothing is returned
-//                                        (penalties used all of the deposit, or the customer owes more).
+//     (There is no row for the security deposit handed back at settlement: payments.depositReturned is the amount, and
+//     the DepositReturn transaction log holds the method, reference, who and when.)
 // The "out" rows ARE the source of truth for a refund: refundRequests no longer stores parts[] / manualRefund /
 // unrefundable[] (writeRefundEntries commits them with the status change; hydrateRefundRequests rebuilds the
 // old shape for readers). A request that still carries those fields (not yet cleaned up) wins in hydrate.
