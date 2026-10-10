@@ -1,3 +1,10 @@
+// Copied from the admin backend's models/ so both backends describe the same document. Keep it identical: change the
+// admin file first, then copy it here.
+//
+// Customer side: requestRefund() / previewRefund() in controllers/paymongo/paymongo.controller.js and
+// openRefundForLatePayment() in utils/payments/settlePayment.util.js create the Pending doc;
+// applyRefundPartResult() (the refund.updated webhook) moves it to Refunded / Failed.
+//
 // Matches the 'refundRequests' collection, normally created by the customer
 // backend. Admin backend usually only reads + transitions status here; it
 // never creates a request on the customer's behalf (that's the customer's
@@ -23,7 +30,7 @@
 //   "Refunded" → PayMongo confirmed success
 //   "Rejected" → admin rejected, never sent to PayMongo
 //   "Failed"   → PayMongo confirmed the refund failed after approval
-export const RefundRequest = {
+const RefundRequest = {
   refundRequestID: "",
   bookingID: "",
   paymentID: "",
@@ -74,3 +81,5 @@ export const RefundRequest = {
   createdAt: null,
   updatedAt: null,
 };
+
+module.exports = { RefundRequest };
