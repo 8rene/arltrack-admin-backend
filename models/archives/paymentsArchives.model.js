@@ -40,7 +40,7 @@ export const PaymentsArchive = {
   balanceStatus: "",       // "not_applicable" | "not_due" | "pending" | "paid" | "cancelled"
   currentPhase: "",        // "deposit" | "balance"
   status: "",              // "paid" | "pending" | "cancelled" | "Refunded" ...
-  paymongoSessionID: "",   // kept: the webhook finds the payment by it
+  // paymongoSessionID is not stored: the session id is paymentEntries.sessionID (read back by hydratePayment).
   checkoutUrl: "",
   discountAmount: 0,
   discountReason: "",

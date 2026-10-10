@@ -9,9 +9,11 @@
 //   - penalties.paymentMethod / referenceNumber / paidAt  (overwritten on every payment)
 //   - refundRequests.parts[] / manualRefund            (STEP 2 -- direction "out")
 //
-// NOTE: payments.paymongoSessionID and payments.checkoutUrl STAY on payments -- the webhook finds the
-// payment by that session id, and they describe the one checkout that is open right now. The entry
-// also records sessionID so every attempt keeps its own history.
+// NOTE: the PayMongo checkout session id lives HERE (sessionID), not on payments. The webhook finds the payment
+// through the row (sessionID -> paymentID), and a payment's deposit, balance and penalty checkouts each keep
+// their own id. hydratePayment() derives payments.paymongoSessionID from the latest deposit / balance row for the
+// readers that still ask for it. payments.checkoutUrl STAYS on payments: it is the URL of the one checkout open
+// right now.
 //
 // payments, penalties and refundRequests stay as the parent documents (totals,
 // workflow, review). paymentEntries only holds the money movements.

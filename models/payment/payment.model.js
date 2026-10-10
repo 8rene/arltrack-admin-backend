@@ -31,8 +31,9 @@ export const Payment = {
   // it lowercase, so mixed casing is normal (see normalizePaymentStatus).
   status: "",
 
-  // The PayMongo checkout currently open. The webhook finds the payment by the session id, so these stay here.
-  paymongoSessionID: "",
+  // The URL of the PayMongo checkout currently open. The checkout SESSION ID is not stored here: it is
+  // paymentEntries.sessionID on the deposit / balance row (the webhook's lookup key), and hydratePayment()
+  // derives payments.paymongoSessionID from the latest such row for the readers that still ask for it.
   checkoutUrl: "",
 
   // Live state of a Partial payment's balance. The customer backend's settle-once guard reads these inside a
