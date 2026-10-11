@@ -1,8 +1,7 @@
 import {
   getAllRefundArchives,
-  restoreRefundArchive,
-  deleteRefundArchive,
 } from "../../services/archives/refundArchives.service.js";
+import { restoreArchiveItem, deleteArchiveItem, restoreMessage, deleteMessage } from "../../services/archives/archiveBundle.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 export const listRefundArchives = async (req, res) => {
@@ -19,7 +18,7 @@ export const restoreRefundArchiveHandler = async (req, res) => {
   try {
     const { refundArchivesId } = req.params;
     const restoredBy = req.user?.username || req.user?.uid || "admin";
-    const result = await restoreRefundArchive(refundArchivesId, restoredBy);
+    const result = await restoreArchiveItem("refunds", refundArchivesId, restoredBy);
     createAuditLog({
       action: "update",
       description: `Restored archived refund request ${refundArchivesId}.`,
@@ -27,7 +26,8 @@ export const restoreRefundArchiveHandler = async (req, res) => {
     }).catch((err) => console.error("[REFUND ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
-      message: `Refund request restored successfully.${result.restoredBooking ? " Linked booking also restored." : ""}${result.restoredPayment ? " Linked payment also restored." : ""}`,
+      message: restoreMessage("refunds", result),
+      data: result,
     });
   } catch (error) {
     console.error("[REFUND ARCHIVE] restore error:", error);
@@ -38,13 +38,13 @@ export const restoreRefundArchiveHandler = async (req, res) => {
 export const deleteRefundArchiveHandler = async (req, res) => {
   try {
     const { refundArchivesId } = req.params;
-    await deleteRefundArchive(refundArchivesId);
+    const result = await deleteArchiveItem("refunds", refundArchivesId);
     createAuditLog({
       action: "delete",
       description: `Permanently deleted archived refund request ${refundArchivesId}.`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[REFUND ARCHIVE] Failed to write audit log:", err));
-    return res.status(200).json({ success: true, message: "Archived refund request permanently deleted." });
+    return res.status(200).json({ success: true, message: deleteMessage("refunds", result), data: result });
   } catch (error) {
     console.error("[REFUND ARCHIVE] delete error:", error);
     return res.status(400).json({ success: false, message: error.message });

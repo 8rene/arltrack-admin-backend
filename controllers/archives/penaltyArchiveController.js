@@ -1,8 +1,7 @@
 import {
   getAllPenaltyArchives,
-  restorePenaltyArchive,
-  deletePenaltyArchive,
 } from "../../services/archives/penaltyArchives.service.js";
+import { restoreArchiveItem, deleteArchiveItem, restoreMessage, deleteMessage } from "../../services/archives/archiveBundle.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 export const listPenaltyArchives = async (req, res) => {
@@ -19,7 +18,7 @@ export const restorePenaltyArchiveHandler = async (req, res) => {
   try {
     const { penaltyArchivesId } = req.params;
     const restoredBy = req.user?.username || req.user?.uid || "admin";
-    const result = await restorePenaltyArchive(penaltyArchivesId, restoredBy);
+    const result = await restoreArchiveItem("penalties", penaltyArchivesId, restoredBy);
     createAuditLog({
       action: "update",
       description: `Restored archived penalty ${penaltyArchivesId}.`,
@@ -27,7 +26,8 @@ export const restorePenaltyArchiveHandler = async (req, res) => {
     }).catch((err) => console.error("[PENALTY ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
-      message: `Penalty restored successfully.${result.restoredBooking ? " Linked booking also restored." : ""}${result.restoredPayment ? " Linked payment also restored." : ""}`,
+      message: restoreMessage("penalties", result),
+      data: result,
     });
   } catch (error) {
     console.error("[PENALTY ARCHIVE] restore error:", error);
@@ -38,13 +38,13 @@ export const restorePenaltyArchiveHandler = async (req, res) => {
 export const deletePenaltyArchiveHandler = async (req, res) => {
   try {
     const { penaltyArchivesId } = req.params;
-    await deletePenaltyArchive(penaltyArchivesId);
+    const result = await deleteArchiveItem("penalties", penaltyArchivesId);
     createAuditLog({
       action: "delete",
       description: `Permanently deleted archived penalty ${penaltyArchivesId}.`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[PENALTY ARCHIVE] Failed to write audit log:", err));
-    return res.status(200).json({ success: true, message: "Archived penalty permanently deleted." });
+    return res.status(200).json({ success: true, message: deleteMessage("penalties", result), data: result });
   } catch (error) {
     console.error("[PENALTY ARCHIVE] delete error:", error);
     return res.status(400).json({ success: false, message: error.message });

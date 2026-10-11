@@ -309,31 +309,23 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   const refundArchiveRefs  = await getRefundArchiveRefsForBooking(bookingID);
   const maintenanceArchiveRefs = await getMaintenanceArchiveRefsForBooking({ bookingKeys: [bookingID, data.originalId] });
 
-  // Delete all in batch
-  const batch = db.batch();
-  batch.delete(archiveRef);
+  // Delete everything that hangs off the booking archive first, in chunks of 450 (a Firestore batch takes at most 500
+  // writes), and the booking archive itself LAST: if a chunk fails the booking archive is still there, so the same
+  // permanent delete can simply be run again.
+  const refs = [];
+  if (paymentArchiveDoc) refs.push(paymentArchiveDoc.ref);
+  for (const reviewDoc of reviewArchiveDocs) refs.push(reviewDoc.ref);
+  if (sessionArchiveDoc) refs.push(sessionArchiveDoc.ref);
+  for (const inspectionDoc of inspectionDocs) refs.push(inspectionDoc.ref);
+  refs.push(...assignmentRefs, ...requestRefs, ...entryRefs, ...linkedArchiveRefs, ...penaltyArchiveRefs, ...refundArchiveRefs, ...maintenanceArchiveRefs);
 
-  if (paymentArchiveDoc) {
-    batch.delete(paymentArchiveDoc.ref);
+  const uniqueRefs = [...new Map(refs.map((r) => [r.path, r])).values()];
+  for (let i = 0; i < uniqueRefs.length; i += 450) {
+    const batch = db.batch();
+    uniqueRefs.slice(i, i + 450).forEach((r) => batch.delete(r));
+    await batch.commit();
   }
-  for (const reviewDoc of reviewArchiveDocs) {
-    batch.delete(reviewDoc.ref);
-  }
-  if (sessionArchiveDoc) {
-    batch.delete(sessionArchiveDoc.ref);
-  }
-  for (const inspectionDoc of inspectionDocs) {
-    batch.delete(inspectionDoc.ref);
-  }
-  for (const ref of assignmentRefs) batch.delete(ref);
-  for (const ref of requestRefs)    batch.delete(ref);
-  for (const ref of entryRefs)      batch.delete(ref);
-  for (const ref of linkedArchiveRefs)  batch.delete(ref);
-  for (const ref of penaltyArchiveRefs) batch.delete(ref);
-  for (const ref of refundArchiveRefs)  batch.delete(ref);
-  for (const ref of maintenanceArchiveRefs) batch.delete(ref);
-
-  await batch.commit();
+  await archiveRef.delete();
 
   return {
     deletedPaymentArchive: !!paymentArchiveDoc,

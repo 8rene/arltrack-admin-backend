@@ -6,9 +6,9 @@ import {
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// View + restore: Owner and Admin. Permanent delete: Owner only (irreversible), same as the other archives.
+// View, restore and permanent delete: Owner and Admin. Supervisor has no archive access.
 const allowed = [roles.OWNER, roles.ADMIN];
-const deleteAllowed = [roles.OWNER];
+const deleteAllowed = [roles.OWNER, roles.ADMIN]; // Admin may permanently delete too; a delete always takes the whole booking while its booking archive exists
 
 export const registerMaintenanceArchiveRoutes = (app) => {
   app.get("/api/archives/maintenance",                                       verifyToken, requireRole(allowed),       listMaintenanceArchives);

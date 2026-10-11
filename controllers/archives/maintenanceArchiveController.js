@@ -1,8 +1,7 @@
 import {
   getAllMaintenanceArchives,
-  restoreMaintenanceArchive,
-  deleteMaintenanceArchive,
 } from "../../services/archives/maintenanceArchives.service.js";
+import { restoreArchiveItem, deleteArchiveItem, restoreMessage, deleteMessage } from "../../services/archives/archiveBundle.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 export const listMaintenanceArchives = async (req, res) => {
@@ -18,7 +17,7 @@ export const listMaintenanceArchives = async (req, res) => {
 export const restoreMaintenanceArchiveHandler = async (req, res) => {
   try {
     const { maintenanceArchivesId } = req.params;
-    const result = await restoreMaintenanceArchive(maintenanceArchivesId);
+    const result = await restoreArchiveItem("maintenance", maintenanceArchivesId, req.user?.username || req.user?.uid || "admin");
     createAuditLog({
       action: "update",
       description: `Restored archived maintenance record ${maintenanceArchivesId}.`,
@@ -26,7 +25,7 @@ export const restoreMaintenanceArchiveHandler = async (req, res) => {
     }).catch((err) => console.error("[MAINTENANCE ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
-      message: `Maintenance record restored successfully.${result.bookingStillArchived ? " Its booking is still archived; restore it from the Booking Archive." : ""}`,
+      message: restoreMessage("maintenance", result),
       data: result,
     });
   } catch (error) {
@@ -38,13 +37,13 @@ export const restoreMaintenanceArchiveHandler = async (req, res) => {
 export const deleteMaintenanceArchiveHandler = async (req, res) => {
   try {
     const { maintenanceArchivesId } = req.params;
-    await deleteMaintenanceArchive(maintenanceArchivesId);
+    const result = await deleteArchiveItem("maintenance", maintenanceArchivesId);
     createAuditLog({
       action: "delete",
       description: `Permanently deleted archived maintenance record ${maintenanceArchivesId}.`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[MAINTENANCE ARCHIVE] Failed to write audit log:", err));
-    return res.status(200).json({ success: true, message: "Archived maintenance record permanently deleted." });
+    return res.status(200).json({ success: true, message: deleteMessage("maintenance", result), data: result });
   } catch (error) {
     console.error("[MAINTENANCE ARCHIVE] delete error:", error);
     return res.status(400).json({ success: false, message: error.message });

@@ -9,7 +9,7 @@ import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 // View + restore: Owner and Admin. Permanent delete: Owner only
 // (irreversible, so kept out of Admin's reach even if that account is compromised).
 const allowed = [roles.OWNER, roles.ADMIN];
-const deleteAllowed = [roles.OWNER];
+const deleteAllowed = [roles.OWNER, roles.ADMIN]; // Admin may permanently delete too; a delete always takes the whole booking while its booking archive exists
 
 export const registerReviewsArchiveRoutes = (app) => {
   app.get("/api/archives/reviews",                                    verifyToken, requireRole(allowed), listReviewsArchives);
