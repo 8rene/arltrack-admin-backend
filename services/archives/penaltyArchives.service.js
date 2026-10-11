@@ -4,6 +4,7 @@ import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { hydratePenaltiesWithArchives } from "./entryArchiveHydrate.service.js";
 import { restoreEntryArchivesBy, restoreLinkedForBooking } from "./linkedArchives.service.js";
+import { restoreMaintenanceArchivesForBooking } from "./maintenanceArchives.service.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
@@ -101,6 +102,7 @@ export const restorePenaltyArchive = async (penaltyArchivesId, restoredBy = "adm
   if (restoredPayment) await restoreEntryArchivesBy("paymentID", [originalData.paymentID]);
   if (restoredBooking) {
     await restoreLinkedForBooking({ bookingKeys: [originalData.bookingID], kinds: ["driverAssignments", "cancellationRequests"] });
+    await restoreMaintenanceArchivesForBooking({ bookingKeys: [originalData.bookingID] });
   }
 
   await archiveRef.delete();

@@ -6,7 +6,7 @@
 //
 // Like the live penalty, an archive does not store paymentMethod / referenceNumber / paidAt: those are paymentEntries
 // rows (phase "penalty"), archived with the booking in paymentEntryArchives. The Penalty Archive page gets them back
-// through hydratePenaltiesWithArchives() (services/archives/entryArchiveHydrate.core.js). Archives written before the
+// through hydratePenaltiesWithArchives() (services/archives/entryArchiveHydrate.service.js). Archives written before the
 // normalization may still carry copies of those fields, and confirmedBy / confirmedAt (a penalty is confirmed when
 // created, so readers fall back to createdBy / createdAt).
 //

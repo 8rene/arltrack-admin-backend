@@ -1,7 +1,7 @@
 // Matches the 'driverAssignmentArchives' collection in Firestore.
 //
 // An archive is a COPY of the driverAssignments row(s) of a booking, taken when the booking is deleted (see
-// services/booking/bookingDelete.service.js and services/archives/linkedArchives.core.js), plus the bookkeeping
+// services/booking/bookingDelete.service.js and services/archives/linkedArchives.service.js), plus the bookkeeping
 // fields below. So it has every column models/driverAssignments/driverAssignment.model.js has -- keep the two in step.
 //
 // The archive document id IS the live assignmentID, so a restore writes the row back under the same id.

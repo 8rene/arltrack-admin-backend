@@ -2,7 +2,7 @@
 //
 // An archive is a COPY of every cancellationRequests row of a booking (customer requests in any status AND the
 // direct cancellation row), taken when the booking is deleted (see services/booking/bookingDelete.service.js and
-// services/archives/linkedArchives.core.js), plus the bookkeeping fields below. So it has every column
+// services/archives/linkedArchives.service.js), plus the bookkeeping fields below. So it has every column
 // models/cancellationRequests/cancellationRequest.model.js has -- keep the two in step.
 //
 // The archive document id IS the live cancellationRequestID. That matters: a direct cancellation row is keyed by

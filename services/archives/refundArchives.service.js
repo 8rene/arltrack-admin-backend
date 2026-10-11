@@ -3,6 +3,7 @@ import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { hydrateRefundRequestsWithArchives } from "./entryArchiveHydrate.service.js";
 import { LINKED, chunk, restoreEntryArchivesBy, restoreLinkedForBooking } from "./linkedArchives.service.js";
+import { restoreMaintenanceArchivesForBooking } from "./maintenanceArchives.service.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
@@ -181,6 +182,7 @@ export const restoreRefundArchive = async (refundArchivesId, restoredBy = "admin
   if (restoredPayment) await restoreEntryArchivesBy("paymentID", [originalData.paymentID]);
   if (restoredBooking) {
     await restoreLinkedForBooking({ bookingKeys: [originalData.bookingID], kinds: ["driverAssignments", "cancellationRequests"] });
+    await restoreMaintenanceArchivesForBooking({ bookingKeys: [originalData.bookingID] });
   }
 
   // Archive doc's job is done once the refund request is back in the live

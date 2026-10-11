@@ -42,7 +42,7 @@ export const restoreBookingArchiveHandler = async (req, res) => {
     }).catch((err) => console.error("[BOOKING ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
-      message: `Booking restored successfully.${result.restoredPayment ? " Payment also restored." : ""}${result.restoredReviews > 0 ? ` ${result.restoredReviews} review(s) also restored.` : ""}${result.restoredPenalties > 0 ? ` ${result.restoredPenalties} penalty(ies) also restored.` : ""}${result.restoredRefunds > 0 ? ` ${result.restoredRefunds} refund request(s) also restored.` : ""}`,
+      message: `Booking restored successfully.${result.restoredPayment ? " Payment also restored." : ""}${result.restoredReviews > 0 ? ` ${result.restoredReviews} review(s) also restored.` : ""}${result.restoredPenalties > 0 ? ` ${result.restoredPenalties} penalty(ies) also restored.` : ""}${result.restoredRefunds > 0 ? ` ${result.restoredRefunds} refund request(s) also restored.` : ""}${result.restoredMaintenance > 0 ? ` ${result.restoredMaintenance} maintenance record(s) also restored.` : ""}`,
       data: result,
     });
   } catch (error) {
@@ -62,7 +62,7 @@ export const deleteBookingArchiveHandler = async (req, res) => {
     }).catch((err) => console.error("[BOOKING ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
-      message: `Archived booking permanently deleted.${result.deletedPaymentArchive ? " Linked payment archive also deleted." : ""}${result.deletedReviewArchives > 0 ? ` ${result.deletedReviewArchives} review archive(s) also deleted.` : ""}${result.deletedSessionArchive ? " Linked booking session archive also deleted." : ""}${result.deletedInspectionDocs > 0 ? ` ${result.deletedInspectionDocs} vehicle inspection record(s) also deleted.` : ""}`,
+      message: `Archived booking permanently deleted.${result.deletedPaymentArchive ? " Linked payment archive also deleted." : ""}${result.deletedReviewArchives > 0 ? ` ${result.deletedReviewArchives} review archive(s) also deleted.` : ""}${result.deletedSessionArchive ? " Linked booking session archive also deleted." : ""}${result.deletedInspectionDocs > 0 ? ` ${result.deletedInspectionDocs} vehicle inspection record(s) also deleted.` : ""}${result.deletedMaintenanceArchives > 0 ? ` ${result.deletedMaintenanceArchives} maintenance archive(s) also deleted.` : ""}`,
       data: result,
     });
   } catch (error) {

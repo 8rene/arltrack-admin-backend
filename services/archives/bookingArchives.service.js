@@ -7,6 +7,7 @@ import { getRequestRefsForBooking } from "../cancellationRequests/cancellationRe
 import { getEntryRefsForBooking } from "../paymentEntries/paymentEntries.service.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 import { restoreLinkedForBooking, getLinkedArchiveRefsForBooking } from "./linkedArchives.service.js";
+import { restoreMaintenanceArchivesForBooking, getMaintenanceArchiveRefsForBooking } from "./maintenanceArchives.service.js";
 import { restorePenaltyArchivesForBooking, getPenaltyArchiveRefsForBooking } from "./penaltyArchives.service.js";
 import { restoreRefundArchivesForBooking, getRefundArchiveRefsForBooking } from "./refundArchives.service.js";
 
@@ -132,7 +133,7 @@ export const getInspectionRecordsForBooking = async (bookingID) => {
 // 2. Restore linked paymentsArchives entry → payments collection (if found)
 // 3. Restore linked reviewsArchives entries → reviews collection (if any)
 // 3b. Restore the booking's penaltyArchives / refundArchives, and its driverAssignmentArchives,
-//     cancellationRequestArchives and paymentEntryArchives, into their live collections
+//     cancellationRequestArchives, paymentEntryArchives and maintenanceArchives, into their live collections
 // 4. Delete all the archive records (booking, payment, reviews, session ...)
 export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "admin") => {
   const archiveRef = db.collection("bookingArchives").doc(bookingArchivesId);
@@ -237,6 +238,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     bookingKeys: [bookingID, originalId],
     paymentIDs: paymentArchiveData ? [paymentArchiveData.paymentID ?? paymentArchiveData.originalId] : [],
   });
+  const restoredMaintenance = await restoreMaintenanceArchivesForBooking({ bookingKeys: [bookingID, originalId] });
 
   // ── 4. Delete all archive records (batch) ──
   const batch = db.batch();
@@ -263,6 +265,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     restoredDriverAssignments:    linkedRestored.driverAssignments,
     restoredCancellationRequests: linkedRestored.cancellationRequests,
     restoredPaymentEntries:       linkedRestored.paymentEntries,
+    restoredMaintenance,
   };
 };
 
@@ -304,6 +307,7 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   });
   const penaltyArchiveRefs = await getPenaltyArchiveRefsForBooking(bookingID);
   const refundArchiveRefs  = await getRefundArchiveRefsForBooking(bookingID);
+  const maintenanceArchiveRefs = await getMaintenanceArchiveRefsForBooking({ bookingKeys: [bookingID, data.originalId] });
 
   // Delete all in batch
   const batch = db.batch();
@@ -327,6 +331,7 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   for (const ref of linkedArchiveRefs)  batch.delete(ref);
   for (const ref of penaltyArchiveRefs) batch.delete(ref);
   for (const ref of refundArchiveRefs)  batch.delete(ref);
+  for (const ref of maintenanceArchiveRefs) batch.delete(ref);
 
   await batch.commit();
 
@@ -341,5 +346,6 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
     deletedLinkedArchives: linkedArchiveRefs.length,
     deletedPenaltyArchives: penaltyArchiveRefs.length,
     deletedRefundArchives: refundArchiveRefs.length,
+    deletedMaintenanceArchives: maintenanceArchiveRefs.length,
   };
 };

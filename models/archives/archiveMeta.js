@@ -12,6 +12,7 @@ export const ARCHIVE_META_KEYS = [
   "driverAssignmentArchivesID",    "driverAssignmentArchivesId",
   "cancellationRequestArchivesID", "cancellationRequestArchivesId",
   "paymentEntryArchivesID",        "paymentEntryArchivesId",
+  "maintenanceArchivesID",         "maintenanceArchivesId",
   "originalId",
   "archiveDate", "archivedAt", "archivedBy",
   "restoredAt", "restoredBy",
