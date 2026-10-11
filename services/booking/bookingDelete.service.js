@@ -14,11 +14,16 @@
  *     flushed to Storage — e.g. the booking gets deleted the same day,
  *     before that night's cron runs — would otherwise lose its GPS trail
  *     entirely once the live doc is deleted.
+ *  4b. Archive refund requests, penalties  → refundArchives / penaltyArchives
+ *  4c. Archive driver assignments, cancellation requests, payment entries
+ *      → driverAssignmentArchives / cancellationRequestArchives / paymentEntryArchives
+ *      (services/archives/linkedArchives.service.js). Every row linked to the booking, in any status.
  *  5. Delete booking         from bookings
  *  6. Delete payment         from payments          (if one was found)
  *  7. Delete reviews         from reviews           (if any were found)
  *  8. Delete bookingSession  from bookingSessions, and its archive
  *     subcollection             (if one was found)
+ *  9. Delete the rows archived in 4b / 4c from their live collections
  *
  * If any archive write fails the function throws before touching deletes,
  * so the source documents are never lost.
@@ -26,6 +31,15 @@
 
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import {
+  collectLinkedForBooking,
+  writeLinkedArchives,
+  linkedLiveRefs,
+  chunk,
+} from "../archives/linkedArchives.service.js";
+
+// A Firestore batch holds at most 500 writes; stay well under it.
+const BATCH_LIMIT = 450;
 
 // ─────────────────────────────────────────────────────────────
 // Internal helpers
@@ -98,16 +112,15 @@ const fetchBookingSession = async (bookingID) => {
  * pointing at a booking/payment that no longer existed. Returns
  * { docRef, data } or null if this booking never had a refund request.
  */
-const fetchRefundRequest = async (bookingID) => {
+const fetchRefundRequests = async (bookingID) => {
+  // Every refund request of the booking, not just the first: a booking can have more than one (a rejected one and
+  // a later one, or a staff refund), and any left behind would point at a booking that no longer exists.
   const snap = await db
     .collection("refundRequests")
     .where("bookingID", "==", bookingID)
-    .limit(1)
     .get();
 
-  if (snap.empty) return null;
-  const doc = snap.docs[0];
-  return { docRef: doc.ref, data: doc.data() };
+  return snap.docs.map((doc) => ({ docRef: doc.ref, data: doc.data() }));
 };
 
 /**
@@ -244,6 +257,9 @@ const archiveRefundRequest = async (refundRequestDocID, refundRequestData, archi
     // ── spread all original refund request fields ──
     ...refundRequestData,
   };
+  // approvalLockedAt is a temporary 2-minute approval lock (see refundRequest.model.js), not data about the
+  // refund: an archive must not carry it, or a restore would bring back a lock that blocks the request.
+  delete archiveDoc.approvalLockedAt;
 
   await archiveRef.set(archiveDoc);
   console.log(`[ARCHIVE] RefundRequest archived → refundArchives/${archiveRef.id}`);
@@ -294,23 +310,34 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   const paymentResult = await fetchPayment(bookingID);
   const reviewResults = await fetchReviews(bookingID);
   const sessionResult = await fetchBookingSession(bookingID);
-  const refundRequestResult = await fetchRefundRequest(bookingID);
+  const refundRequestResults = await fetchRefundRequests(bookingID);
   const penaltyResults = await fetchPenalties(bookingID);
+
+  // driverAssignments / cancellationRequests / paymentEntries rows of this booking (see linkedArchives.core.js).
+  // Found by every key the booking is known by; entries written without a bookingID are found through the payment id.
+  const linkedRows = await collectLinkedForBooking({
+    bookingKeys: [bookingID, bookingDocID],
+    paymentIDs: paymentResult ? [paymentResult.data.paymentID ?? paymentResult.docRef.id] : [],
+  });
 
   console.log(
     `[DELETE] Booking ${bookingDocID} | ` +
     `payment: ${paymentResult ? "found" : "none"} | ` +
     `reviews: ${reviewResults.length} | ` +
     `session: ${sessionResult ? "found" : "none"} | ` +
-    `refundRequest: ${refundRequestResult ? "found" : "none"} | ` +
-    `penalties: ${penaltyResults.length}`
+    `refundRequests: ${refundRequestResults.length} | ` +
+    `penalties: ${penaltyResults.length} | ` +
+    `assignments: ${linkedRows.driverAssignments.length} | ` +
+    `cancellationRequests: ${linkedRows.cancellationRequests.length} | ` +
+    `paymentEntries: ${linkedRows.paymentEntries.length}`
   );
 
   // ── 2. Archive phase (must all succeed before any delete) ─────────────────
   let bookingArchivesID;
   let paymentsArchivesID = null;
   let bookingSessionArchivesID = null;
-  let refundArchivesID = null;
+  const refundArchivesIDs = [];
+  let linkedArchivedCounts = { driverAssignments: 0, cancellationRequests: 0, paymentEntries: 0 };
   const reviewsArchivesIDs = [];
   const penaltyArchivesIDs = [];
 
@@ -346,12 +373,9 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     // 2e. Archive refundRequest (if exists) — in any status. Closes the gap
     // where a refund request tied to this booking would otherwise be left
     // pointing at a booking/payment that no longer exists.
-    if (refundRequestResult) {
-      refundArchivesID = await archiveRefundRequest(
-        refundRequestResult.docRef.id,
-        refundRequestResult.data,
-        archivedBy
-      );
+    for (const { docRef: refundRef, data: refundData } of refundRequestResults) {
+      const id = await archiveRefundRequest(refundRef.id, refundData, archivedBy);
+      refundArchivesIDs.push(id);
     }
 
     // 2f. Archive every penalty (if any) — a booking can have several.
@@ -359,6 +383,10 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       const id = await archivePenalty(penaltyRef.id, penaltyData, archivedBy);
       penaltyArchivesIDs.push(id);
     }
+
+    // 2g. Archive the driver assignments, cancellation requests and payment entries (any status). They used to be
+    // left live and pointing at a booking that no longer exists.
+    linkedArchivedCounts = await writeLinkedArchives(linkedRows, archivedBy);
   } catch (archiveError) {
     // If any archive write fails, stop immediately — nothing has been deleted yet.
     console.error("[DELETE] Archive phase failed — aborting, source data is safe:", archiveError);
@@ -391,9 +419,9 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       batch.delete(sessionResult.docRef);
     }
 
-    // 3e. Delete refundRequest
-    if (refundRequestResult) {
-      batch.delete(refundRequestResult.docRef);
+    // 3e. Delete refundRequests
+    for (const { docRef: refundRef } of refundRequestResults) {
+      batch.delete(refundRef);
     }
 
     // 3f. Delete penalties
@@ -401,7 +429,22 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       batch.delete(penaltyRef);
     }
 
+    // 3g. Delete the rows archived in 2g. They share the batch (all or nothing) while it fits; anything past the
+    // limit goes in follow-up batches (their archive copies already exist, so nothing can be lost).
+    let ops =
+      1 + (paymentResult ? 1 : 0) + reviewResults.length + (sessionResult ? 1 : 0) +
+      refundRequestResults.length + penaltyResults.length;
+    const overflow = [];
+    for (const ref of linkedLiveRefs(linkedRows)) {
+      if (ops < BATCH_LIMIT) { batch.delete(ref); ops += 1; } else overflow.push(ref);
+    }
+
     await batch.commit();
+    for (const part of chunk(overflow, BATCH_LIMIT)) {
+      const extra = db.batch();
+      part.forEach((ref) => extra.delete(ref));
+      await extra.commit();
+    }
     console.log(`[DELETE] Batch delete committed for booking ${bookingDocID}`);
   } catch (deleteError) {
     // Archives already written but deletes failed.
@@ -425,18 +468,23 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     bookingArchivesID,
     paymentsArchivesID,
     bookingSessionArchivesID,
-    refundArchivesID,
+    refundArchivesID       : refundArchivesIDs[0] ?? null,   // first one, kept for older callers
+    refundArchivesIDs,
     reviewsArchivesIDs,
     penaltyArchivesIDs,
+    linkedArchived         : linkedArchivedCounts,
     penaltiesArchivedCount : penaltyResults.length,
     reviewsArchivedCount : reviewResults.length,
     sessionArchived       : Boolean(sessionResult),
-    refundRequestArchived : Boolean(refundRequestResult),
+    refundRequestArchived : refundRequestResults.length > 0,
     message          :
       `Booking ${bookingDocID} and ${paymentResult ? 1 : 0} payment(s), ` +
       `${reviewResults.length} review(s), ` +
       `${sessionResult ? 1 : 0} session, ` +
-      `${refundRequestResult ? 1 : 0} refund request, ` +
+      `${refundRequestResults.length} refund request(s), ` +
+      `${linkedArchivedCounts.paymentEntries} payment entr${linkedArchivedCounts.paymentEntries === 1 ? "y" : "ies"}, ` +
+      `${linkedArchivedCounts.driverAssignments} driver assignment(s), ` +
+      `${linkedArchivedCounts.cancellationRequests} cancellation request(s), ` +
       `${penaltyResults.length} penalt${penaltyResults.length === 1 ? "y" : "ies"} archived and deleted successfully.`,
   };
 };

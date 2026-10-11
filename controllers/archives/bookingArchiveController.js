@@ -42,7 +42,7 @@ export const restoreBookingArchiveHandler = async (req, res) => {
     }).catch((err) => console.error("[BOOKING ARCHIVE] Failed to write audit log:", err));
     return res.status(200).json({
       success: true,
-      message: `Booking restored successfully.${result.restoredPayment ? " Payment also restored." : ""}${result.restoredReviews > 0 ? ` ${result.restoredReviews} review(s) also restored.` : ""}`,
+      message: `Booking restored successfully.${result.restoredPayment ? " Payment also restored." : ""}${result.restoredReviews > 0 ? ` ${result.restoredReviews} review(s) also restored.` : ""}${result.restoredPenalties > 0 ? ` ${result.restoredPenalties} penalty(ies) also restored.` : ""}${result.restoredRefunds > 0 ? ` ${result.restoredRefunds} refund request(s) also restored.` : ""}`,
       data: result,
     });
   } catch (error) {

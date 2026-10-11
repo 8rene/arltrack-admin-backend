@@ -1,43 +1,44 @@
 // Matches the 'refundArchives' collection in Firestore.
-// Primary key: refundArchivesId (Firestore document ID)
 //
-// Unlike transactionLogArchives (which has its own standalone viewer page
-// with a manual delete-to-archive button), this archive is only ever
-// written as part of deleteBookingWithCascade() in
-// services/booking/bookingDelete.service.js — the same way paymentsArchives
-// and reviewsArchives get written alongside a booking deletion. There is
-// no standalone "delete this one refund request" action anywhere in the
-// app to archive from, so no dedicated admin viewer page is planned for
-// this collection — it exists purely so a refund request doesn't get
-// silently orphaned/lost when its parent booking is deleted.
+// An archive is a COPY of the refund request document, taken when its booking is deleted (see
+// services/booking/bookingDelete.service.js -- there is no standalone "delete this refund request" action), plus the
+// bookkeeping fields below. So it has every column models/refundRequest/refundRequest.model.js has -- keep the two in
+// step. A booking can have several refund requests: every one is archived. The temporary approvalLockedAt lock is
+// never copied.
+//
+// Like the live request, an archive does not store the PayMongo parts / manual hand-back / unrefundable amounts (those
+// are the "out" rows of paymentEntries, archived with the booking in paymentEntryArchives) or the customer's own
+// userID / reason / notes (those are on the booking's cancellation row, cancellationRequestArchives). The Refund
+// Archive page gets them back through hydrateRefundRequestsWithArchives() and the cancellation rows.
+// Archives made before the normalization may still carry userID, notes, paymongoRefundID, processedAt, rejectReason,
+// amount / grossPaid (old names of toRefundAmount / bookingPaid) and the policyTier / pickupAt snapshot; readers accept both.
+//
+// Restore (a refund restore, or restoring its booking) puts the request back in `refundRequests` and deletes this document.
 export const RefundArchive = {
-  refundArchivesId: "",   // Firestore doc ID — same as collection name + "Id"
-  originalId: "",          // doc ID from original 'refundRequests' collection
+  // ---- bookkeeping: written by the archive, NEVER restored (see services/archives/archiveMeta.js) ----
+  refundArchivesId: "",    // Firestore doc ID of this archive document (lowercase "d": the Refund Archive routes use it)
+  originalId: "",          // doc ID of the original 'refundRequests' document, reused on restore
+  archiveDate: null,       // set when archived (same moment as archivedAt)
+  archivedAt: null,
+  archivedBy: "",
+  restoredAt: null,        // only present if it was restored, then archived again
+  customerName: "",        // resolved on read from the cancellation row's userID; not stored on restore
+
+  // ---- copied from the refund request document (see refundRequest.model.js) ----
   refundRequestID: "",
   bookingID: "",
   paymentID: "",
-  userID: "",
-
-  reason: "",
-  notes: "",
-  toRefundAmount: 0,        // was `amount`; archives made before the rename still carry amount (readers accept both)
-  status: "",              // whatever it was at time of deletion: Pending | Approved | Refunded | Rejected | Failed
-
-  paymongoRefundID: null,
+  source: "customer",      // "customer" | "staff"
+  outcome: null,           // "refunded" | "already_refunded" | "nothing_owed" -- staff-origin requests only
+  toRefundAmount: 0,       // what goes back to the customer
+  bookingPaid: 0,          // everything the customer had paid before any forfeit
+  returnDeposit: true,
+  depositForfeited: 0,
+  forfeitWaived: false,
+  status: "",              // Pending | Approved | Refunded | Rejected | Failed (at the time of deletion)
   processedBy: null,
-  processedAt: null,
-  rejectReason: null,
-
+  reason: null,            // the STAFF's reason for the decision
+  refundedAt: null,
   createdAt: null,
   updatedAt: null,
-
-  archivedAt: null,
-  archivedBy: "",
-  // Restore deletes this doc entirely (see restoreRefundArchive in
-  // services/archives/refundArchives.service.js) rather than marking it.
-  // restoredAt can still show up here though, inherited from the live
-  // refund request doc if it's ever archived again after being restored.
-  // restoredBy was previously written directly to this doc on restore but
-  // that write path no longer exists, so it's been removed from this model.
-  restoredAt: null,
 };

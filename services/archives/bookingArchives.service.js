@@ -6,6 +6,9 @@ import { getAssignmentRefsForBooking } from "../driverAssignments/driverAssignme
 import { getRequestRefsForBooking } from "../cancellationRequests/cancellationRequests.service.js";
 import { getEntryRefsForBooking } from "../paymentEntries/paymentEntries.service.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
+import { restoreLinkedForBooking, getLinkedArchiveRefsForBooking } from "./linkedArchives.service.js";
+import { restorePenaltyArchivesForBooking, getPenaltyArchiveRefsForBooking } from "./penaltyArchives.service.js";
+import { restoreRefundArchivesForBooking, getRefundArchiveRefsForBooking } from "./refundArchives.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -128,7 +131,9 @@ export const getInspectionRecordsForBooking = async (bookingID) => {
 // 1. Restore booking → bookings collection
 // 2. Restore linked paymentsArchives entry → payments collection (if found)
 // 3. Restore linked reviewsArchives entries → reviews collection (if any)
-// 4. Delete all three archive records (booking, payment, reviews)
+// 3b. Restore the booking's penaltyArchives / refundArchives, and its driverAssignmentArchives,
+//     cancellationRequestArchives and paymentEntryArchives, into their live collections
+// 4. Delete all the archive records (booking, payment, reviews, session ...)
 export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "admin") => {
   const archiveRef = db.collection("bookingArchives").doc(bookingArchivesId);
   const archiveDoc = await archiveRef.get();
@@ -221,6 +226,18 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     });
   }
 
+  // ── 3b. Restore the linked penalties, refund requests, driver assignments, cancellation requests and
+  // payment entries. Each restore moves its rows back and deletes their archive copies in the same batch.
+  // Rows are found under every key the booking is known by (bookingID field and Firestore doc id); entries
+  // written without a bookingID are found through the payment id. ──
+  const restoredPenalties = await restorePenaltyArchivesForBooking(bookingID);
+  const restoredRefunds   = await restoreRefundArchivesForBooking(bookingID);
+  const paymentArchiveData = paymentArchiveDoc ? paymentArchiveDoc.data() : null;
+  const linkedRestored = await restoreLinkedForBooking({
+    bookingKeys: [bookingID, originalId],
+    paymentIDs: paymentArchiveData ? [paymentArchiveData.paymentID ?? paymentArchiveData.originalId] : [],
+  });
+
   // ── 4. Delete all archive records (batch) ──
   const batch = db.batch();
   batch.delete(archiveRef); // booking archive
@@ -241,6 +258,11 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     restoredPayment: !!paymentArchiveDoc,
     restoredReviews: reviewArchiveDocs.length,
     restoredSession: !!sessionArchiveDoc,
+    restoredPenalties,
+    restoredRefunds,
+    restoredDriverAssignments:    linkedRestored.driverAssignments,
+    restoredCancellationRequests: linkedRestored.cancellationRequests,
+    restoredPaymentEntries:       linkedRestored.paymentEntries,
   };
 };
 
@@ -272,6 +294,16 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   // paymentEntries rows are not archived either (live, keyed by bookingID / paymentID), so a restore
   // reconnects the money history. This permanent delete is the only place they are cleaned up.
   const entryRefs          = await getEntryRefsForBooking(bookingID);
+  // Bookings archived since the three collections got their own archives keep those rows in
+  // driverAssignmentArchives / cancellationRequestArchives / paymentEntryArchives (and the penalty and refund
+  // archives); the live-row cleanup above only covers bookings archived before that.
+  const paymentID          = paymentArchiveDoc ? (paymentArchiveDoc.data().paymentID ?? paymentArchiveDoc.data().originalId) : null;
+  const linkedArchiveRefs  = await getLinkedArchiveRefsForBooking({
+    bookingKeys: [bookingID, data.originalId],
+    paymentIDs: paymentID ? [paymentID] : [],
+  });
+  const penaltyArchiveRefs = await getPenaltyArchiveRefsForBooking(bookingID);
+  const refundArchiveRefs  = await getRefundArchiveRefsForBooking(bookingID);
 
   // Delete all in batch
   const batch = db.batch();
@@ -292,6 +324,9 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   for (const ref of assignmentRefs) batch.delete(ref);
   for (const ref of requestRefs)    batch.delete(ref);
   for (const ref of entryRefs)      batch.delete(ref);
+  for (const ref of linkedArchiveRefs)  batch.delete(ref);
+  for (const ref of penaltyArchiveRefs) batch.delete(ref);
+  for (const ref of refundArchiveRefs)  batch.delete(ref);
 
   await batch.commit();
 
@@ -303,5 +338,8 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
     deletedAssignments:    assignmentRefs.length,
     deletedCancellationRequests: requestRefs.length,
     deletedPaymentEntries: entryRefs.length,
+    deletedLinkedArchives: linkedArchiveRefs.length,
+    deletedPenaltyArchives: penaltyArchiveRefs.length,
+    deletedRefundArchives: refundArchiveRefs.length,
   };
 };

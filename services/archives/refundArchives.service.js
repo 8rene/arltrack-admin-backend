@@ -1,10 +1,53 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
-import { hydrateRefundRequests } from "../paymentEntries/paymentEntries.service.js";
+import { hydrateRefundRequestsWithArchives } from "./entryArchiveHydrate.service.js";
+import { LINKED, chunk, restoreEntryArchivesBy, restoreLinkedForBooking } from "./linkedArchives.service.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
+
+// The customer's side of a refund (who asked, why, their notes) is not on the refund request any more: it is on
+// the booking's cancellationRequests row. A deleted booking's rows are in cancellationRequestArchives, so look in
+// both. Raw row data, newest first, per bookingID.
+const getCancellationRowsForBookings = async (bookingIDs) => {
+  const keys = [...new Set((bookingIDs || []).filter(Boolean))];
+  const map = new Map(keys.map((k) => [k, []]));
+  const ms = (v) => (v?.toMillis ? v.toMillis() : v?._seconds ? v._seconds * 1000 : v ? new Date(v).getTime() || 0 : 0);
+  for (const collection of [LINKED.cancellationRequests.live, LINKED.cancellationRequests.archive]) {
+    for (const part of chunk(keys, 30)) {
+      const snap = await db.collection(collection).where("bookingID", "in", part).get();
+      snap.docs.forEach((d) => { const row = d.data(); if (map.has(row.bookingID)) map.get(row.bookingID).push(row); });
+    }
+  }
+  map.forEach((rows) => rows.sort((a, b) => ms(b.createdAt ?? b.requestedAt) - ms(a.createdAt ?? a.requestedAt)));
+  return map;
+};
+
+// Same rules as withCancellationInfo() in refundRequest.service.js (kept as a copy so that file stays untouched):
+// the row fills userID / notes / decision gaps, `reason` is the STAFF's reason, customerReason the customer's.
+const isLegacyRefundDoc = (r) => !!(r && (r.userID || r.notes || r.rejectReason));
+const withCancellationInfo = (r, row) => {
+  if (!r) return r;
+  const decided = !!(r.status && r.status !== "Pending");
+  const legacy = isLegacyRefundDoc(r);
+  const customerReason = (legacy ? r.reason : "") || (row && row.reason) || "";
+  const decisionReason = (legacy ? r.rejectReason : r.reason) || (decided && row ? row.rejectReason : "") || "";
+  return {
+    ...r,
+    ...(row ? {
+      userID: r.userID || row.userID || null,
+      notes: r.notes || row.notes || "",
+      ...(decided ? {
+        processedBy: r.processedBy || row.processedBy || null,
+        processedAt: r.processedAt || row.processedAt || null,
+      } : {}),
+    } : {}),
+    customerReason,
+    reason: decisionReason,
+    rejectReason: r.status === "Rejected" ? (decisionReason || null) : (r.rejectReason ?? null),
+  };
+};
 
 // ── GET ALL ──────────────────────────────────────────────────────────────────
 export const getAllRefundArchives = async () => {
@@ -13,17 +56,22 @@ export const getAllRefundArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
-  const nameMap = await resolveUserNames(snapshot.docs.map((doc) => doc.data().userID));
-
   // Refund docs no longer store parts[] / manualRefund / unrefundable[] -- those live in the
   // paymentEntries "out" rows (keyed by refundRequestID, which the archive copy carries).
-  // paymentEntries rows are not archived with the booking, so they can still be read here.
-  const hydrated = await hydrateRefundRequests(
-    snapshot.docs.map((doc) => {
-      const data = doc.data();
-      return { ...data, refundRequestID: data.refundRequestID || data.originalId || doc.id };
-    })
-  );
+  // The rows are archived with the booking (paymentEntryArchives); the reader looks in both collections.
+  const requests = snapshot.docs.map((doc) => {
+    const data = doc.data();
+    return { ...data, refundRequestID: data.refundRequestID || data.originalId || doc.id };
+  });
+  const withEntries = await hydrateRefundRequestsWithArchives(requests);
+  const cancellationRows = await getCancellationRowsForBookings(requests.map((r) => r.bookingID));
+  const hydrated = withEntries.map((r) => {
+    const rows = cancellationRows.get(r.bookingID) || [];
+    const row = rows.find((x) => x.refundRequestID && x.refundRequestID === r.refundRequestID) || rows[0];
+    return withCancellationInfo(r, row);
+  });
+
+  const nameMap = await resolveUserNames(hydrated.map((r) => r.userID));
 
   return snapshot.docs.map((doc, i) => {
     const data = hydrated[i];
@@ -128,11 +176,43 @@ export const restoreRefundArchive = async (refundArchivesId, restoredBy = "admin
   const restoredBooking = await restoreLinkedBooking(originalData.bookingID);
   const restoredPayment = await restoreLinkedPayment(originalData.bookingID);
 
+  // The refund's "out" rows (parts / manual hand-back) were archived with the booking: bring them back with it.
+  await restoreEntryArchivesBy("refundReqID", [originalData.refundRequestID || originalId]);
+  if (restoredPayment) await restoreEntryArchivesBy("paymentID", [originalData.paymentID]);
+  if (restoredBooking) {
+    await restoreLinkedForBooking({ bookingKeys: [originalData.bookingID], kinds: ["driverAssignments", "cancellationRequests"] });
+  }
+
   // Archive doc's job is done once the refund request is back in the live
   // collection — delete it instead of keeping a "Restored" marker around.
   await archiveRef.delete();
 
   return { restoredBooking, restoredPayment };
+};
+
+// ── BOOKING-ARCHIVE CASCADE ──────────────────────────────────────────────────
+// Used by bookingArchives.service.js: restoring a booking brings its archived refund request(s) back;
+// permanently deleting the booking archive removes them.
+export const restoreRefundArchivesForBooking = async (bookingID) => {
+  if (!bookingID) return 0;
+  const snap = await db.collection("refundArchives").where("bookingID", "==", bookingID).get();
+  for (const d of snap.docs) {
+    const data = d.data();
+    const batch = db.batch();
+    batch.set(
+      db.collection("refundRequests").doc(data.originalId || d.id),
+      { ...stripArchiveMeta(data), restoredAt: admin.firestore.FieldValue.serverTimestamp() }
+    );
+    batch.delete(d.ref);
+    await batch.commit();
+  }
+  return snap.docs.length;
+};
+
+export const getRefundArchiveRefsForBooking = async (bookingID) => {
+  if (!bookingID) return [];
+  const snap = await db.collection("refundArchives").where("bookingID", "==", bookingID).get();
+  return snap.docs.map((d) => d.ref);
 };
 
 // ── PERMANENT DELETE ─────────────────────────────────────────────────────────

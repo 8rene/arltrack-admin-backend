@@ -103,6 +103,9 @@ export const deleteBooking = async (req, res) => {
         paymentsArchivesID  : result.paymentsArchivesID,
         reviewsArchivesIDs  : result.reviewsArchivesIDs,
         reviewsArchivedCount: result.reviewsArchivedCount,
+        refundArchivesIDs   : result.refundArchivesIDs,
+        penaltyArchivesIDs  : result.penaltyArchivesIDs,
+        linkedArchived      : result.linkedArchived,
       },
     });
   } catch (error) {

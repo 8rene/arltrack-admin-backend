@@ -1,7 +1,8 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
-import { hydratePayments } from "../paymentEntries/paymentEntries.service.js";
+import { hydratePaymentsWithArchives } from "./entryArchiveHydrate.service.js";
+import { restoreEntryArchivesBy, restoreLinkedForBooking } from "./linkedArchives.service.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
@@ -39,8 +40,9 @@ export const getAllPaymentsArchives = async () => {
     .orderBy("archivedAt", "desc")
     .get();
 
-  // Archived payments lose the moved fields in the PHASE 2 cleanup too: read them back from the entries.
-  const hydrated = await hydratePayments(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+  // Archived payments lose the moved fields in the PHASE 2 cleanup too: read them back from the entries
+  // (live rows, or the rows archived with the booking in paymentEntryArchives).
+  const hydrated = await hydratePaymentsWithArchives(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
 
   const rows = snapshot.docs.map((doc, idx) => {
     const { id: _docID, ...data } = hydrated[idx];
@@ -123,6 +125,13 @@ export const restorePaymentsArchive = async (paymentsArchivesId, restoredBy = "a
   });
 
   const restoredBooking = await restoreLinkedBooking(originalData.bookingID);
+
+  // The payment's deposit / balance / penalty / refund rows were archived with the booking: bring them back with it
+  // (the payment would otherwise come back with no method, reference or paid date).
+  await restoreEntryArchivesBy("paymentID", [originalData.paymentID || originalId]);
+  if (restoredBooking) {
+    await restoreLinkedForBooking({ bookingKeys: [originalData.bookingID], kinds: ["driverAssignments", "cancellationRequests"] });
+  }
 
   // Archive doc's job is done once the payment is back in the live
   // collection — delete it instead of keeping a "Restored" marker around.
