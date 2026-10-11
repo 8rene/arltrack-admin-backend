@@ -18,6 +18,8 @@
  *  4c. Archive driver assignments, cancellation requests, payment entries
  *      → driverAssignmentArchives / cancellationRequestArchives / paymentEntryArchives
  *      (services/archives/linkedArchives.service.js). Every row linked to the booking, in any status.
+ *  4e. Archive the four vehicle inspection collections (part condition + photo links) of the booking into ONE
+ *      vehicleInspectionArchives doc (services/archives/vehicleInspectionArchives.service.js). The photo files stay in Storage.
  *  4d. Archive maintenance records linked to the booking (bookingID set; routine maintenance is not) → maintenanceArchives
  *      (services/archives/maintenanceArchives.service.js). Any status.
  *  5. Delete booking         from bookings
@@ -44,6 +46,11 @@ import {
   writeMaintenanceArchives,
   maintenanceLiveRefs,
 } from "../archives/maintenanceArchives.service.js";
+import {
+  collectInspectionForBooking,
+  writeInspectionArchive,
+  inspectionLiveRefs,
+} from "../archives/vehicleInspectionArchives.service.js";
 
 // A Firestore batch holds at most 500 writes; stay well under it.
 const BATCH_LIMIT = 450;
@@ -330,6 +337,9 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   // maintenance records linked to this booking (post-rental jobs). Routine maintenance has no bookingID and is not touched.
   const maintenanceRows = await collectMaintenanceForBooking({ bookingKeys: [bookingID, bookingDocID] });
 
+  // vehicle inspection records (part condition + photos) of this booking: archived as one doc, files stay in Storage.
+  const inspectionRows = await collectInspectionForBooking({ bookingKeys: [bookingID, bookingDocID] });
+
   console.log(
     `[DELETE] Booking ${bookingDocID} | ` +
     `payment: ${paymentResult ? "found" : "none"} | ` +
@@ -340,7 +350,8 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     `assignments: ${linkedRows.driverAssignments.length} | ` +
     `cancellationRequests: ${linkedRows.cancellationRequests.length} | ` +
     `paymentEntries: ${linkedRows.paymentEntries.length} | ` +
-    `maintenance: ${maintenanceRows.length}`
+    `maintenance: ${maintenanceRows.length} | ` +
+    `inspection: ${inspectionRows.length}`
   );
 
   // ── 2. Archive phase (must all succeed before any delete) ─────────────────
@@ -350,6 +361,7 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   const refundArchivesIDs = [];
   let linkedArchivedCounts = { driverAssignments: 0, cancellationRequests: 0, paymentEntries: 0 };
   let maintenanceArchivedCount = 0;
+  let inspectionArchivedCount = 0;
   const reviewsArchivesIDs = [];
   const penaltyArchivesIDs = [];
 
@@ -402,6 +414,9 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
 
     // 2h. Archive the booking-linked maintenance records (any status).
     maintenanceArchivedCount = await writeMaintenanceArchives(maintenanceRows, archivedBy);
+
+    // 2i. Archive the booking's vehicle inspection records (one archive doc; the photo files are not moved).
+    inspectionArchivedCount = await writeInspectionArchive(inspectionRows, { bookingID, archivedBy });
   } catch (archiveError) {
     // If any archive write fails, stop immediately — nothing has been deleted yet.
     console.error("[DELETE] Archive phase failed — aborting, source data is safe:", archiveError);
@@ -450,7 +465,7 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       1 + (paymentResult ? 1 : 0) + reviewResults.length + (sessionResult ? 1 : 0) +
       refundRequestResults.length + penaltyResults.length;
     const overflow = [];
-    for (const ref of [...linkedLiveRefs(linkedRows), ...maintenanceLiveRefs(maintenanceRows)]) {
+    for (const ref of [...linkedLiveRefs(linkedRows), ...maintenanceLiveRefs(maintenanceRows), ...inspectionLiveRefs(inspectionRows)]) {
       if (ops < BATCH_LIMIT) { batch.delete(ref); ops += 1; } else overflow.push(ref);
     }
 
@@ -489,6 +504,7 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     penaltyArchivesIDs,
     linkedArchived         : linkedArchivedCounts,
     maintenanceArchivedCount,
+    inspectionArchivedCount,
     penaltiesArchivedCount : penaltyResults.length,
     reviewsArchivedCount : reviewResults.length,
     sessionArchived       : Boolean(sessionResult),
@@ -502,6 +518,7 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       `${linkedArchivedCounts.driverAssignments} driver assignment(s), ` +
       `${linkedArchivedCounts.cancellationRequests} cancellation request(s), ` +
       `${maintenanceArchivedCount} maintenance record(s), ` +
+      `${inspectionArchivedCount} vehicle inspection record(s), ` +
       `${penaltyResults.length} penalt${penaltyResults.length === 1 ? "y" : "ies"} archived and deleted successfully.`,
   };
 };

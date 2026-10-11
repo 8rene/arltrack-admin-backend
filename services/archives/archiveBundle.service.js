@@ -21,6 +21,8 @@ import { restoreRefundArchive } from "./refundArchives.service.js";
 import { restoreReviewsArchive } from "./reviewsArchives.service.js";
 import { restoreBookingSessionArchive } from "./bookingSessionArchives.service.js";
 import { restoreMaintenanceArchive } from "./maintenanceArchives.service.js";
+import { restoreInspectionArchive, inspectionFileUrls } from "./vehicleInspectionArchives.service.js";
+import { deleteStorageFiles } from "../../utils/storage/storageFiles.js";
 
 const DELETE_BATCH = 450;
 
@@ -30,7 +32,10 @@ export const ARCHIVE_KINDS = {
   penalties:   { collection: "penaltyArchives",        label: "penalty",         restoreOne: restorePenaltyArchive,        entryField: "penaltyID",   liveParent: "penalties" },
   refunds:     { collection: "refundArchives",         label: "refund request",  restoreOne: restoreRefundArchive,         entryField: "refundReqID", liveParent: "refundRequests" },
   reviews:     { collection: "reviewsArchives",        label: "review",          restoreOne: restoreReviewsArchive },
-  sessions:    { collection: "bookingSessionArchives", label: "booking session", restoreOne: restoreBookingSessionArchive },
+  sessions:    { collection: "bookingSessionArchives", label: "booking session", restoreOne: restoreBookingSessionArchive,
+                 files: (snap) => [snap.data().archiveUrl].filter(Boolean) },   // the GPS history JSON in Storage
+  inspection:  { collection: "vehicleInspectionArchives", label: "vehicle inspection", restoreOne: restoreInspectionArchive,
+                 files: (snap) => [...inspectionFileUrls({ archiveSnaps: [snap] })] }, // the photos in Storage
   maintenance: { collection: "maintenanceArchives",    label: "maintenance record", restoreOne: restoreMaintenanceArchive },
 };
 
@@ -113,8 +118,11 @@ export const deleteArchiveItem = async (kind, archiveID) => {
   }
 
   const entryRefs = await ownEntryRefs(cfg, data, archiveID);
+  const fileUrls = cfg.files ? cfg.files(snap) : [];
   await deleteRefs([...entryRefs, ref]);
-  return { scope: "single", deletedEntries: entryRefs.length };
+  // files last: only after the record that could still have been restored is gone
+  const files = fileUrls.length ? await deleteStorageFiles(fileUrls) : { deleted: 0, failed: 0 };
+  return { scope: "single", deletedEntries: entryRefs.length, deletedFiles: files.deleted, failedFiles: files.failed };
 };
 
 // ── messages the controllers send back (the pages show them in their toasts) ──
@@ -137,6 +145,7 @@ export const restoreMessage = (kind, result) => {
     b.restoredDriverAssignments > 0 && plural(b.restoredDriverAssignments, "driver assignment", "driver assignments"),
     b.restoredCancellationRequests > 0 && plural(b.restoredCancellationRequests, "cancellation request", "cancellation requests"),
     b.restoredMaintenance > 0 && plural(b.restoredMaintenance, "maintenance record", "maintenance records"),
+    b.restoredInspection > 0 && "vehicle inspection",
   ].filter(Boolean);
   return `The whole booking was restored (this ${label} is part of it)${parts.length ? `: ${parts.join(", ")}` : ""}.`;
 };
@@ -145,7 +154,8 @@ export const deleteMessage = (kind, result) => {
   const label = ARCHIVE_KINDS[kind].label;
   if (result.scope !== "booking") {
     const n = result.deletedEntries || 0;
-    return `${cap(label)} permanently deleted${n ? ` with ${plural(n, "payment entry", "payment entries")} that belonged only to it` : ""}. Its booking archive no longer exists, so nothing else was touched.`;
+    const f = result.deletedFiles > 0 ? ` ${plural(result.deletedFiles, "stored file", "stored files")} removed from Storage.` : "";
+    return `${cap(label)} permanently deleted${n ? ` with ${plural(n, "payment entry", "payment entries")} that belonged only to it` : ""}.${f} Its booking archive no longer exists, so nothing else was touched.`;
   }
   const d = result.bundle || {};
   const parts = [
@@ -156,7 +166,9 @@ export const deleteMessage = (kind, result) => {
     d.deletedSessionArchive && "session",
     d.deletedLinkedArchives > 0 && `${d.deletedLinkedArchives} entry / assignment / cancellation archive(s)`,
     d.deletedMaintenanceArchives > 0 && plural(d.deletedMaintenanceArchives, "maintenance record", "maintenance records"),
+    (d.deletedInspectionArchives > 0 || d.deletedInspectionDocs > 0) && "vehicle inspection",
     d.deletedInspectionDocs > 0 && plural(d.deletedInspectionDocs, "inspection record", "inspection records"),
   ].filter(Boolean);
-  return `The whole archived booking was permanently deleted (this ${label} is part of it)${parts.length ? `: ${parts.join(", ")}` : ""}.`;
+  const files = d.deletedFiles > 0 ? ` ${plural(d.deletedFiles, "stored file", "stored files")} (photos / GPS history) removed from Storage.` : "";
+  return `The whole archived booking was permanently deleted (this ${label} is part of it)${parts.length ? `: ${parts.join(", ")}` : ""}.${files}`;
 };

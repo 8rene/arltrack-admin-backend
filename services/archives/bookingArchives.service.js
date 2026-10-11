@@ -7,6 +7,13 @@ import { getRequestRefsForBooking } from "../cancellationRequests/cancellationRe
 import { getEntryRefsForBooking } from "../paymentEntries/paymentEntries.service.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 import { restoreLinkedForBooking, getLinkedArchiveRefsForBooking } from "./linkedArchives.service.js";
+import {
+  restoreInspectionArchiveForBooking,
+  getInspectionArchiveSnapsForBooking,
+  getArchivedInspectionForBooking,
+  inspectionFileUrls,
+  removeInspectionFiles,
+} from "./vehicleInspectionArchives.service.js";
 import { restoreMaintenanceArchivesForBooking, getMaintenanceArchiveRefsForBooking } from "./maintenanceArchives.service.js";
 import { restorePenaltyArchivesForBooking, getPenaltyArchiveRefsForBooking } from "./penaltyArchives.service.js";
 import { restoreRefundArchivesForBooking, getRefundArchiveRefsForBooking } from "./refundArchives.service.js";
@@ -85,12 +92,11 @@ const findLinkedReviewArchives = async (bookingID) => {
   return snap.docs;
 };
 
-// Vehicle Inspection records (damage/parts status + photos) are NEVER
-// archived — they live permanently in these four live collections, keyed
-// by bookingID, regardless of what happens to the booking itself. Used by
-// (a) the "View Vehicle Inspection" modal on the Booking Archive page, and
-// (b) the permanent-delete cascade below, so these don't get orphaned
-// forever once nothing points back to their bookingID anymore.
+// Vehicle Inspection records (damage/parts status + photo links) are archived with the booking into ONE
+// vehicleInspectionArchives doc (services/archives/vehicleInspectionArchives.service.js). Bookings archived BEFORE
+// that existed still have their records in these four live collections, so this list is kept for them: it feeds
+// (a) the "View Vehicle Inspection" modal on the Booking Archive page (archive doc first, live as fallback) and
+// (b) the permanent-delete cascade below, which cleans up either form.
 const INSPECTION_COLLECTIONS = [
   "inventoryBeforeTrip",
   "inventoryAfterTrip",
@@ -111,6 +117,8 @@ export const findLinkedInspectionDocs = async (bookingID) => {
 // Same data as findLinkedInspectionDocs, but shaped for direct display
 // (grouped by collection, timestamps normalized) rather than for deletion.
 export const getInspectionRecordsForBooking = async (bookingID) => {
+  const archived = bookingID ? await getArchivedInspectionForBooking(bookingID) : null;
+  if (archived) return archived;
   if (!bookingID) return { inventoryBeforeTrip: [], inventoryAfterTrip: [], vehicleDocumentationBeforeTrip: [], vehicleDocumentationAfterTrip: [] };
   const snaps = await Promise.all(
     INSPECTION_COLLECTIONS.map((name) =>
@@ -239,6 +247,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     paymentIDs: paymentArchiveData ? [paymentArchiveData.paymentID ?? paymentArchiveData.originalId] : [],
   });
   const restoredMaintenance = await restoreMaintenanceArchivesForBooking({ bookingKeys: [bookingID, originalId] });
+  const restoredInspection = await restoreInspectionArchiveForBooking({ bookingKeys: [bookingID, originalId] });
 
   // ── 4. Delete all archive records (batch) ──
   const batch = db.batch();
@@ -266,6 +275,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     restoredCancellationRequests: linkedRestored.cancellationRequests,
     restoredPaymentEntries:       linkedRestored.paymentEntries,
     restoredMaintenance,
+    restoredInspection,
   };
 };
 
@@ -308,6 +318,10 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   const penaltyArchiveRefs = await getPenaltyArchiveRefsForBooking(bookingID);
   const refundArchiveRefs  = await getRefundArchiveRefsForBooking(bookingID);
   const maintenanceArchiveRefs = await getMaintenanceArchiveRefsForBooking({ bookingKeys: [bookingID, data.originalId] });
+  // vehicle inspection archive (new) + the Storage files (photos, GPS history JSON) behind every record that goes
+  const inspectionArchiveSnaps = await getInspectionArchiveSnapsForBooking({ bookingKeys: [bookingID, data.originalId] });
+  const fileUrls = inspectionFileUrls({ archiveSnaps: inspectionArchiveSnaps, liveDocs: inspectionDocs });
+  if (sessionArchiveDoc?.data().archiveUrl) fileUrls.add(sessionArchiveDoc.data().archiveUrl);
 
   // Delete everything that hangs off the booking archive first, in chunks of 450 (a Firestore batch takes at most 500
   // writes), and the booking archive itself LAST: if a chunk fails the booking archive is still there, so the same
@@ -317,7 +331,7 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   for (const reviewDoc of reviewArchiveDocs) refs.push(reviewDoc.ref);
   if (sessionArchiveDoc) refs.push(sessionArchiveDoc.ref);
   for (const inspectionDoc of inspectionDocs) refs.push(inspectionDoc.ref);
-  refs.push(...assignmentRefs, ...requestRefs, ...entryRefs, ...linkedArchiveRefs, ...penaltyArchiveRefs, ...refundArchiveRefs, ...maintenanceArchiveRefs);
+  refs.push(...inspectionArchiveSnaps.map((s) => s.ref), ...assignmentRefs, ...requestRefs, ...entryRefs, ...linkedArchiveRefs, ...penaltyArchiveRefs, ...refundArchiveRefs, ...maintenanceArchiveRefs);
 
   const uniqueRefs = [...new Map(refs.map((r) => [r.path, r])).values()];
   for (let i = 0; i < uniqueRefs.length; i += 450) {
@@ -326,6 +340,9 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
     await batch.commit();
   }
   await archiveRef.delete();
+
+  // Last of all: the files. Only now is nothing left that could be restored and would still need them.
+  const files = await removeInspectionFiles(fileUrls);
 
   return {
     deletedPaymentArchive: !!paymentArchiveDoc,
@@ -339,5 +356,8 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
     deletedPenaltyArchives: penaltyArchiveRefs.length,
     deletedRefundArchives: refundArchiveRefs.length,
     deletedMaintenanceArchives: maintenanceArchiveRefs.length,
+    deletedInspectionArchives: inspectionArchiveSnaps.length,
+    deletedFiles: files.deleted,
+    failedFiles: files.failed,
   };
 };

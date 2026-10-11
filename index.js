@@ -29,6 +29,7 @@ import { registerTransactionLogArchiveRoutes } from "./routes/archives/transacti
 import { registerPenaltyArchiveRoutes }       from "./routes/archives/penaltyArchiveRoutes.js";
 import { registerRefundArchiveRoutes }         from "./routes/archives/refundArchiveRoutes.js"; // ← NEW
 import { registerMaintenanceArchiveRoutes }    from "./routes/archives/maintenanceArchiveRoutes.js"; // ← NEW: Maintenance Archive page
+import { registerInspectionArchiveRoutes }      from "./routes/archives/vehicleInspectionArchiveRoutes.js"; // ← NEW: Vehicle Inspection Archive page
 import { registerAuditLogsArchiveRoutes }      from "./routes/archives/auditLogsArchiveRoutes.js";
 import { registerReviewsArchiveRoutes }        from "./routes/archives/reviewsArchiveRoutes.js";
 import { registerBookingSessionArchiveRoutes } from "./routes/archives/bookingSessionArchiveRoutes.js";
@@ -91,6 +92,7 @@ registerTransactionLogArchiveRoutes(app);
 registerPenaltyArchiveRoutes(app);
 registerRefundArchiveRoutes(app);      // ← NEW
 registerMaintenanceArchiveRoutes(app);  // ← NEW
+registerInspectionArchiveRoutes(app);   // ← NEW
 registerAuditLogsArchiveRoutes(app);
 registerReviewsArchiveRoutes(app);
 registerReviewsRoutes(app); // ← NEW: live Reviews page (list + delete-to-archive)
