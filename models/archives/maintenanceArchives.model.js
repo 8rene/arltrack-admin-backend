@@ -25,12 +25,12 @@ export const MaintenanceArchive = {
   bookingID: "",              // FK -> bookings.bookingID (always set on an archived record)
   basis: "",                  // Post-Rental | Monthly | Mileage-based | Annual | Repair/Unplanned
   services: [],               // [{ serviceID, serviceName, price, ... }]
-  totalCost: 0,
+  totalCost: 0,               // services + partsAddressed prices, or overrideTotal when set
   overrideTotal: null,
   description: "",
   maintenanceDate: null,
   status: "",                 // Scheduled | Completed | Cancelled (as it was when the booking was deleted)
-  partsAddressed: [],
+  partsAddressed: [],         // [{ carPartID, conditionBefore, conditionAfter, description, price }]
   createdAt: null,
   updatedAt: null,
 };

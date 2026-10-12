@@ -40,17 +40,49 @@ export const Maintenance = {
   bookingID: null,         // FK -> bookings. Set for post-rental jobs created from a booking; null for routine maintenance
   basis: "",               // one of BASIS_OPTIONS
   services: [],            // [{ serviceID, serviceName, price }] — from SERVICE_CATALOG, or serviceID "other" with a typed serviceName
-  totalCost: 0,            // the effective total: the sum of services[].price, OR overrideTotal when one is set
-  overrideTotal: null,     // number | null — manual total that replaces the services sum (totalCost then equals this)
+  totalCost: 0,            // the effective total: sum of services[].price + sum of partsAddressed[].price, OR overrideTotal when one is set
+  overrideTotal: null,     // number | null — manual total that replaces the computed sum (totalCost then equals this)
   description: "",         // free-text notes
   maintenanceDate: null,   // Timestamp — when the work is/was scheduled
   status: "Scheduled",     // one of STATUS_OPTIONS
-  partsAddressed: [],      // [{ carID, carPartID, carPartName, tripPhase, bookingID }] — car parts this job handles
-                           //   tripPhase: "before" | "after" — which trip inspection the damaged part was recorded on;
-                           //   on completion each one is flipped back to "Good" on that booking's inspection record
+  partsAddressed: [],      // [PartAddressed] — the car parts this job handles (see the PartAddressed shape below)
   createdAt: null,         // Timestamp — when the record was created
   updatedAt: null,         // Timestamp — when the record was last changed
 };
+
+// ─────────────────────────────────────────────
+// partsAddressed[] entry — one per car part this job handles
+// ─────────────────────────────────────────────
+// Deliberately small. The part's name, type and serial number are NOT copied
+// here — carPartID points at carParts, so they are looked up from there (a
+// rename shows up everywhere; a part that was later removed from Inventory
+// just reads as "Removed part", its price/conditions/description still stand).
+//
+// Nothing here points at an inspection record (no bookingID / tripPhase).
+// The before/after-trip inspection records are history and are never edited by
+// maintenance. This entry is the maintenance side of the story instead:
+// what condition the part was in when the job was set up, and what it was
+// turned into by the job.
+//
+// Older records may still carry carID / carPartName / tripPhase / bookingID on
+// these entries — nothing reads them any more, and they are not required.
+export const PartAddressed = {
+  carPartID: "",           // FK -> carParts (must belong to this job's carID)
+  conditionBefore: "",     // one of PART_CONDITION_BEFORE — copied from the car's latest inspection when the part is added
+                           //   ("Good" when the inspection doesn't list it)
+  conditionAfter: null,    // one of PART_CONDITION_AFTER | null — null until the job is Completed
+  description: "",         // note on what was done to THIS part (the job-level description is for general notes)
+  price: 0,                // number >= 0 — this job's price for the part. Starts at the catalog price (carPartPricing)
+                           //   but is a snapshot: editing it here never changes the catalog price
+};
+
+// Condition the part was in before the job. Same labels the inspection
+// records use ("New" is never listed there, so it isn't an option here).
+export const PART_CONDITION_BEFORE = ["Good", "Damaged", "Stolen", "Missing"];
+
+// What the job did to it. Both leave the part working (shown as Good);
+// the difference is kept so the record says how it was fixed.
+export const PART_CONDITION_AFTER = ["Repaired", "Replaced"];
 
 export const BASIS_OPTIONS = [
   "Post-Rental",
