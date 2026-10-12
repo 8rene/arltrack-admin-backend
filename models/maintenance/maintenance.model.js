@@ -70,7 +70,9 @@ export const PartAddressed = {
   carPartID: "",           // FK -> carParts (must belong to this job's carID)
   conditionBefore: "",     // one of PART_CONDITION_BEFORE — copied from the car's latest inspection when the part is added
                            //   ("Good" when the inspection doesn't list it)
-  conditionAfter: null,    // one of PART_CONDITION_AFTER | null — null until the job is Completed
+  conditionAfter: null,    // one of PART_CONDITION_AFTER | null — the condition the job leaves the part in (Good | Damaged). May be chosen while the job is
+                           //   Scheduled; if still empty when the job is Completed it defaults to Good.
+                           //   Completing also sets carParts.status to that value; reopening puts it back.
   description: "",         // note on what was done to THIS part (the job-level description is for general notes)
   price: 0,                // number >= 0 — this job's price for the part. Starts at the catalog price (carPartPricing)
                            //   but is a snapshot: editing it here never changes the catalog price
@@ -80,9 +82,10 @@ export const PartAddressed = {
 // records use ("New" is never listed there, so it isn't an option here).
 export const PART_CONDITION_BEFORE = ["Good", "Damaged", "Stolen", "Missing"];
 
-// What the job did to it. Both leave the part working (shown as Good);
-// the difference is kept so the record says how it was fixed.
-export const PART_CONDITION_AFTER = ["Repaired", "Replaced"];
+// What condition the job leaves it in (see below).
+// What the job leaves the part as: "Good" (fixed) or "Damaged" (not fixed yet).
+// HOW it was fixed (repaired, replaced, ...) goes in the part's description.
+export const PART_CONDITION_AFTER = ["Good", "Damaged"];
 
 export const BASIS_OPTIONS = [
   "Post-Rental",
