@@ -32,15 +32,15 @@ export const getCarParts = async (req, res) => {
 };
 
 // POST /api/car-parts
-// Body: { carID, carPartName, carPartTypeID, serialNumber }
+// Body: { carID, carPartName, carPartTypeID, serialNumber, price? }
 export const addCarPart = async (req, res) => {
   try {
-    const { carID, carPartName, carPartTypeID, serialNumber } = req.body;
-    const data = await createCarPart({ carID, carPartName, carPartTypeID, serialNumber });
+    const { carID, carPartName, carPartTypeID, serialNumber, price } = req.body;
+    const data = await createCarPart({ carID, carPartName, carPartTypeID, serialNumber, price });
 
     createAuditLog({
       action: "create",
-      description: `Added part "${data.carPartName}" to car ${carID}.`,
+      description: `Added part "${data.carPartName}" to car ${carID}${data.price !== null ? ` (price ₱${data.price})` : ""}.`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[CAR_PARTS] Failed to write audit log:", err));
 
@@ -52,7 +52,8 @@ export const addCarPart = async (req, res) => {
 };
 
 // PUT /api/car-parts/:id
-// Body: any of { carPartName, carPartTypeID, serialNumber, status, replacedType, markReplaced }
+// Body: any of { carPartName, carPartTypeID, serialNumber, price, status, replacedType, markReplaced }
+// price: number = set/update, null or "" = remove the price, omitted = leave as is.
 // markReplaced:true is the "mark as replaced" shortcut used by Maintenance.jsx
 // (sets status: "Replaced" + replacedAt server-side).
 export const editCarPart = async (req, res) => {
@@ -62,7 +63,9 @@ export const editCarPart = async (req, res) => {
 
     const description = req.body?.markReplaced
       ? `Marked part "${data.carPartName}" as replaced (was ${req.body.replacedType || "damaged"}).`
-      : `Updated part "${data.carPartName}".`;
+      : req.body?.price !== undefined
+        ? `Updated part "${data.carPartName}" (price ${data.price !== null ? `₱${data.price}` : "removed"}).`
+        : `Updated part "${data.carPartName}".`;
 
     createAuditLog({
       action: "update",
