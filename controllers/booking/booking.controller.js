@@ -1,5 +1,5 @@
 import { getAllBookings, updateBooking, markBookingDroppedOff, settleDeposit, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
-import { deleteBookingWithCascade } from "../../services/booking/bookingDelete.service.js";
+import { deleteHandler, previewDeleteHandler } from "./bookingDelete.controller.js";
 import { adminCancelBooking, getAdminBookingRefundPreview, markBookingNoShow } from "../../services/refundRequest/refundRequest.service.js";
 
 export const listBookings = async (req, res) => {
@@ -85,35 +85,10 @@ export const returnChecklist = async (req, res) => {
   }
 };
 
-// ── DELETE (cascading archive → delete) ───────────────────────
-export const deleteBooking = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const archivedBy = req.user?.username || req.user?.uid || "admin";
-
-    const result = await deleteBookingWithCascade(id, archivedBy);
-
-    return res.status(200).json({
-      success : true,
-      message : result.message,
-      data    : {
-        bookingDocID        : result.bookingDocID,
-        bookingID           : result.bookingID,
-        bookingArchivesID   : result.bookingArchivesID,
-        paymentsArchivesID  : result.paymentsArchivesID,
-        reviewsArchivesIDs  : result.reviewsArchivesIDs,
-        reviewsArchivedCount: result.reviewsArchivedCount,
-        refundArchivesIDs   : result.refundArchivesIDs,
-        penaltyArchivesIDs  : result.penaltyArchivesIDs,
-        linkedArchived      : result.linkedArchived,
-        maintenanceArchivedCount: result.maintenanceArchivedCount,
-      },
-    });
-  } catch (error) {
-    console.error("[BOOKINGS] delete error:", error);
-    return res.status(400).json({ success: false, message: error.message });
-  }
-};
+// ── DELETE (archives the booking with everything linked to it) ───────────
+// Same handlers as the Payments / Penalties delete: see bookingDelete.controller.js (preview + guard + force).
+export const deleteBooking = deleteHandler("booking");
+export const deleteBookingPreview = previewDeleteHandler("booking");
 
 // ── Admin: refund + cancel (or cancel only) an upcoming / to-pay booking ──
 // GET  /api/bookings/:id/refund-preview            → what a refund would return

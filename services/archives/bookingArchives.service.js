@@ -190,16 +190,10 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   // rows were never touched by the archive/delete, so there's no day-doc
   // trail to recreate here anymore, just the session doc itself.
   if (sessionArchiveDoc) {
-    const {
-      bookingSessionArchivesId: _bsaId,
-      originalId: sessionOriginalId,
-      archiveDate: _sad,
-      archivedAt: _saa,
-      archivedBy: _sab,
-      restoredAt: _sar,
-      restoredBy: _sarb,
-      ...sessionOriginalData
-    } = sessionArchiveDoc.data();
+    // stripArchiveMeta, not a hand-written list: the archive stores bookingSessionArchivesID (capital D) and the old
+    // list only knew the lowercase spelling, so that id was written onto the live session.
+    const sessionOriginalId = sessionArchiveDoc.data().originalId;
+    const sessionOriginalData = stripArchiveMeta(sessionArchiveDoc.data());
 
     const sessionActiveRef = sessionOriginalId
       ? db.collection("bookingSessions").doc(sessionOriginalId)

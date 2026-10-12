@@ -8,6 +8,7 @@ import {
   postShortfallPayment,
   getAllPenaltiesHandler,
 } from "../../controllers/penalty/penalty.controller.js";
+import { deleteHandler, previewDeleteHandler } from "../../controllers/booking/bookingDelete.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -26,6 +27,10 @@ export const registerPenaltyRoutes = (app) => {
   app.get ("/api/penalties",                              verifyToken, requireRole(supervisor), getAllPenaltiesHandler);
   app.get ("/api/penalties/late-fee-preview/:bookingID", verifyToken, requireRole(staff), getLateFeePreview);
   app.get ("/api/penalties/booking/:bookingID",           verifyToken, requireRole(staff), getBookingPenalties);
+
+  // Owner / Admin only. Same rule as payments: booking exists -> the whole booking is archived; booking gone -> just this penalty.
+  app.get   ("/api/penalties/:penaltyID/delete-preview", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), previewDeleteHandler("penalty", "penaltyID"));
+  app.delete("/api/penalties/:penaltyID",                verifyToken, requireRole([roles.ADMIN, roles.OWNER]), deleteHandler("penalty", "penaltyID"));
 
   app.post ("/api/penalties",                   verifyToken, requireRole(staff),      postCreatePenalty);
   app.patch("/api/penalties/:penaltyID/status", verifyToken, requireRole(supervisor), patchVoidOrWaivePenalty);

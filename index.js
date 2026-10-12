@@ -10,6 +10,7 @@ import { registerSessionLogsRoutes }         from "./routes/sessionLogs/sessionL
 import { registerGpsRoutes }                 from "./routes/gps/gps.routes.js";
 import { registerReportsRoutes }             from "./routes/reports/reports.routes.js"; //
 import { registerPaymentsRoutes }          from "./routes/payments/payments.routes.js";//
+import { registerPaymentEntriesRoutes }    from "./routes/paymentEntries/paymentEntries.routes.js";
 import { registerTransactionLogsRoutes }     from "./routes/transactionLogs/transactionLogs.routes.js";
 import { registerInventoryRoutes }           from "./routes/inventory/inventory.routes.js";
 import { registerVehicleDocsRoutes }         from "./routes/vehicleDocumentation/vehicleDocumentation.routes.js";
@@ -78,6 +79,7 @@ registerAuditLogsRoutes(app);
 registerSessionLogsRoutes(app);
 registerTransactionLogsRoutes(app);
 registerPaymentsRoutes(app);
+registerPaymentEntriesRoutes(app);
 registerReportsRoutes(app);
 registerGpsRoutes(app);
 registerLocationRoutes(app);

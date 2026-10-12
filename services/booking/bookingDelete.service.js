@@ -51,6 +51,7 @@ import {
   writeInspectionArchive,
   inspectionLiveRefs,
 } from "../archives/vehicleInspectionArchives.service.js";
+import { evaluateGuards, DeleteBlockedError, mayForce } from "./deleteGuard.js";
 
 // A Firestore batch holds at most 500 writes; stay well under it.
 const BATCH_LIMIT = 450;
@@ -312,9 +313,12 @@ const archivePenalty = async (penaltyDocID, penaltyData, archivedBy = "admin") =
  *
  * @param {string} bookingDocID  - Firestore document ID inside "bookings"
  * @param {string} [archivedBy] - Who triggered the deletion (for audit trail)
+ * @param {{force?: boolean, canForce?: boolean}} [opts] - deleteGuard.js throws DeleteBlockedError while a trip, refund,
+ *        unpaid penalty or held deposit is still in flight. Only a caller allowed to (canForce: Owner / Admin) AND
+ *        asking to (force) gets past it. Nothing has been written at that point.
  * @returns {object} Summary of what was archived / deleted
  */
-export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin") => {
+export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin", opts = {}) => {
   // ── 1. Fetch source documents (fail fast if booking missing) ──────────────
   const { docRef: bookingRef, data: bookingData } = await fetchBooking(bookingDocID);
 
@@ -353,6 +357,17 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     `maintenance: ${maintenanceRows.length} | ` +
     `inspection: ${inspectionRows.length}`
   );
+
+  // ── 1b. Delete guard: refuse while a trip / refund / penalty / held deposit is still in flight ─────────
+  const guard = evaluateGuards({
+    booking: bookingData,
+    payments: paymentResult ? [paymentResult.data] : [],
+    refunds: refundRequestResults.map((r) => ({ ...r.data, id: r.docRef.id })),
+    penalties: penaltyResults.map((r) => ({ ...r.data, id: r.docRef.id })),
+  });
+  if (guard.blockers.length && !mayForce(opts)) {
+    throw new DeleteBlockedError(guard.blockers[0].message, { ...guard, canForce: Boolean(opts.canForce) });
+  }
 
   // ── 2. Archive phase (must all succeed before any delete) ─────────────────
   let bookingArchivesID;
@@ -505,6 +520,9 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     linkedArchived         : linkedArchivedCounts,
     maintenanceArchivedCount,
     inspectionArchivedCount,
+    mode                  : "bundle",
+    warnings              : guard.warnings,
+    forced                : guard.blockers.length > 0,
     penaltiesArchivedCount : penaltyResults.length,
     reviewsArchivedCount : reviewResults.length,
     sessionArchived       : Boolean(sessionResult),
@@ -520,5 +538,52 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
       `${maintenanceArchivedCount} maintenance record(s), ` +
       `${inspectionArchivedCount} vehicle inspection record(s), ` +
       `${penaltyResults.length} penalt${penaltyResults.length === 1 ? "y" : "ies"} archived and deleted successfully.`,
+  };
+};
+
+/**
+ * previewBookingDelete -- the dry run behind the "are you sure?" dialog. Collects exactly what
+ * deleteBookingWithCascade would archive and runs the same guard. Writes nothing.
+ */
+export const previewBookingDelete = async (bookingDocID) => {
+  const { data: bookingData } = await fetchBooking(bookingDocID);
+  const bookingID = bookingData.bookingID ?? bookingDocID;
+
+  const paymentResult = await fetchPayment(bookingID);
+  const reviewResults = await fetchReviews(bookingID);
+  const sessionResult = await fetchBookingSession(bookingID);
+  const refundRequestResults = await fetchRefundRequests(bookingID);
+  const penaltyResults = await fetchPenalties(bookingID);
+  const linkedRows = await collectLinkedForBooking({
+    bookingKeys: [bookingID, bookingDocID],
+    paymentIDs: paymentResult ? [paymentResult.data.paymentID ?? paymentResult.docRef.id] : [],
+  });
+  const maintenanceRows = await collectMaintenanceForBooking({ bookingKeys: [bookingID, bookingDocID] });
+  const inspectionRows = await collectInspectionForBooking({ bookingKeys: [bookingID, bookingDocID] });
+
+  const guard = evaluateGuards({
+    booking: bookingData,
+    payments: paymentResult ? [paymentResult.data] : [],
+    refunds: refundRequestResults.map((r) => ({ ...r.data, id: r.docRef.id })),
+    penalties: penaltyResults.map((r) => ({ ...r.data, id: r.docRef.id })),
+  });
+
+  return {
+    mode: "bundle",
+    booking: { id: bookingDocID, bookingID, status: bookingData.status ?? null },
+    counts: {
+      booking: 1,
+      payment: paymentResult ? 1 : 0,
+      refund: refundRequestResults.length,
+      penalty: penaltyResults.length,
+      review: reviewResults.length,
+      session: sessionResult ? 1 : 0,
+      entry: linkedRows.paymentEntries.length,
+      assignment: linkedRows.driverAssignments.length,
+      cancellation: linkedRows.cancellationRequests.length,
+      maintenance: maintenanceRows.length,
+      inspection: inspectionRows.length,
+    },
+    ...guard,
   };
 };

@@ -1,4 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
+import { stripArchiveMeta } from "./archiveMeta.js";
 import admin from "firebase-admin";
 import { queryRecentByStart, sessionStartedAt } from "../../utils/date/sessionDates.js";
 
@@ -75,16 +76,9 @@ export const restoreBookingSessionArchive = async (bookingSessionArchivesId, res
   const archiveDoc = await archiveRef.get();
   if (!archiveDoc.exists) throw new Error("Archived booking session not found.");
 
-  const {
-    bookingSessionArchivesId: _skip,
-    originalId,
-    archiveDate: _ad,
-    archivedAt: _aa,
-    archivedBy: _ab,
-    restoredAt: _ra,
-    restoredBy: _rb,
-    ...originalData
-  } = archiveDoc.data();
+  // same fix as in bookingArchives.service.js: the archive stores bookingSessionArchivesID (capital D)
+  const originalId = archiveDoc.data().originalId;
+  const originalData = stripArchiveMeta(archiveDoc.data());
 
   // ── 1. Restore the session doc ──
   const sessionActiveRef = originalId

@@ -1,4 +1,4 @@
-import { listBookings, editBooking, deleteBooking, markDroppedOff, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
+import { listBookings, editBooking, deleteBooking, deleteBookingPreview, markDroppedOff, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -23,5 +23,7 @@ export const registerBookingRoutes = (app) => {
   app.post("/api/bookings/:id/refund-cancel", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAndCancel);
   // No-show after the pickup time: deposit kept, everything else refunded (see refundRequest.service.js → markBookingNoShow).
   app.post("/api/bookings/:id/no-show", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), markNoShow);
+  // Supervisor, Admin, Owner. Preview first (what goes + what is in the way); only Owner/Admin can force past blockers.
+  app.get("/api/bookings/:id/delete-preview", verifyToken, requireRole(allowed), deleteBookingPreview);
   app.delete("/api/bookings/:id",verifyToken, requireRole(allowed), deleteBooking);
 };

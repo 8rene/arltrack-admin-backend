@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { loadLiveBookingKeys, countsAsRevenue } from "../payments/revenue.util.js";
 import { resolveVehicleName } from "../booking/booking.service.js";
 
 const parsePaymentTotal = (data) => {
@@ -37,8 +38,9 @@ export const getRevenueToday = async () => {
   const start = toTimestamp(new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
   const end   = toTimestamp(new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999));
   const snap = await db.collection("payments").where("createdAt", ">=", start).where("createdAt", "<=", end).get();
+  const live = await loadLiveBookingKeys(db);
   let total = 0;
-  snap.forEach((doc) => { total += parsePaymentTotal(doc.data()); });
+  snap.forEach((doc) => { const d = doc.data(); if (countsAsRevenue(d, live)) total += parsePaymentTotal(d); });
   return total;
 };
 
@@ -47,8 +49,9 @@ export const getMonthlyRevenue = async () => {
   const start = toTimestamp(new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0));
   const end   = toTimestamp(new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999));
   const snap = await db.collection("payments").where("createdAt", ">=", start).where("createdAt", "<=", end).get();
+  const live = await loadLiveBookingKeys(db);
   let total = 0;
-  snap.forEach((doc) => { total += parsePaymentTotal(doc.data()); });
+  snap.forEach((doc) => { const d = doc.data(); if (countsAsRevenue(d, live)) total += parsePaymentTotal(d); });
   return total;
 };
 
@@ -57,8 +60,9 @@ export const getYearlyRevenue = async () => {
   const start = toTimestamp(new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0));
   const end   = toTimestamp(new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999));
   const snap = await db.collection("payments").where("createdAt", ">=", start).where("createdAt", "<=", end).get();
+  const live = await loadLiveBookingKeys(db);
   let total = 0;
-  snap.forEach((doc) => { total += parsePaymentTotal(doc.data()); });
+  snap.forEach((doc) => { const d = doc.data(); if (countsAsRevenue(d, live)) total += parsePaymentTotal(d); });
   return total;
 };
 
