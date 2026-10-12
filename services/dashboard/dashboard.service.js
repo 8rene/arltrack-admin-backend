@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { loadLiveBookingKeys, countsAsRevenue } from "../payments/revenue.util.js";
+import { loadLiveBookingKeys, countsAsRevenue } from "../payments/paymentHelpers.js";
 import { resolveVehicleName } from "../booking/booking.service.js";
 
 const parsePaymentTotal = (data) => {

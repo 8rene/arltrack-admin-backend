@@ -1,4 +1,4 @@
-import { listEntries } from "../../services/paymentEntries/paymentEntries.view.service.js";
+import { listEntries } from "../../services/paymentEntries/paymentEntries.service.js";
 
 // GET /api/payment-entries?paymentID=… | penaltyID=… | refundRequestID=… | bookingID=…   (exactly one)
 // Works for live, archived and orphaned records alike -- it reads the money rows, not the parent document.

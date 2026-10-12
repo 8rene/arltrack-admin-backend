@@ -51,7 +51,72 @@ import {
   writeInspectionArchive,
   inspectionLiveRefs,
 } from "../archives/vehicleInspectionArchives.service.js";
-import { evaluateGuards, DeleteBlockedError, mayForce } from "./deleteGuard.js";
+// ═══ DELETE GUARD ═══════════════════════════════════════════════════════════════════════════════════════════
+// What is still "in flight" on a booking (or on one payment / penalty), so a delete does not silently bury money.
+//   blockers  stop the delete. Owner / Admin can force past them (the records are archived, not destroyed);
+//             a Supervisor never can.
+//   warnings  are shown in the confirm dialog but never stop anything.
+const low = (v) => String(v ?? "").trim().toLowerCase();
+const num = (v) => Number(v) || 0;
+const peso = (n) => `\u20b1${num(n).toLocaleString("en-PH")}`;
+
+export const evaluateGuards = ({ booking = null, payments = [], refunds = [], penalties = [] } = {}) => {
+  const blockers = [];
+  const warnings = [];
+  const bookingStatus = low(booking?.status);
+
+  if (bookingStatus === "ongoing") {
+    blockers.push({ code: "trip_in_progress", message: "This booking is ongoing (trip in progress)." });
+  }
+
+  for (const r of refunds) {
+    if (["pending", "approved"].includes(low(r.status))) {
+      blockers.push({ code: "refund_open", message: `A refund request (${r.status}, ${peso(r.amount)}) is still open.`, ref: r.refundRequestID || r.id });
+    }
+  }
+
+  for (const p of payments) {
+    // discount spill-over: cash owed back to the customer that has not been handed back yet
+    if (num(p.refundDue) > 0 && !p.refundIssued) {
+      blockers.push({ code: "refund_due", message: `${peso(p.refundDue)} is owed back to the customer and has not been marked as handed back.`, ref: p.paymentID || p.id });
+    }
+    // the trip is over but the security deposit is still held: the customer is owed it (or it must be settled)
+    if (low(p.depositStatus) === "held" && bookingStatus === "completed") {
+      blockers.push({ code: "deposit_held", message: `The ${peso(p.securityDeposit)} security deposit is still held — settle or return it first.`, ref: p.paymentID || p.id });
+    }
+  }
+
+  for (const pn of penalties) {
+    if (low(pn.status) === "confirmed" && num(pn.paidAmount) < num(pn.amount)) {
+      blockers.push({ code: "penalty_unpaid", message: `A confirmed penalty still has ${peso(num(pn.amount) - num(pn.paidAmount))} unpaid.`, ref: pn.penaltyID || pn.id });
+    }
+  }
+
+  const paid = payments.filter((p) => ["paid", "approved"].includes(low(p.status)));
+  if (booking && paid.length && bookingStatus === "upcoming") {
+    warnings.push({ code: "paid_upcoming", message: "This booking is upcoming and already paid: archiving it removes a live reservation." });
+  }
+  if (booking && paid.length && bookingStatus === "cancelled" && !refunds.length) {
+    warnings.push({ code: "paid_cancelled_no_refund", message: "The booking was cancelled, the customer paid, and no refund was ever opened (the money was kept)." });
+  }
+  if (booking && bookingStatus === "cancelled" && payments.some((p) => low(p.depositStatus) === "held")) {
+    warnings.push({ code: "deposit_held_cancelled", message: "The booking was cancelled but a security deposit is still marked as held." });
+  }
+  return { blockers, warnings };
+};
+
+export class DeleteBlockedError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "DeleteBlockedError";
+    this.code = "BLOCKED";
+    this.details = details;   // { blockers, warnings, canForce }
+  }
+}
+
+/** True only when the caller is allowed to force (canForce: Owner / Admin) AND asked to (force). */
+const mayForce = ({ force = false, canForce = false } = {}) => Boolean(force && canForce);
+
 
 // A Firestore batch holds at most 500 writes; stay well under it.
 const BATCH_LIMIT = 450;
@@ -313,7 +378,7 @@ const archivePenalty = async (penaltyDocID, penaltyData, archivedBy = "admin") =
  *
  * @param {string} bookingDocID  - Firestore document ID inside "bookings"
  * @param {string} [archivedBy] - Who triggered the deletion (for audit trail)
- * @param {{force?: boolean, canForce?: boolean}} [opts] - deleteGuard.js throws DeleteBlockedError while a trip, refund,
+ * @param {{force?: boolean, canForce?: boolean}} [opts] - the delete guard (above) throws DeleteBlockedError while a trip, refund,
  *        unpaid penalty or held deposit is still in flight. Only a caller allowed to (canForce: Owner / Admin) AND
  *        asking to (force) gets past it. Nothing has been written at that point.
  * @returns {object} Summary of what was archived / deleted
@@ -585,5 +650,81 @@ export const previewBookingDelete = async (bookingDocID) => {
       inspection: inspectionRows.length,
     },
     ...guard,
+  };
+};
+
+
+// ═══ DELETE A SINGLE PAYMENT OR PENALTY (Owner / Admin only -- the route enforces that) ═══════════════════════
+//   booking is live  -> the WHOLE booking goes with it (deleteBookingWithCascade): a payment or penalty never leaves its
+//                       booking behind half-deleted.
+//   booking is gone  -> nothing else exists to take along, so just this one record is archived (one atomic batch:
+//                       archive copy + live delete). Its money rows (paymentEntries) stay where they are.
+// "Delete" always means ARCHIVE here; permanent deletion only happens on the archive pages.
+const ITEM_KINDS = {
+  payment: { live: "payments",  archive: "paymentsArchives", archiveIdField: "paymentsArchivesID", ownIdField: "paymentID" },
+  penalty: { live: "penalties", archive: "penaltyArchives",  archiveIdField: "penaltyArchivesId",  ownIdField: "penaltyID" },
+};
+
+const loadItem = async (kind, id) => {
+  const snap = await db.collection(ITEM_KINDS[kind].live).doc(id).get();
+  if (!snap.exists) throw new Error(`${kind === "payment" ? "Payment" : "Penalty"} not found: ${id}`);
+  return { ref: snap.ref, data: snap.data() };
+};
+
+/** The live booking this record belongs to, or null (hard-deleted, or already archived). */
+const findLiveBooking = async (bookingID) => {
+  if (!bookingID) return null;
+  const direct = await db.collection("bookings").doc(String(bookingID)).get();
+  if (direct.exists) return { id: direct.id };
+  const q = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+  return q.empty ? null : { id: q.docs[0].id };
+};
+
+const aloneGuards = async (kind, id, data) => {
+  if (kind === "penalty") return evaluateGuards({ penalties: [{ ...data, id }] });
+  const refunds = (await db.collection("refundRequests").where("paymentID", "==", data.paymentID || id).get())
+    .docs.map((d) => ({ ...d.data(), id: d.id }));
+  return evaluateGuards({ payments: [data], refunds });
+};
+
+/** The dry run for the Payments / Penalties delete dialog. Writes nothing. */
+export const previewItemDelete = async (kind, id) => {
+  const item = await loadItem(kind, id);
+  const booking = await findLiveBooking(item.data.bookingID);
+  if (booking) return { ...(await previewBookingDelete(booking.id)), target: { kind, id } };
+  const guards = await aloneGuards(kind, id, item.data);
+  return {
+    mode: "alone", target: { kind, id }, booking: null, counts: { [kind]: 1 }, ...guards,
+    note: "Its booking no longer exists in the live bookings, so only this record is removed.",
+  };
+};
+
+export const deleteItem = async (kind, id, archivedBy = "admin", opts = {}) => {
+  const item = await loadItem(kind, id);
+  const booking = await findLiveBooking(item.data.bookingID);
+  if (booking) return deleteBookingWithCascade(booking.id, archivedBy, opts);
+
+  const guards = await aloneGuards(kind, id, item.data);
+  if (guards.blockers.length && !mayForce(opts)) {
+    throw new DeleteBlockedError(guards.blockers[0].message, { ...guards, canForce: Boolean(opts.canForce) });
+  }
+  const K = ITEM_KINDS[kind];
+  const archiveRef = db.collection(K.archive).doc();
+  const batch = db.batch();
+  batch.set(archiveRef, {
+    [K.archiveIdField]: archiveRef.id,
+    [K.ownIdField]: item.data[K.ownIdField] ?? id,
+    originalId: id,
+    archiveDate: admin.firestore.FieldValue.serverTimestamp(),
+    archivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    archivedBy,
+    ...item.data,
+  });
+  batch.delete(item.ref);
+  await batch.commit();
+  return {
+    success: true, mode: "alone", kind, archiveID: archiveRef.id, bookingID: item.data.bookingID ?? null,
+    counts: { [kind]: 1 }, warnings: guards.warnings, forced: guards.blockers.length > 0,
+    message: `Its booking no longer exists, so only this ${kind} was archived.`,
   };
 };

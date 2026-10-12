@@ -66,7 +66,7 @@ export const Payment = {
 
   // The security deposit held for the booking. It is charged inside `amount` with the first payment, so the
   // first payment's entry row already holds how it was paid. Flat fields (read them through getDepositView(),
-  // services/payments/depositView.js -- it also understands the old nested `deposit` object until
+  // services/payments/paymentHelpers.js -- it also understands the old nested `deposit` object until
   // scripts/migrate-deposit-flat.js has run):
   //   securityDeposit      (above  ) the deposit amount
   depositStatus: "",            // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"

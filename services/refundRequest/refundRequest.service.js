@@ -12,7 +12,7 @@ import { resolveCurrentDriverID, completeActiveAssignment } from "../driverAssig
 import { recordDirectCancellation, inferCancelledBy, getRequestsByBookingKeys, getCancellationInfoForBooking, recordRefundRejection } from "../cancellationRequests/cancellationRequests.service.js";
 import { writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { normalizeMethod } from "../paymentEntries/paymentEntries.mapper.js";
-import { getDepositView } from "../payments/depositView.js";
+import { getDepositView } from "../payments/paymentHelpers.js";
 
 // A refund's parts[] / manualRefund / unrefundable[] live ONLY in paymentEntries ("out" rows) now. Readers get
 // the old shape back through hydrate (it only fills what the request document does not carry).

@@ -10,7 +10,7 @@ import { computeAmounts, derivePaymentStage } from "../../services/payments/paym
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
-import { getDepositView } from "../payments/depositView.js";
+import { getDepositView } from "../payments/paymentHelpers.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 import {
   bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,

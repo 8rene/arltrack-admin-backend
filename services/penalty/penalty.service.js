@@ -13,7 +13,7 @@ import { getSessionByBookingID } from "../booking/bookingSession.service.js";
 import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 import { ENTRY_COLLECTION, ENTRY_METHODS } from "../../models/paymentEntries/paymentEntry.model.js";
 import { buildPenaltyPaymentEntry } from "../paymentEntries/paymentEntries.mapper.js";
-import { getDepositView } from "../payments/depositView.js";
+import { getDepositView } from "../payments/paymentHelpers.js";
 import { hydratePenalties } from "../paymentEntries/paymentEntries.service.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
