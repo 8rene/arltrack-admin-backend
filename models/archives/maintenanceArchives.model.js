@@ -29,7 +29,6 @@ export const MaintenanceArchive = {
   overrideTotal: null,
   description: "",
   maintenanceDate: null,
-  nextMaintenanceDate: null,
   status: "",                 // Scheduled | Completed | Cancelled (as it was when the booking was deleted)
   partsAddressed: [],
   createdAt: null,

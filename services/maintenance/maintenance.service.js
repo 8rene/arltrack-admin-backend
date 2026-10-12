@@ -108,10 +108,10 @@ const findBookingConflict = async (carID, dateVal) => {
   return null;
 };
 
-// Runs the conflict check against both dates and throws a descriptive
+// Runs the conflict check against the maintenance date and throws a descriptive
 // error naming the conflicting booking, so the save is blocked with a
 // clear reason rather than silently failing.
-const assertNoBookingConflict = async (carID, maintenanceDate, nextMaintenanceDate, status) => {
+const assertNoBookingConflict = async (carID, maintenanceDate, status) => {
   if (status === "Cancelled") return; // a cancelled record doesn't need the car
 
   const maintConflict = await findBookingConflict(carID, maintenanceDate);
@@ -121,17 +121,6 @@ const assertNoBookingConflict = async (carID, maintenanceDate, nextMaintenanceDa
       `from ${fmtDate(toJSDate(maintConflict.startDateTime))} to ${fmtDate(toJSDate(maintConflict.endDateTime))} ` +
       `that overlaps the maintenance date.`
     );
-  }
-
-  if (nextMaintenanceDate) {
-    const nextConflict = await findBookingConflict(carID, nextMaintenanceDate);
-    if (nextConflict) {
-      throw new Error(
-        `Cannot save: this car has an active booking (${nextConflict.bookingID || nextConflict.id}) ` +
-        `from ${fmtDate(toJSDate(nextConflict.startDateTime))} to ${fmtDate(toJSDate(nextConflict.endDateTime))} ` +
-        `that overlaps the next maintenance date.`
-      );
-    }
   }
 };
 
@@ -227,7 +216,7 @@ export const listMaintenanceForBooking = async (bookingID) => {
 // actor: { role } of whoever is creating it (the controller passes req.user.role).
 // A Supervisor creating a record notifies the Owner(s); nobody else triggers it.
 export const createMaintenance = async (payload, editedBy = null, actor = {}) => {
-  const { carID, bookingID = null, basis, services = [], overrideTotal, description = "", maintenanceDate = null, nextMaintenanceDate = null, status, partsAddressed = [] } = payload;
+  const { carID, bookingID = null, basis, services = [], overrideTotal, description = "", maintenanceDate = null, status, partsAddressed = [] } = payload;
 
   if (!carID) throw new Error("carID is required.");
   if (!BASIS_OPTIONS.includes(basis)) throw new Error(`Invalid basis. Must be one of: ${BASIS_OPTIONS.join(", ")}`);
@@ -238,7 +227,7 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
   const carDoc = await db.collection("cars").doc(carID).get();
   if (!carDoc.exists) throw new Error("Car not found.");
 
-  await assertNoBookingConflict(carID, maintenanceDate, nextMaintenanceDate, finalStatus);
+  await assertNoBookingConflict(carID, maintenanceDate, finalStatus);
 
   const normalizedServices = normalizeServices(services);
   const totalCost = computeTotal(normalizedServices, overrideTotal);
@@ -260,7 +249,6 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
     overrideTotal: overrideTotal ? Number(overrideTotal) : null,
     description,
     maintenanceDate: toFirestoreDate(maintenanceDate),
-    nextMaintenanceDate: toFirestoreDate(nextMaintenanceDate),
     status: finalStatus,
     // Which damaged/stolen/missing parts (from inventoryBeforeTrip/
     // inventoryAfterTrip's damageParts) this job is meant to fix. Not
@@ -359,15 +347,14 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
   const doc = await ref.get();
   if (!doc.exists) throw new Error("Maintenance record not found.");
 
-  const { carID, basis, services, overrideTotal, description, maintenanceDate, nextMaintenanceDate, status, partsAddressed } = payload;
+  const { carID, basis, services, overrideTotal, description, maintenanceDate, status, partsAddressed } = payload;
   const existing = doc.data();
 
   const effectiveCarID   = carID !== undefined ? carID : existing.carID;
   const effectiveMaintDate = maintenanceDate !== undefined ? maintenanceDate : existing.maintenanceDate;
-  const effectiveNextDate  = nextMaintenanceDate !== undefined ? nextMaintenanceDate : existing.nextMaintenanceDate;
   const effectiveStatus    = status !== undefined ? status : existing.status;
 
-  await assertNoBookingConflict(effectiveCarID, effectiveMaintDate, effectiveNextDate, effectiveStatus);
+  await assertNoBookingConflict(effectiveCarID, effectiveMaintDate, effectiveStatus);
 
   const update = { updatedAt: timestamp() };
 
@@ -385,7 +372,6 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
 
   if (description !== undefined) update.description = description;
   if (maintenanceDate !== undefined) update.maintenanceDate = toFirestoreDate(maintenanceDate);
-  if (nextMaintenanceDate !== undefined) update.nextMaintenanceDate = toFirestoreDate(nextMaintenanceDate);
   if (partsAddressed !== undefined) update.partsAddressed = partsAddressed;
 
   // Recompute total whenever services or overrideTotal change

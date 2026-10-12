@@ -21,6 +21,37 @@
 // customer-caused charge and its actual repair cost stay traceable to
 // each other without being merged into one number.
 
+// ─────────────────────────────────────────────
+// maintenance collection schema
+// ─────────────────────────────────────────────
+// Documents the shape of one maintenance/{id} document (nothing reads this
+// object at runtime — maintenance.service.js is what actually writes it, the
+// same way models/inventory and models/pricingSettings work). The archive
+// copy of a booking-linked record (models/archives/maintenanceArchives.model.js)
+// has these same columns plus its own bookkeeping — keep the two in step.
+//
+// There is deliberately NO "next maintenance date" column. A job is just one
+// dated piece of work; "when is the next one" is decided by scheduling a new
+// maintenance record, not stored on the old one. (Older documents may still
+// carry a leftover nextMaintenanceDate — nothing reads or writes it any more.)
+export const Maintenance = {
+  maintenanceID: "",       // Firestore doc ID (createMaintenance mirrors the id onto the doc itself)
+  carID: "",               // FK -> cars
+  bookingID: null,         // FK -> bookings. Set for post-rental jobs created from a booking; null for routine maintenance
+  basis: "",               // one of BASIS_OPTIONS
+  services: [],            // [{ serviceID, serviceName, price }] — from SERVICE_CATALOG, or serviceID "other" with a typed serviceName
+  totalCost: 0,            // the effective total: the sum of services[].price, OR overrideTotal when one is set
+  overrideTotal: null,     // number | null — manual total that replaces the services sum (totalCost then equals this)
+  description: "",         // free-text notes
+  maintenanceDate: null,   // Timestamp — when the work is/was scheduled
+  status: "Scheduled",     // one of STATUS_OPTIONS
+  partsAddressed: [],      // [{ carID, carPartID, carPartName, tripPhase, bookingID }] — car parts this job handles
+                           //   tripPhase: "before" | "after" — which trip inspection the damaged part was recorded on;
+                           //   on completion each one is flipped back to "Good" on that booking's inspection record
+  createdAt: null,         // Timestamp — when the record was created
+  updatedAt: null,         // Timestamp — when the record was last changed
+};
+
 export const BASIS_OPTIONS = [
   "Post-Rental",
   "Monthly",
