@@ -44,6 +44,9 @@ import { registerDriverDispatchRoutes }        from "./routes/driverDispatch/dri
 import { registerSystemSettingsRoutes }       from "./routes/systemSettings/systemSettings.routes.js"; // ← NEW
 import { registerLocationOptionsRoutes }       from "./routes/locationOptions/locationOptions.routes.js"; // ← NEW
 import { registerPenaltyRoutes }               from "./routes/penalty/penalty.routes.js"; // ← NEW
+import { registerHolidaysRoutes }              from "./routes/holidays/holidays.routes.js"; // ← NEW
+import { registerCodingRulesRoutes }           from "./routes/codingRules/codingRules.routes.js"; // ← NEW
+import { registerAddressesRoutes }             from "./routes/addresses/addresses.routes.js"; // ← NEW
 
 
 const app = express();
@@ -108,6 +111,9 @@ registerDriverDispatchRoutes(app);    // ← NEW
 registerSystemSettingsRoutes(app);   // ← NEW
 registerLocationOptionsRoutes(app);   // ← NEW
 registerPenaltyRoutes(app);           // ← NEW
+registerHolidaysRoutes(app);          // ← NEW
+registerCodingRulesRoutes(app);       // ← NEW
+registerAddressesRoutes(app);         // ← NEW
 
 const PORT = process.env.PORT || 5000;
 
