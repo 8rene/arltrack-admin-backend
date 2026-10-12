@@ -121,7 +121,7 @@ export const previewLateFeeForBooking = async (bookingID) => {
   const ratePerHour   = Number(settings.lateFeeRatePerHour ?? 100);
 
   const session = await getSessionByBookingID(bookingID);
-  const actualReturnAt = session?.data?.droppedOffTime || booking.data.returnedAt;
+  const actualReturnAt = session?.data?.droppedOffTime || booking.data.completedAt;
 
   const { lateMinutes, billableHours, computedAmount } = computeLateFee({
     scheduledEndAt: booking.data.endDateTime,

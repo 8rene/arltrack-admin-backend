@@ -470,7 +470,7 @@ export const getMyTripHistory = async (driverID) => {
 
 // Shared shaping for the two driver-facing lists above — same vehicle/
 // customer resolution as getDispatchBoard, plus each booking's session
-// (for startedAt/droppedOffTime display) plus the booking's own returnedAt.
+// (for startedAt/droppedOffTime display) plus the booking's own completedAt.
 const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
@@ -521,7 +521,7 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         startedAt:            toJSDate(sessionStartedAt(sessions[i]?.data)),
         droppedOffTime:       toJSDate(sessions[i]?.data?.droppedOffTime),
         // ACTUAL return — stamped on the booking when Return is confirmed.
-        returnedAt:           toJSDate(b.returnedAt),
+        completedAt:           toJSDate(b.completedAt),
         // Set by the customer backend at booking time (see bookingsession.model.js).
         // Null when a session hasn't been created yet / doesn't have coords geocoded.
         pickupLocation:       sessions[i]?.data?.pickupLocation || null,

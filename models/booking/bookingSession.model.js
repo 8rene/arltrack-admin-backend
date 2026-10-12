@@ -48,12 +48,12 @@ export const BookingSession = {
 
   // Admin-side addition, set for EVERY booking (self-drive and chauffeur
   // alike) — the moment the vehicle itself is physically back on the lot,
-  // as distinct from the booking's returnedAt (stamped once Return is confirmed).
+  // as distinct from the booking's completedAt (stamped once Return is confirmed).
   // Whoever has custody of the car marks this: the assigned driver on a
   // chauffeur booking, or a supervisor/staff member on a self-drive one
   // (there's no driver to do it on those). This is the single moment used
   // for the late-fee calculation for every booking type — never
-  // auto-filled/backfilled from returnedAt, and never editable after the
+  // auto-filled/backfilled from completedAt, and never editable after the
   // fact: if it's null, nobody tapped "Dropped Off", full stop. That's a
   // deliberate choice — a guessed or backfilled timestamp here would look
   // just as authoritative as a real one with no way to tell them apart,

@@ -596,7 +596,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     const checklist = await getPhaseChecklist(bID, "after");
     if (!checklist.complete) {
       throw new Error(
-        `Cannot mark returned: the after-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
+        `cannot mark completed: the after-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
         "A supervisor needs to complete it in Vehicle Inspections first."
       );
     }
@@ -613,7 +613,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     const session = await getSessionByBookingID(bID);
     if (!session?.data?.droppedOffTime) {
       throw new Error(
-        "Cannot mark returned: the vehicle hasn't been marked dropped off yet. " +
+        "cannot mark completed: the vehicle hasn't been marked dropped off yet. " +
         "Mark it dropped off first, then complete the after-trip inspection."
       );
     }
@@ -625,7 +625,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     const stillAssigned = await getDevicesStillAssigned(bookingData.carID);
     if (stillAssigned.length > 0) {
       throw new Error(
-        `Cannot mark returned: GPS device ${describeAssignedDevices(stillAssigned)} is still assigned to this car. ` +
+        `cannot mark completed: GPS device ${describeAssignedDevices(stillAssigned)} is still assigned to this car. ` +
         "Unassign it on the GPS Setup page first."
       );
     }
@@ -642,7 +642,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     const pos = await getDepositPosition(bookingID || docID);
     if (pos.deposit?.status === "Held" && !pos.alreadySettled) {
       throw new Error(
-        "Cannot mark returned: the security deposit hasn't been settled yet. " +
+        "cannot mark completed: the security deposit hasn't been settled yet. " +
         "Settle it first (deduct any penalties and confirm the deposit handed back)."
       );
     }
@@ -657,7 +657,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
   // dropped-off for a while going through inspection/penalty/device-check
   // before Return is actually confirmed.
   if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    filtered.returnedAt = admin.firestore.FieldValue.serverTimestamp();
+    filtered.completedAt = admin.firestore.FieldValue.serverTimestamp();
   }
 
   filtered.updatedAt = admin.firestore.FieldValue.serverTimestamp();
@@ -773,7 +773,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
       action: "update",
       userID: performedBy,
       bookingID: bID,
-      description: `Marked returned on booking ${bID}.`,
+      description: `Marked completed on booking ${bID}.`,
     }).catch((err) => console.error("[AuditLog] Return log failed:", err.message));
     try {
       const bID = bookingID || docID;
