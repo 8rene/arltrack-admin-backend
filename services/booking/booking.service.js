@@ -587,7 +587,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
-  // ── Vehicle inspection validation: cannot mark completed/returned until
+  // ── Vehicle inspection validation: cannot mark completed until
   // the after-trip inspection is complete (photos AND parts condition).
   // Mirrors the before-trip guard above so Return can't skip the
   // inspection the same way Pickup can't. ──
@@ -596,13 +596,13 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     const checklist = await getPhaseChecklist(bID, "after");
     if (!checklist.complete) {
       throw new Error(
-        `cannot mark completed: the after-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
+        `Cannot mark complete: the after-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
         "A supervisor needs to complete it in Vehicle Inspections first."
       );
     }
   }
 
-  // ── Vehicle drop-off validation: cannot mark completed/returned until
+  // ── Vehicle drop-off validation: cannot mark completed until
   // someone (the assigned driver, or a supervisor/staff for a no-driver
   // booking) has marked the vehicle itself physically dropped off. This is
   // the checkpoint that unblocks the after-trip inspection in the first
@@ -613,19 +613,19 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     const session = await getSessionByBookingID(bID);
     if (!session?.data?.droppedOffTime) {
       throw new Error(
-        "cannot mark completed: the vehicle hasn't been marked dropped off yet. " +
+        "Cannot mark complete: the vehicle hasn't been marked dropped off yet. " +
         "Mark it dropped off first, then complete the after-trip inspection."
       );
     }
   }
 
-  // ── GPS gate: cannot mark completed/returned while a GPS device is still
+  // ── GPS gate: cannot mark completed while a GPS device is still
   // assigned to this car. Unassign it first on the GPS Setup page. ──
   if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
     const stillAssigned = await getDevicesStillAssigned(bookingData.carID);
     if (stillAssigned.length > 0) {
       throw new Error(
-        `cannot mark completed: GPS device ${describeAssignedDevices(stillAssigned)} is still assigned to this car. ` +
+        `Cannot mark complete: GPS device ${describeAssignedDevices(stillAssigned)} is still assigned to this car. ` +
         "Unassign it on the GPS Setup page first."
       );
     }
@@ -642,7 +642,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     const pos = await getDepositPosition(bookingID || docID);
     if (pos.deposit?.status === "Held" && !pos.alreadySettled) {
       throw new Error(
-        "cannot mark completed: the security deposit hasn't been settled yet. " +
+        "Cannot mark complete: the security deposit hasn't been settled yet. " +
         "Settle it first (deduct any penalties and confirm the deposit handed back)."
       );
     }
@@ -773,7 +773,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
       action: "update",
       userID: performedBy,
       bookingID: bID,
-      description: `Marked completed on booking ${bID}.`,
+      description: `Marked complete on booking ${bID}.`,
     }).catch((err) => console.error("[AuditLog] Return log failed:", err.message));
     try {
       const bID = bookingID || docID;

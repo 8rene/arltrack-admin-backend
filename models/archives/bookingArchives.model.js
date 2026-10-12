@@ -20,6 +20,7 @@ export const BookingArchive = {
   carID: "",
   userID: "",
   location: "",
+  completedAt: null,       // stamped when the booking was marked complete (legacy docs may still carry returnedAt)
   startDateTime: null,
   endDateTime: null,
   totalDays: 0,

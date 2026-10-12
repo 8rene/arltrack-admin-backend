@@ -48,7 +48,7 @@ export const BookingSession = {
 
   // Admin-side addition, set for EVERY booking (self-drive and chauffeur
   // alike) — the moment the vehicle itself is physically back on the lot,
-  // as distinct from the booking's completedAt (stamped once Return is confirmed).
+  // as distinct from the booking's completedAt (stamped once Mark Complete is confirmed).
   // Whoever has custody of the car marks this: the assigned driver on a
   // chauffeur booking, or a supervisor/staff member on a self-drive one
   // (there's no driver to do it on those). This is the single moment used
