@@ -12,6 +12,7 @@ import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.se
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
+import { getHolidaysBetween } from "../gps/coding.service.js";
 import {
   bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
 } from "../../services/driverAssignments/driverAssignments.service.js";
@@ -1174,11 +1175,43 @@ export const flushBookingHistory = async (bookingSessionID) => {
   // the trail, so History → Review can reconstruct breach state on playback
   // instead of only showing the dots. Older archive files already in Storage
   // stay as bare arrays — the frontend handles both shapes.
+  //
+  // droppedOffAt / completedAt / holidays are extra review details so a saved
+  // trip can be read later without the live records: when the car was marked
+  // dropped off, when the booking was marked completed (null until then — this
+  // file is also written at pickup and by the nightly cron), and the holidays
+  // that fell inside the trip's dates. Gathering them must never block the
+  // save itself, so each lookup falls back to null / [].
+  const iso = (v) => { const d = toDate(v); return d && !isNaN(d.getTime()) ? d.toISOString() : null; };
+  let completedAt = null;
+  try {
+    const bID = data.bookingID;
+    if (bID) {
+      let bSnap = await db.collection("bookings").doc(bID).get();
+      if (!bSnap.exists) {
+        const q = await db.collection("bookings").where("bookingID", "==", bID).limit(1).get();
+        bSnap = q.empty ? null : q.docs[0];
+      }
+      completedAt = iso(bSnap?.data()?.completedAt);
+    }
+  } catch (err) {
+    console.error("[Booking] flush: couldn't read completedAt:", err.message);
+  }
+  let holidays = [];
+  try {
+    holidays = await getHolidaysBetween(pickup, end);
+  } catch (err) {
+    console.error("[Booking] flush: couldn't read holidays:", err.message);
+  }
+
   const archivePayload = {
     points: fullTrail,
     geofenceZones:  data.geofenceZones  || [],
     geofenceAlerts: data.geofenceAlerts || [],
     codingAlerts:   data.codingAlerts   || [],
+    droppedOffAt:   iso(data.droppedOffTime),
+    completedAt,
+    holidays,
   };
 
   await file.save(JSON.stringify(archivePayload, null, 2), {

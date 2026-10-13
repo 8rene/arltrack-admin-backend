@@ -97,6 +97,10 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       type: "restricted",
       reason: codingResult.reason,
       city: codingResult.city || null,
+      // The rule exactly as it was when it fired ({ id, city, day, start, end,
+      // digits }), so history still shows what applied after rules are edited.
+      // Omitted (not undefined — Firestore rejects that) for older callers.
+      ...(codingResult.rule ? { rule: codingResult.rule } : {}),
       at: now.toISOString(),
     });
     // Same reasoning as geofence_alert above — staff-only, driver can't act on it.
