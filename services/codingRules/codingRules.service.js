@@ -200,3 +200,29 @@ export const deleteCity = async (cityName) => {
   }
   return { city: name, deleted: matches.length };
 };
+
+/**
+ * Renames a city — i.e. rewrites the city string on every rule that carries
+ * the old name (a city only exists through its rules). Rejects a new name that
+ * already belongs to a different city. Done in Firestore batches.
+ */
+export const renameCity = async (oldName, newName) => {
+  const from = cleanCity(oldName);
+  const to = cleanCity(newName);
+  const docs = (await db.collection(COLLECTION).get()).docs;
+  const matches = docs.filter((doc) => String(doc.data().city || "").trim() === from);
+  if (matches.length === 0) throw httpError(404, `"${from}" isn't in the city list.`);
+  if (from === to) return { oldCity: from, city: to, updated: 0 };
+  const clash = docs.some((doc) => {
+    const c = String(doc.data().city || "").trim();
+    return c !== from && c.toLowerCase() === to.toLowerCase();
+  });
+  if (clash) throw httpError(409, `"${to}" already exists.`);
+  const BATCH = 400;
+  for (let i = 0; i < matches.length; i += BATCH) {
+    const batch = db.batch();
+    matches.slice(i, i + BATCH).forEach((doc) => batch.update(doc.ref, { city: to }));
+    await batch.commit();
+  }
+  return { oldCity: from, city: to, updated: matches.length };
+};

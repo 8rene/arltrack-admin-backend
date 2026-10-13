@@ -5,6 +5,7 @@ import {
   updateRule,
   deleteRule,
   deleteCity,
+  renameCity,
 } from "../../services/codingRules/codingRules.service.js";
 import { auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 
@@ -90,5 +91,21 @@ export const removeCodingCity = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return fail(res, "removeCodingCity", error);
+  }
+};
+
+// PUT /api/coding-rules/city/:city
+// Body: { city: "New name" } — renames the city on all of its rules.
+export const renameCodingCity = async (req, res) => {
+  try {
+    const data = await renameCity(req.params.city, (req.body || {}).city);
+    auditSafe({
+      action: "update",
+      description: `Renamed coding city "${data.oldCity}" to "${data.city}" (${data.updated} rule${data.updated === 1 ? "" : "s"}).`,
+      userID: req.user?.uid || null,
+    });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return fail(res, "renameCodingCity", error);
   }
 };
