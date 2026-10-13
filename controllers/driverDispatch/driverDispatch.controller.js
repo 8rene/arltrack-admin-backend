@@ -1,7 +1,7 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver,
-  getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverReturn, driverCollectBalance, driverConfirmPayment, driverMarkRefundIssued, driverRemindInspection,
-  driverReturnChecklist, driverCreatePenalty, driverSettleDeposit,
+  getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverRemindInspection,
+  driverCreatePenalty,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
 export const getBoard = async (req, res) => {
@@ -96,38 +96,6 @@ export const myDropoff = async (req, res) => {
   }
 };
 
-export const myReturn = async (req, res) => {
-  try {
-    const result = await driverReturn(req.params.id, req.user.uid);
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[DRIVER DISPATCH] my-return error:", error);
-    return res.status(error.status || 400).json({ success: false, message: error.message });
-  }
-};
-
-export const myCollectBalance = async (req, res) => {
-  try {
-    const { paymentMethod } = req.body;
-    const result = await driverCollectBalance(req.params.id, req.user.uid, paymentMethod);
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[DRIVER DISPATCH] my-collect-balance error:", error);
-    return res.status(error.status || 400).json({ success: false, message: error.message });
-  }
-};
-
-export const myConfirmPayment = async (req, res) => {
-  try {
-    const { paymentMethod } = req.body;
-    const result = await driverConfirmPayment(req.params.id, req.user.uid, paymentMethod);
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[DRIVER DISPATCH] my-confirm-payment error:", error);
-    return res.status(error.status || 400).json({ success: false, message: error.message });
-  }
-};
-
 // POST /api/driver-dispatch/my-trips/:id/remind-inspection  { phase: "before" | "after" }
 // 429 (with retryAfterSeconds) while the 10-minute cooldown is still running.
 export const myRemindInspection = async (req, res) => {
@@ -145,26 +113,6 @@ export const myRemindInspection = async (req, res) => {
   }
 };
 
-export const myRefundIssued = async (req, res) => {
-  try {
-    const result = await driverMarkRefundIssued(req.params.id, req.user.uid);
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[DRIVER DISPATCH] my-refund-issued error:", error);
-    return res.status(error.status || 400).json({ success: false, message: error.message });
-  }
-};
-
-export const myReturnChecklist = async (req, res) => {
-  try {
-    const data = await driverReturnChecklist(req.params.id, req.user.uid);
-    return res.status(200).json({ success: true, data });
-  } catch (error) {
-    console.error("[DRIVER DISPATCH] my-return-checklist error:", error);
-    return res.status(error.status || 400).json({ success: false, message: error.message });
-  }
-};
-
 export const myCreatePenalty = async (req, res) => {
   try {
     const result = await driverCreatePenalty(req.params.id, req.user.uid, req.body);
@@ -176,12 +124,3 @@ export const myCreatePenalty = async (req, res) => {
   }
 };
 
-export const mySettleDeposit = async (req, res) => {
-  try {
-    const result = await driverSettleDeposit(req.params.id, req.user.uid, req.body);
-    return res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    console.error("[DRIVER DISPATCH] my-settle-deposit error:", error);
-    return res.status(error.status || 400).json({ success: false, message: error.message });
-  }
-};

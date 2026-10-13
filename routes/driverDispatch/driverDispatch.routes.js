@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myReturn, myCollectBalance, myConfirmPayment, myRefundIssued, myRemindInspection, myReturnChecklist, myCreatePenalty, mySettleDeposit } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getMine, getMyHistory, myPickup, myDropoff, myRemindInspection, myCreatePenalty } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -22,21 +22,11 @@ export const registerDriverDispatchRoutes = (app) => {
   app.get  ("/api/driver-dispatch/my-trips/history",   verifyToken, requireRole(driverOnly), getMyHistory);
   app.patch("/api/driver-dispatch/my-trips/:id/pickup",  verifyToken, requireRole(driverOnly), myPickup);
   app.patch("/api/driver-dispatch/my-trips/:id/dropoff", verifyToken, requireRole(driverOnly), myDropoff);
-  app.patch("/api/driver-dispatch/my-trips/:id/return",  verifyToken, requireRole(driverOnly), myReturn);
-  app.get  ("/api/driver-dispatch/my-trips/:id/return-checklist", verifyToken, requireRole(driverOnly), myReturnChecklist);
-  app.patch("/api/driver-dispatch/my-trips/:id/settle-deposit",   verifyToken, requireRole(driverOnly), mySettleDeposit);
   app.post ("/api/driver-dispatch/my-trips/:id/penalty",          verifyToken, requireRole(driverOnly), myCreatePenalty);
-  app.patch("/api/driver-dispatch/my-trips/:id/collect-balance", verifyToken, requireRole(driverOnly), myCollectBalance);
-  // Driver is blocked at Pickup/Return because staff haven't finished the
+  // Driver is blocked at Pickup because staff haven't finished the
   // vehicle inspection yet — nudges Owner/Admin/Supervisor via the bell.
-  // Server-side 10-minute cooldown per booking + phase.
+  // Server-side 10-minute cooldown per booking.
+  // Drivers can only pick up and drop off — return/completion and all
+  // payment actions are staff-only (Car Tracking / Payments).
   app.post ("/api/driver-dispatch/my-trips/:id/remind-inspection", verifyToken, requireRole(driverOnly), myRemindInspection);
-  // Confirm a cash/in-person initial payment right at pickup — driver
-  // never needs Payments page access for this.
-  app.patch("/api/driver-dispatch/my-trips/:id/confirm-payment", verifyToken, requireRole(driverOnly), myConfirmPayment);
-  // Driver confirming they handed back a refund-due amount (created when
-  // a staff discount overshot the balance) — they're usually the one
-  // physically holding the cash. See payments routes for the staff
-  // equivalent of this same action.
-  app.patch("/api/driver-dispatch/my-trips/:id/refund-issued", verifyToken, requireRole(driverOnly), myRefundIssued);
 };

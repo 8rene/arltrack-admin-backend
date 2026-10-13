@@ -1,11 +1,10 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
-import { updateBooking, markBookingDroppedOff, settleDeposit, getReturnChecklist, resolvePaymentInfo as resolveBookingPaymentInfo } from "../../services/booking/booking.service.js";
+import { updateBooking, markBookingDroppedOff, resolvePaymentInfo as resolveBookingPaymentInfo } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
 import { getPhaseChecklist } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
-import { collectRemainingBalance, confirmInitialPayment, markRefundIssued } from "../../services/payments/payments.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createPenalty } from "../penalty/penalty.service.js";
@@ -596,49 +595,6 @@ export const driverDropoff = async (bookingDocID, driverID) => {
   await assertOwnsBooking(bookingDocID, driverID);
   await markBookingDroppedOff(bookingDocID, driverID);
   return { id: bookingDocID };
-};
-
-/** Driver-triggered return — ownership-checked, then the same gated updateBooking staff use. */
-export const driverReturn = async (bookingDocID, driverID) => {
-  await assertOwnsBooking(bookingDocID, driverID);
-  await updateBooking(bookingDocID, { status: "completed" }, driverID);
-  return { id: bookingDocID };
-};
-
-/** Driver receiving cash/in-person payment of the remaining balance — same collectRemainingBalance() staff use on the Payments page, just ownership-checked to the driver's own trip first. */
-export const driverCollectBalance = async (bookingDocID, driverID, paymentMethod) => {
-  const booking = await assertOwnsBooking(bookingDocID, driverID);
-  const bID = booking.bookingID || bookingDocID;
-  await collectRemainingBalance(bID, driverID, paymentMethod);
-  return { id: bookingDocID };
-};
-
-/** Driver confirming cash/in-person receipt of the initial payment — same confirmInitialPayment() staff use on the Payments page, just ownership-checked to the driver's own trip first. Lets a driver confirm cash right at pickup without needing Payments page access. */
-export const driverConfirmPayment = async (bookingDocID, driverID, paymentMethod) => {
-  const booking = await assertOwnsBooking(bookingDocID, driverID);
-  const bID = booking.bookingID || bookingDocID;
-  await confirmInitialPayment(bID, driverID, paymentMethod);
-  return { id: bookingDocID };
-};
-
-/** Driver confirming they handed a refund-due amount back to the customer (created when a staff discount overshot the balance) — same markRefundIssued() staff use, ownership-checked to the driver's own trip first. The driver is usually the one physically holding the cash. */
-export const driverMarkRefundIssued = async (bookingDocID, driverID) => {
-  const booking = await assertOwnsBooking(bookingDocID, driverID);
-  const bID = booking.bookingID || bookingDocID;
-  await markRefundIssued(bID, driverID);
-  return { id: bookingDocID };
-};
-
-/** Driver's own Return checklist — same read-only checks staff see, ownership-checked first. */
-export const driverReturnChecklist = async (bookingDocID, driverID) => {
-  await assertOwnsBooking(bookingDocID, driverID);
-  return getReturnChecklist(bookingDocID);
-};
-
-/** Driver settling the security deposit at drop-off — deducts penalties and confirms the handback to the customer. */
-export const driverSettleDeposit = async (bookingDocID, driverID, body = {}) => {
-  await assertOwnsBooking(bookingDocID, driverID);
-  return settleDeposit(bookingDocID, { method: body.method, referenceNumber: body.referenceNumber }, driverID);
 };
 
 /**

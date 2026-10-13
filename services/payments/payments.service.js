@@ -6,7 +6,6 @@ import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolveUserNames } from "../archives/resolveUserName.service.js";
-import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
 // in refundRequest.service.js. No-ops quietly if there's no userID on the
@@ -18,18 +17,9 @@ const notifyCustomer = (userID, bookingID, type, title, message) => {
     .catch((err) => console.error(`[PAYMENTS] failed to notify customer (${type}):`, err.message));
 };
 
-// Single-person bell notification (used for the driver ping below) — same
-// shape as notifyCustomer, kept separate since "driver" isn't "customer"
-// even though the underlying write is identical.
-const notifyPerson = (userID, bookingID, type, title, message) => {
-  if (!userID) return Promise.resolve();
-  return createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID })
-    .catch((err) => console.error(`[PAYMENTS] failed to notify ${userID} (${type}):`, err.message));
-};
-
 // Looks up a booking by its bookingID (not the Firestore doc id) — used by
-// applyDiscount() for the chauffeur/driver checks, and doubles as the
-// fallback source for the customer's userID (see resolveCustomerUserID).
+// applyDiscount() as the fallback source for the customer's userID
+// (see resolveCustomerUserID).
 const findBookingByBookingID = async (bookingID) => {
   const snap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
   return snap.empty ? null : snap.docs[0].data();
@@ -606,11 +596,8 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
 // Staff applying a flat-peso discount to a booking's payment — e.g. a
 // goodwill deduction at pickup. Flat peso only, deliberately no
 // percentage option (matches how discounts are actually decided in
-// person). Staff-only to CALL (Payments.jsx or Car Tracking) — there's
-// still no driver-facing route to apply one. But the driver IS one of the
-// people notified once it's applied (see notifyPerson(driverID, ...)
-// below), and on a chauffeur booking this blocks entirely until a driver
-// is assigned, since there'd otherwise be nobody in that role to notify.
+// person). Staff-only to CALL (Payments.jsx or Car Tracking). Drivers
+// don't handle payments, so they are not notified about discounts.
 // ─────────────────────────────────────────────
 export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   if (!bookingID) throw new Error("bookingID is required.");
@@ -638,24 +625,9 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     throw new Error(`Discount can't exceed the total fee of ₱${totalFee.toLocaleString()}.`);
   }
 
-  // Need the booking doc for three things below: the chauffeur/driver
-  // gate, the driver notification, and as a fallback source for the
-  // customer's userID (see resolveCustomerUserID).
+  // Need the booking doc as a fallback source for the customer's userID
+  // (see resolveCustomerUserID).
   const booking = await findBookingByBookingID(bookingID);
-  const isChauffeur = booking?.modeOfDriving === "With Chauffeur";
-  // The current driver lives in driverAssignments (the only source).
-  const driverID = booking ? await resolveCurrentDriverID(booking, bookingID) : null;
-
-  // A chauffeur trip needs a driver on record before a discount can be
-  // applied — the driver is one of the people who gets notified about the
-  // discount below, and there's nobody to notify if none is assigned yet.
-  // Self-drive bookings never have a driver, so this only applies here.
-  if (isChauffeur && !driverID) {
-    throw new Error(
-      "This is a chauffeur booking with no driver assigned yet. " +
-      "Assign a driver first — they need to be notified when a discount is applied."
-    );
-  }
 
   // Once a refund created by this discount has already been physically
   // handed back (refundIssued: true), this route is no longer the right
@@ -757,16 +729,6 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
       ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Since you already paid, ₱${refundDue.toLocaleString()} will be returned to you.`
       : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}.`
   );
-
-  // Driver ping — only chauffeur trips have one, and the gate above
-  // guarantees driverID is set whenever isChauffeur is true, so this
-  // fires every time it's relevant.
-  if (driverID) {
-    await notifyPerson(
-      driverID, bookingID, "discount_applied", "Discount Applied To Your Trip",
-      `A discount of ₱${discountAmount.toLocaleString()} was applied to booking ${bookingID}.`
-    );
-  }
 
   createTransactionLog({
     bookingID,
