@@ -68,12 +68,13 @@ export const Maintenance = {
 // these entries — nothing reads them any more, and they are not required.
 export const PartAddressed = {
   carPartID: "",           // FK -> carParts (must belong to this job's carID)
-  conditionBefore: "",     // one of PART_CONDITION_BEFORE — copied from the car's latest inspection when the part is added
-                           //   ("Good" when the inspection doesn't list it)
-  conditionAfter: null,    // one of PART_CONDITION_AFTER | null — the condition the job leaves the part in (Good | Damaged). May be chosen while the job is
-                           //   Scheduled; if still empty when the job is Completed it defaults to Good.
-                           //   Completing also sets carParts.status to that value; reopening puts it back.
-  description: "",         // note on what was done to THIS part (the job-level description is for general notes)
+  conditionBefore: "",     // one of PART_CONDITION_BEFORE — the part's condition when the job was set up (from the car's
+                           //   latest inspection; "Good" when it isn't listed there or a Completed job already fixed it).
+                           //   null on older entries that predate this field
+  conditionAfter: null,    // one of PART_CONDITION_AFTER | null — the part's condition once the job is done.
+                           //   Completing a job with none chosen defaults it to "Good", and completing writes the
+                           //   car part's own status to this value. The inspection records are never changed
+  description: "",         // what was done to THIS part, e.g. "replaced with new OEM unit" (the job-level description is for general notes)
   price: 0,                // number >= 0 — this job's price for the part. Starts at the catalog price (carPartPricing)
                            //   but is a snapshot: editing it here never changes the catalog price
 };
@@ -82,9 +83,9 @@ export const PartAddressed = {
 // records use ("New" is never listed there, so it isn't an option here).
 export const PART_CONDITION_BEFORE = ["Good", "Damaged", "Stolen", "Missing"];
 
-// What condition the job leaves it in (see below).
-// What the job leaves the part as: "Good" (fixed) or "Damaged" (not fixed yet).
-// HOW it was fixed (repaired, replaced, ...) goes in the part's description.
+// Condition after the job. How it was fixed (repaired / replaced...) goes in
+// the part's description, not in a separate status. "Damaged" means the job
+// was completed but the part is still not right, so it stays flagged.
 export const PART_CONDITION_AFTER = ["Good", "Damaged"];
 
 export const BASIS_OPTIONS = [
