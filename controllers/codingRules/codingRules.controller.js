@@ -4,6 +4,7 @@ import {
   createCity,
   updateRule,
   deleteRule,
+  deleteCity,
 } from "../../services/codingRules/codingRules.service.js";
 import { auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 
@@ -73,5 +74,21 @@ export const removeCodingRule = async (req, res) => {
     return res.status(200).json({ success: true, data: removed });
   } catch (error) {
     return fail(res, "removeCodingRule", error);
+  }
+};
+
+// DELETE /api/coding-rules/city/:city
+// Removes the city and every coding rule it has. Owner / Admin only (route).
+export const removeCodingCity = async (req, res) => {
+  try {
+    const data = await deleteCity(req.params.city);
+    auditSafe({
+      action: "delete",
+      description: `Deleted coding city "${data.city}" and its ${data.deleted} rule${data.deleted === 1 ? "" : "s"}.`,
+      userID: req.user?.uid || null,
+    });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return fail(res, "removeCodingCity", error);
   }
 };

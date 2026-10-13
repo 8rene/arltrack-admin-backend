@@ -4,7 +4,9 @@ import {
   createEntry,
   updateEntry,
   deleteEntry,
+  applyChanges,
 } from "../../services/addresses/addresses.service.js";
+import { ROLES } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 
 const fail = (res, tag, error) => {
@@ -57,5 +59,32 @@ export const removeAddress = async (req, res) => {
     return res.status(200).json({ success: true, data: removed });
   } catch (error) {
     return fail(res, "removeAddress", error);
+  }
+};
+
+// POST /api/addresses/batch   Body: { ops: [...], context? }
+// Saves everything the Address editor changed in one go (see applyChanges).
+// Deleting is still Owner/Admin only — checked here, since the route itself is
+// open to Supervisors for add/edit.
+export const saveAddressChanges = async (req, res) => {
+  try {
+    const canDelete = [ROLES.OWNER, ROLES.ADMIN].includes(req.user?.role);
+    const data = await applyChanges(req.body?.ops, { canDelete });
+    const { created, renamed, moved, deleted } = data.counts;
+    const bits = [
+      created && `${created} added`,
+      renamed && `${renamed} renamed`,
+      moved && `${moved} moved`,
+      deleted && `${deleted} deleted`,
+    ].filter(Boolean).join(", ");
+    const context = String(req.body?.context || "").trim().slice(0, 120);
+    auditSafe({
+      action: "update",
+      description: `Updated addresses${context ? ` (${context})` : ""}: ${bits}.`,
+      userID: req.user?.uid || null,
+    });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return fail(res, "saveAddressChanges", error);
   }
 };

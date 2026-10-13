@@ -180,3 +180,23 @@ export const deleteRule = async (id) => {
   await ref.delete();
   return removed;
 };
+
+/**
+ * Deletes a whole city — i.e. every coding rule carrying that city name (a
+ * city only exists through its rules). Done in Firestore batches; the city
+ * list shows names exactly as stored (trimmed), so the match is exact too.
+ */
+export const deleteCity = async (cityName) => {
+  const name = cleanCity(cityName);
+  const matches = (await db.collection(COLLECTION).get()).docs.filter(
+    (doc) => String(doc.data().city || "").trim() === name
+  );
+  if (matches.length === 0) throw httpError(404, `"${name}" isn't in the city list.`);
+  const BATCH = 400;
+  for (let i = 0; i < matches.length; i += BATCH) {
+    const batch = db.batch();
+    matches.slice(i, i + BATCH).forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+  }
+  return { city: name, deleted: matches.length };
+};
