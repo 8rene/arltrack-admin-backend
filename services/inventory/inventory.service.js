@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 
 const HISTORY_COLLECTIONS = {
   before: "inventoryBeforeTrip",
@@ -78,6 +79,9 @@ export const adminUpdateHistoryPartStatus = async ({ tripPhase, bookingID, carID
       : `Vehicle inspection record edited (${tripPhase} trip, booking ${bookingID}): part ${carPartID} changed from "${previousStatus}" to "${newStatus}".`,
     userID: editedBy || null,
   });
+
+  // The record's parts changed -> bring the car parts' live condition (carParts.status) in line.
+  await syncCarPartConditions(carID);
 
   return { previousStatus, newStatus, inventoryOverallStatus, recordID: ref.id, isNewRecord };
 };
@@ -171,6 +175,9 @@ export const saveBeforeTrip = async ({ bookingID, carID, parts }) => {
   // reviving as-is; damageParts is still recorded on the inventory doc
   // above regardless, so the data itself isn't lost.
 
+  // The saved parts may be in a different condition than before -> update the car parts' live status.
+  await syncCarPartConditions(carID);
+
   return { success: true, inventoryOverallStatus, damageParts };
 };
 
@@ -225,6 +232,9 @@ export const saveAfterTrip = async ({ bookingID, carID, parts, userID }) => {
   // Same as saveBeforeTrip above — after_trip_damage notifications removed,
   // same "status" field bug made them invisible in the bell regardless.
   // damageParts is still recorded on the inventory doc above.
+
+  // The saved parts may be in a different condition than before -> update the car parts' live status.
+  await syncCarPartConditions(carID);
 
   return { success: true, inventoryOverallStatus, damageParts };
 };

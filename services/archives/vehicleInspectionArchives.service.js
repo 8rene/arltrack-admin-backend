@@ -14,6 +14,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 import { uniq, chunk } from "./linkedArchives.service.js";
 import { collectStorageUrls, deleteStorageFiles } from "../../utils/storage/storageFiles.js";
+import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 
 export const INSPECTION_COLLECTIONS = [
   "inventoryBeforeTrip",
@@ -65,6 +66,8 @@ const putBack = async (snap) => {
     await batch.commit();
   }
   await snap.ref.delete();
+  // Restored inspection records can change which parts are damaged -> refresh the car's live part condition.
+  await syncCarPartConditions(snap.data().carID, records.map((r) => r.data?.carID));
   return records.length;
 };
 

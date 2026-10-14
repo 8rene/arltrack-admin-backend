@@ -48,6 +48,7 @@ import { registerPenaltyRoutes }               from "./routes/penalty/penalty.ro
 import { registerHolidaysRoutes }              from "./routes/holidays/holidays.routes.js"; // ← NEW
 import { registerCodingRulesRoutes }           from "./routes/codingRules/codingRules.routes.js"; // ← NEW
 import { registerAddressesRoutes }             from "./routes/addresses/addresses.routes.js"; // ← NEW
+import { registerTermsRoutes }                 from "./routes/terms/terms.routes.js"; // ← NEW
 
 
 const app = express();
@@ -116,6 +117,7 @@ registerPenaltyRoutes(app);           // ← NEW
 registerHolidaysRoutes(app);          // ← NEW
 registerCodingRulesRoutes(app);       // ← NEW
 registerAddressesRoutes(app);         // ← NEW
+registerTermsRoutes(app);             // ← NEW
 
 const PORT = process.env.PORT || 5000;
 

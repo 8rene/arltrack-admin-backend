@@ -4,6 +4,7 @@ import {
   BASIS_OPTIONS, STATUS_OPTIONS, SERVICE_CATALOG,
   PART_CONDITION_BEFORE, PART_CONDITION_AFTER,
 } from "../../models/maintenance/maintenance.model.js";
+import { getUnresolvedDamage, syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { notifyOwners } from "../notification/notification.service.js";
 import { ROLES } from "../../utils/roles/role.util.js";
@@ -76,60 +77,6 @@ const toMoney = (val, label) => {
   const n = Number(val);
   if (!Number.isFinite(n) || n < 0) throw new Error(`${label} must be a number that is 0 or greater.`);
   return Math.round(n * 100) / 100;
-};
-
-// ─────────────────────────────────────────────
-// Which damaged parts are STILL damaged?
-// ─────────────────────────────────────────────
-// Inspection records are history and are never edited by maintenance, so "is
-// this part still damaged?" is derived. The rule is the one the frontend uses
-// (frontend/src/utils/damagedParts.js) — keep the two in step:
-//
-//   a part the car's latest inspection lists as Damaged / Stolen / Missing is
-//   resolved once a Completed maintenance job on that car covers the part
-//   (and doesn't leave it "Damaged") AND either that job is linked to the same
-//   booking as the inspection, or it is dated on or after the inspection's day.
-//
-// "Latest inspection" per car = its newest after-trip record, else its newest
-// before-trip record. Days are compared in Philippine time (UTC+8): the
-// inspection is stamped with the real moment, a job's date is just a day.
-// Only used here, to give a newly added part the right conditionBefore.
-const PH_OFFSET_MS = 8 * 60 * 60 * 1000;
-const phDay = (ms) => Math.floor((ms + PH_OFFSET_MS) / 86400000);
-const DAMAGED_STATUSES = ["Damaged", "Stolen", "Missing"];
-
-const getUnresolvedDamage = async (carID) => {
-  const [afterSnap, beforeSnap, jobsSnap] = await Promise.all([
-    db.collection("inventoryAfterTrip").where("carID", "==", carID).get(),
-    db.collection("inventoryBeforeTrip").where("carID", "==", carID).get(),
-    db.collection("maintenance").where("carID", "==", carID).where("status", "==", "Completed").get(),
-  ]);
-
-  const latest = (snap) => {
-    let best = null;
-    for (const d of snap.docs) {
-      const data = d.data();
-      const ms = toJSDate(data.recordedAt)?.getTime() ?? 0;
-      if (!best || ms > best.ms) best = { data, ms };
-    }
-    return best;
-  };
-  const rec = latest(afterSnap) || latest(beforeSnap);
-  if (!rec) return [];
-
-  const jobs = jobsSnap.docs.map((d) => d.data());
-  const isFixed = (carPartID) =>
-    jobs.some((job) => {
-      const entry = (job.partsAddressed || []).find((e) => e?.carPartID === carPartID);
-      if (!entry || entry.conditionAfter === "Damaged") return false;
-      if (job.bookingID && rec.data.bookingID && job.bookingID === rec.data.bookingID) return true;
-      const jobMs = toJSDate(job.maintenanceDate)?.getTime() ?? 0;
-      return jobMs > 0 && phDay(jobMs) >= phDay(rec.ms);
-    });
-
-  return (rec.data.damageParts || [])
-    .filter((p) => DAMAGED_STATUSES.includes(p.status) && !isFixed(p.carPartID))
-    .map((p) => ({ carPartID: p.carPartID, status: p.status }));
 };
 
 // Validates the partsAddressed[] from a request body and returns the entries
@@ -237,27 +184,15 @@ const normalizePartsAddressed = async (incoming, carID, existingEntries = []) =>
 };
 
 // ─────────────────────────────────────────────
-// Completing a job — each part's outcome + the car part's own status
+// Completing a job — each part's outcome
 // ─────────────────────────────────────────────
 // A Completed job always has a conditionAfter on every part: when none was
 // chosen it is "Good" (a job normally leaves the part Good; how it was fixed
-// goes in the part's description).
+// goes in the part's description). The car parts' own status is then brought up
+// to date by syncCarPartConditions (carPartConditions.service.js) — it is worked
+// out from the inspections and Completed jobs, never set from here, so reopening
+// or deleting a job puts it back correctly. The inspection records are not touched.
 const withOutcomes = (entries) => entries.map((e) => (e.conditionAfter ? e : { ...e, conditionAfter: "Good" }));
-
-// The carParts writes that go with those outcomes — the car part's status
-// becomes the part's conditionAfter (Good / Damaged). Committed in the same
-// batch as the job itself, so both happen or neither does. A part that was
-// since removed from Inventory is skipped. The before/after-trip inspection
-// records are NOT touched.
-const buildPartWrites = async (entries) => {
-  const refs = entries.map((e) => db.collection("carParts").doc(e.carPartID));
-  const snaps = await Promise.all(refs.map((r) => r.get()));
-  const writes = [];
-  entries.forEach((e, i) => {
-    if (snaps[i].exists) writes.push({ ref: refs[i], data: { status: e.conditionAfter } });
-  });
-  return writes;
-};
 
 const toJSDate = (val) => {
   if (!val) return null;
@@ -431,18 +366,11 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
   const totalCost = computeTotal(normalizedServices, normalizedParts, overrideTotal);
 
   // Created already Completed (backdating a repair that already happened): every
-  // part gets its outcome right away, and the parts' own status is updated together
-  // with the job.
-  let storedParts = normalizedParts;
-  let partWrites = [];
-  if (finalStatus === "Completed") {
-    storedParts = withOutcomes(normalizedParts);
-    partWrites = await buildPartWrites(storedParts);
-  }
+  // part gets its outcome right away.
+  const storedParts = finalStatus === "Completed" ? withOutcomes(normalizedParts) : normalizedParts;
 
   const ref = db.collection("maintenance").doc();
-  const batch = db.batch();
-  batch.set(ref, {
+  await ref.set({
     maintenanceID: ref.id, // mirror the doc's own ID onto itself, matching this app's existing convention
     carID,
     // FK -> bookings. Null for routine/scheduled maintenance that isn't
@@ -469,8 +397,8 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
     createdAt: timestamp(),
     updatedAt: timestamp(),
   });
-  partWrites.forEach((w) => batch.update(w.ref, w.data));
-  await batch.commit();
+  // Only a Completed job can change which parts are damaged.
+  if (finalStatus === "Completed") await syncCarPartConditions(carID);
 
   await createAuditLog({
     action: "create",
@@ -541,16 +469,10 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
     );
   }
 
-  // A job that is (or is becoming) Completed gives every part an outcome (default "Good"). Then the
-  // parts' own status follows: every part at the moment the job is completed, and afterwards only the
-  // parts whose outcome changed (so re-saving a Completed job doesn't rewrite untouched parts).
+  // A job that is (or is becoming) Completed gives every part an outcome (default "Good").
   let finalParts = normalizedParts;
-  let partWrites = [];
   if (effectiveStatus === "Completed" && normalizedParts && (completing || partsAddressed !== undefined)) {
     finalParts = withOutcomes(normalizedParts);
-    const before = new Map((existing.partsAddressed || []).map((e) => [e.carPartID, e.conditionAfter ?? null]));
-    const targets = completing ? finalParts : finalParts.filter((e) => e.conditionAfter !== before.get(e.carPartID));
-    partWrites = await buildPartWrites(targets);
   }
 
   const update = { updatedAt: timestamp() };
@@ -583,11 +505,13 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
     update.totalCost = computeTotal(normalizedServices, partsForTotal, effectiveOverride);
   }
 
-  // The job and its parts' status are committed together — all or nothing.
-  const batch = db.batch();
-  batch.update(ref, update);
-  partWrites.forEach((w) => batch.update(w.ref, w.data));
-  await batch.commit();
+  await ref.update(update);
+
+  // A job only matters to the parts' live condition while it is (or was) Completed — covers completing,
+  // reopening, and editing the date / parts / car of an already-Completed job. Both cars if it moved.
+  if (existing.status === "Completed" || effectiveStatus === "Completed") {
+    await syncCarPartConditions(existing.carID, effectiveCarID);
+  }
 
   const plate = await getPlateNumber(effectiveCarID);
   const statusNote = status !== undefined && status !== existing.status
@@ -598,10 +522,9 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
   const costNote = update.totalCost !== undefined && update.totalCost !== existing.totalCost
     ? ` — cost revised from ₱${(existing.totalCost || 0).toFixed(2)} to ₱${update.totalCost.toFixed(2)}`
     : "";
-  const partsNote = partWrites.length > 0 ? ` — condition updated on ${partWrites.length} part${partWrites.length > 1 ? "s" : ""}` : "";
   await createAuditLog({
     action: "update",
-    description: `Maintenance record for ${plate} updated${statusNote}${costNote}${partsNote}.`,
+    description: `Maintenance record for ${plate} updated${statusNote}${costNote}.`,
     userID: editedBy,
   });
 
@@ -619,19 +542,16 @@ export const updateMaintenanceStatus = async (maintenanceID, status, editedBy = 
   if (!doc.exists) throw new Error("Maintenance record not found.");
   const record = doc.data();
 
-  // Completing gives every part its outcome (default "Good") and updates the parts' own status,
-  // all in the same batch as the status itself.
+  // Completing gives every part its outcome (default "Good").
   const statusUpdate = { status, updatedAt: timestamp() };
-  let partWrites = [];
   if (status === "Completed" && record.status !== "Completed") {
-    const entries = withOutcomes(await normalizePartsAddressed(record.partsAddressed || [], record.carID, record.partsAddressed));
-    statusUpdate.partsAddressed = entries;
-    partWrites = await buildPartWrites(entries);
+    statusUpdate.partsAddressed = withOutcomes(
+      await normalizePartsAddressed(record.partsAddressed || [], record.carID, record.partsAddressed)
+    );
   }
-  const batch = db.batch();
-  batch.update(ref, statusUpdate);
-  partWrites.forEach((w) => batch.update(w.ref, w.data));
-  await batch.commit();
+  await ref.update(statusUpdate);
+
+  if (record.status === "Completed" || status === "Completed") await syncCarPartConditions(record.carID);
 
   const plate = await getPlateNumber(record.carID);
   await createAuditLog({
@@ -654,6 +574,9 @@ export const deleteMaintenance = async (maintenanceID, editedBy = null) => {
 
   await ref.delete();
 
+  // Deleting a Completed job un-resolves the parts it had fixed.
+  if (record.status === "Completed") await syncCarPartConditions(record.carID);
+
   const plate = await getPlateNumber(record.carID);
   await createAuditLog({
     action: "delete",
@@ -663,4 +586,4 @@ export const deleteMaintenance = async (maintenanceID, editedBy = null) => {
   });
 
   return { id: maintenanceID };
-}; 
+};

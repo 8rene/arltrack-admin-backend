@@ -51,6 +51,7 @@ import {
   writeInspectionArchive,
   inspectionLiveRefs,
 } from "../archives/vehicleInspectionArchives.service.js";
+import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 // ═══ DELETE GUARD ═══════════════════════════════════════════════════════════════════════════════════════════
 // What is still "in flight" on a booking (or on one payment / penalty), so a delete does not silently bury money.
 //   blockers  stop the delete. Owner / Admin can force past them (the records are archived, not destroyed);
@@ -570,6 +571,14 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
     );
   }
 
+  // The booking's inspection records and its post-rental jobs just left the live collections, which can change
+  // which parts count as damaged -> bring the car parts' live condition (carParts.status) back in line.
+  await syncCarPartConditions(
+    bookingData.carID,
+    maintenanceRows.map((d) => d.data().carID),
+    inspectionRows.map((r) => r.doc.data().carID)
+  );
+
   // ── 4. Return summary ─────────────────────────────────────────────────────
   return {
     success          : true,
@@ -722,6 +731,8 @@ export const deleteItem = async (kind, id, archivedBy = "admin", opts = {}) => {
   });
   batch.delete(item.ref);
   await batch.commit();
+  // An inspection / maintenance record may have just been removed -> refresh that car's live part condition.
+  await syncCarPartConditions(item.data.carID);
   return {
     success: true, mode: "alone", kind, archiveID: archiveRef.id, bookingID: item.data.bookingID ?? null,
     counts: { [kind]: 1 }, warnings: guards.warnings, forced: guards.blockers.length > 0,

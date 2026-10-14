@@ -72,8 +72,9 @@ export const PartAddressed = {
                            //   latest inspection; "Good" when it isn't listed there or a Completed job already fixed it).
                            //   null on older entries that predate this field
   conditionAfter: null,    // one of PART_CONDITION_AFTER | null — the part's condition once the job is done.
-                           //   Completing a job with none chosen defaults it to "Good", and completing writes the
-                           //   car part's own status to this value. The inspection records are never changed
+                           //   Completing a job with none chosen defaults it to "Good". The car part's own status
+                           //   (carParts.status) is then RECOMPUTED, not copied from this: a part a Completed job leaves
+                           //   "Damaged" stays flagged. The inspection records are never changed
   description: "",         // what was done to THIS part, e.g. "replaced with new OEM unit" (the job-level description is for general notes)
   price: 0,                // number >= 0 — this job's price for the part. Starts at the catalog price (carPartPricing)
                            //   but is a snapshot: editing it here never changes the catalog price

@@ -52,20 +52,18 @@ export const addCarPart = async (req, res) => {
 };
 
 // PUT /api/car-parts/:id
-// Body: any of { carPartName, carPartTypeID, serialNumber, price, status, replacedType, markReplaced }
+// Body: any of { carPartName, carPartTypeID, serialNumber, price }
 // price: number = set/update, null or "" = remove the price, omitted = leave as is.
-// markReplaced:true is the "mark as replaced" shortcut used by Maintenance.jsx
-// (sets status: "Replaced" + replacedAt server-side).
+// A part's condition (status) is not editable here — it is recomputed from the inspections and
+// Completed maintenance jobs (services/carParts/carPartConditions.service.js).
 export const editCarPart = async (req, res) => {
   try {
     const { id } = req.params;
     const data = await updateCarPart(id, req.body || {});
 
-    const description = req.body?.markReplaced
-      ? `Marked part "${data.carPartName}" as replaced (was ${req.body.replacedType || "damaged"}).`
-      : req.body?.price !== undefined
-        ? `Updated part "${data.carPartName}" (price ${data.price !== null ? `₱${data.price}` : "removed"}).`
-        : `Updated part "${data.carPartName}".`;
+    const description = req.body?.price !== undefined
+      ? `Updated part "${data.carPartName}" (price ${data.price !== null ? `₱${data.price}` : "removed"}).`
+      : `Updated part "${data.carPartName}".`;
 
     createAuditLog({
       action: "update",

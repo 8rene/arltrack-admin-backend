@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { partNameToFieldKey } from "../../models/vehicleDocumentation/vehicleDocumentation.model.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 
 const DOC_COLLECTIONS = {
   before: "vehicleDocumentationBeforeTrip",
@@ -358,6 +359,9 @@ export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallS
     });
     docID = newRef.id;
   }
+
+  // The saved parts may be in a different condition than before -> update the car parts' live status.
+  await syncCarPartConditions(carID);
 
   return { success: true, id: docID };
 };

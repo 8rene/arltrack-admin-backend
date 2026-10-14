@@ -9,6 +9,7 @@ import admin from "firebase-admin";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
 import { uniq, chunk } from "./linkedArchives.service.js";
+import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 
 const LIVE = "maintenance";
 const ARCHIVE = "maintenanceArchives";
@@ -51,6 +52,8 @@ const putBack = async (docs) => {
     });
     await batch.commit();
   }
+  // Restored jobs can fix (or re-flag) parts -> refresh those cars' live part condition (carParts.status).
+  await syncCarPartConditions(docs.map((d) => d.data().carID));
   return docs.length;
 };
 
