@@ -12,7 +12,10 @@ export const BookingSessionArchive = {
   geofenceZones: [],
   geofenceAlerts: [],
   codingAlerts: [],
-  codingCheck: null,
+  // Booking-time coding warnings, copied as-is from the session. FLAT — one entry per matched rule:
+  // [{ city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }]
+  // A frozen snapshot: never re-read from codingRules (see models/booking/bookingsession.model.js).
+  codingWarnings: [],
   startedAt: null,               // ACTUAL pickup moment (replaces pickupTime/returnTime/activatedAt)
   currentPosition: null,
   archiveUrl: null,              // Storage URL, if this session was ever flushed before deletion

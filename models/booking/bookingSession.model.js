@@ -4,7 +4,7 @@
 // bookingSessionID as the doc's real ID, bookingID stored as an FK field
 // only — see the customer repo's models/bookingSession/bookingsession.model.js
 // for the fields set at creation: pickupLocation, dropoffLocation,
-// geofenceZones, codingCheck). The scheduled pickup/return dates are NOT
+// geofenceZones, codingWarnings). The scheduled pickup/return dates are NOT
 // copied here — they live on the booking (startDateTime/endDateTime).
 //
 // GPS pings are NOT stored on this doc. Each ping is appended to a Google
@@ -35,7 +35,19 @@ export const BookingSession = {
   geofenceZones:       [],
   geofenceAlerts:      [],
   codingAlerts:        [],
-  codingCheck:         null,
+  // Number Coding restrictions found for the car's plate BEFORE the booking was
+  // made — the list the customer was warned about. FLAT: one entry per matched rule,
+  // no nested arrays.
+  // This is a SNAPSHOT / backup: the city, digit, day and time window are copied in, so
+  // the admin never looks anything up in codingRules to show it — it still reads
+  // correctly after the rule is edited or deleted.
+  // Written by the CUSTOMER backend; the admin only READS it. A booking can't proceed
+  // unless the customer agrees, so no acknowledgement is stored here. Older sessions
+  // simply lack it (read as []).
+  // Entry: { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }
+  //   ruleID only records WHICH rule matched (codingRules/{ruleID}, see
+  //   models/codingRules/codingRules.model.js) — it may no longer exist; never rely on it.
+  codingWarnings:      [],
   // ACTUAL pickup moment. Stamped once by markSessionActive; null until the
   // trip starts (so upcoming/cancelled sessions have none). Traceback and the
   // history flush use it to pick which Sheets date-tabs to read, so an early

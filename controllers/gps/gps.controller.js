@@ -16,6 +16,11 @@ import { sessionStartedAt, sessionEndedAt } from "../../utils/date/sessionDates.
 import { isWithinPhilippines } from "../../utils/gps/philippinesBounds.js";
 import admin from "firebase-admin";
 
+// Booking-time Number Coding warnings (session.codingWarnings): a FLAT array, one entry per
+// matched rule — { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }. No timestamps
+// inside, so it passes straight through. [] on older sessions.
+const codingWarningsOut = (list) => (Array.isArray(list) ? list : []);
+
 /** POST /api/gps  — GPS device pushes a live location */
 export const receiveLocation = async (req, res) => {
   const { device_id, lat, lng, speed, offline, recorded_at } = req.body;
@@ -444,6 +449,7 @@ export const getCarActiveSession = async (req, res) => {
         geofenceZones:    data.geofenceZones || [],
         geofenceAlerts:   data.geofenceAlerts || [],
         codingAlerts:     data.codingAlerts || [],
+        codingWarnings:   codingWarningsOut(data.codingWarnings),
         currentPosition:  data.currentPosition || null,
         pickupLocation:   data.pickupLocation || null,
         dropoffLocation:  data.dropoffLocation || null,
@@ -592,6 +598,7 @@ export const getCarTraceback = async (req, res) => {
     let geofenceZones = [];
     let geofenceAlerts = [];
     let codingAlerts = [];
+    let codingWarnings = []; // booking-time coding warnings saved on the session
     // { bookingSessionID, bookingID, status, startedAt, endedAt } for
     // whichever session owns this date — powers TracebackBookingInfoPanel's
     // read-only summary + canEdit check ("today" + status === "active") on
@@ -645,6 +652,7 @@ export const getCarTraceback = async (req, res) => {
         geofenceZones  = match.data.geofenceZones  || [];
         geofenceAlerts = match.data.geofenceAlerts || [];
         codingAlerts   = match.data.codingAlerts   || [];
+        codingWarnings = codingWarningsOut(match.data.codingWarnings);
         session = {
           bookingSessionID: match.data.bookingSessionID,
           bookingID:        match.data.bookingID || null,
@@ -659,7 +667,7 @@ export const getCarTraceback = async (req, res) => {
       // Non-fatal — traceback still returns points, just without zone/alert/session data.
     }
 
-    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts, session } });
+    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts, codingWarnings, session } });
   } catch (err) {
     console.error("[GPS] getCarTraceback error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to fetch traceback." });

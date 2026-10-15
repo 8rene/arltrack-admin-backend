@@ -184,7 +184,13 @@ const EMPTY_HISTORY_INFO = {
   // here too so Bookings.jsx's detail view can plot every stop on a map,
   // not just the two endpoints.
   pickupLocation: null, dropoffLocation: null, geofenceZones: [],
+  // Booking-time Number Coding warnings from the customer app ([] on older bookings).
+  codingWarnings: [],
 };
+// Booking-time Number Coding warnings (session.codingWarnings): a FLAT array, one entry per
+// matched rule — { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }. No timestamps
+// inside, so it passes straight through. [] on older sessions.
+const codingWarningsOut = (list) => (Array.isArray(list) ? list : []);
 const resolveHistoryInfo = async (bookingID) => {
   if (!bookingID) return EMPTY_HISTORY_INFO;
   try {
@@ -204,6 +210,7 @@ const resolveHistoryInfo = async (bookingID) => {
       pickupLocation:   data.pickupLocation || null,
       dropoffLocation:  data.dropoffLocation || null,
       geofenceZones:    data.geofenceZones || [],
+      codingWarnings:   codingWarningsOut(data.codingWarnings),
     };
   } catch { return EMPTY_HISTORY_INFO; }
 };
@@ -344,13 +351,6 @@ export const getAllBookings = async (statusFilter) => {
   const beforeDocsMap  = Object.fromEntries(beforeDocsEntries);
   const afterDocsMap   = Object.fromEntries(afterDocsEntries);
 
-  // Terms version the customer agreed to: one small lookup per distinct termsVersionID
-  // (usually only a handful of versions exist), read from the immutable termsVersions doc.
-  const termsIDs = [...new Set(rows.map((b) => b.termsVersionID).filter(Boolean))];
-  const termsMap = Object.fromEntries(await Promise.all(
-    termsIDs.map((id) => db.collection("termsVersions").doc(String(id)).get().then((d) => [id, d.exists ? d.data().version : null]))
-  ));
-
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
     const payInfo = paymentMap[bID] || EMPTY_PAYMENT_INFO;
@@ -402,10 +402,6 @@ export const getAllBookings = async (statusFilter) => {
       driverName:       b.driverID ? (driverMap[b.driverID]?.customerName || "—") : null,
       driverPhone:      b.driverID ? (driverMap[b.driverID]?.phone || "—") : null,
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
-      // Which Terms & Conditions the customer accepted for this booking (null on older bookings).
-      termsVersionID:   b.termsVersionID || null,
-      termsVersion:     b.termsVersionID ? (termsMap[b.termsVersionID] ?? null) : null,
-      termsAcceptedAt:  b.termsAcceptedAt || null,
       hasHistory:       histInfo.hasHistory,
       bookingSessionID: histInfo.bookingSessionID,
       lastArchivedAt:   histInfo.lastArchivedAt,
@@ -417,6 +413,7 @@ export const getAllBookings = async (statusFilter) => {
       pickupLocation:   histInfo.pickupLocation,
       dropoffLocation:  histInfo.dropoffLocation,
       geofenceZones:    histInfo.geofenceZones,
+      codingWarnings:   histInfo.codingWarnings || [],
       // "Complete" now means photos AND the parts-condition record — see
       // getPhaseChecklist in vehicleDocumentation.service.js. The
       // per-half breakdown is included for UIs that want to say which half
@@ -1220,6 +1217,7 @@ export const flushBookingHistory = async (bookingSessionID) => {
     geofenceZones:  data.geofenceZones  || [],
     geofenceAlerts: data.geofenceAlerts || [],
     codingAlerts:   data.codingAlerts   || [],
+    codingWarnings: codingWarningsOut(data.codingWarnings),
     droppedOffAt:   iso(data.droppedOffTime),
     completedAt,
     holidays,
