@@ -532,6 +532,10 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         // list here and could only ever plot the two endpoints — this is
         // what was missing.
         geofenceZones:        sessions[i]?.data?.geofenceZones || [],
+        // Number Coding restrictions the customer was warned about when booking (flat array saved
+        // on the session by the customer backend) — shown on the driver's trip card so the route
+        // can be planned around them. [] for older sessions.
+        codingWarnings:       Array.isArray(sessions[i]?.data?.codingWarnings) ? sessions[i].data.codingWarnings : [],
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },
