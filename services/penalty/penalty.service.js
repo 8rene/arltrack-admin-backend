@@ -529,6 +529,15 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
   if (!PENALTY_SHORTFALL_METHODS.includes(method)) {
     return { error: `method must be one of: ${PENALTY_SHORTFALL_METHODS.join(", ")}.` };
   }
+  // A proper record: anything that isn't cash needs the transfer's reference number (cash may carry
+  // an official-receipt number).
+  referenceNumber = String(referenceNumber == null ? "" : referenceNumber).trim();
+  if (method !== "InStore" && !referenceNumber) {
+    return { error: `A reference number is required for ${method} payments.` };
+  }
+  if (referenceNumber.length > 64) {
+    return { error: "The reference number can't be longer than 64 characters." };
+  }
 
   const unpaid = await listUnpaidPenaltiesForUser(userID);
 

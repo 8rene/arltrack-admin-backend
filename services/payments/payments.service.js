@@ -3,7 +3,8 @@ import admin from "firebase-admin";
 import { notifyStaff, resolveNotification, createNotification } from "../notification/notification.service.js";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
-import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } from "./paymentBreakdown.js";
+import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf, depositWasOnline } from "./paymentBreakdown.js";
+import { createPaymongoRefund } from "../refundRequest/refundRequest.service.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolveUserNames } from "../archives/resolveUserName.service.js";
 
@@ -106,6 +107,21 @@ const assertValidPaymentMethod = (method) => {
   if (!PAYMENT_METHODS.includes(method)) {
     throw new Error(`paymentMethod must be one of: ${PAYMENT_METHODS.join(", ")}.`);
   }
+};
+
+// An in-store payment is only a proper record if it says HOW it was paid and, for anything that isn't
+// cash, carries the transfer's reference number. Cash may carry an official-receipt number (optional).
+// Returns the cleaned reference (or null).
+const REFERENCE_MAX = 64;
+const cleanReference = (method, referenceNumber) => {
+  const ref = String(referenceNumber == null ? "" : referenceNumber).trim();
+  if (method !== "Cash" && !ref) {
+    throw new Error(`A reference number is required for ${method} payments.`);
+  }
+  if (ref.length > REFERENCE_MAX) {
+    throw new Error(`The reference number can't be longer than ${REFERENCE_MAX} characters.`);
+  }
+  return ref || null;
 };
 
 // Compute amountPaid and balance based on methodOfPayment (the payment type field)
@@ -216,7 +232,7 @@ const buildTransactions = (payment) => {
       const rec = Number(p.balanceCollectedAmount);
       list.push({
         phase: "balance",
-        ref: null,
+        ref: p.balanceReferenceNumber || null,
         amount: Number.isFinite(rec) && p.balanceCollectedAmount !== null && p.balanceCollectedAmount !== undefined ? rec : expectedBalance,
         fee: null,
         channel: p.balanceMethod || null,
@@ -321,7 +337,11 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     balanceMethod: payment.balanceMethod || null,            // Cash | GCash | Bank Transfer
     balanceCollectedBy: payment.balanceCollectedBy || null,
     balanceCollectedAt: isoOf(payment.balanceCollectedAt),
+    balanceReferenceNumber: payment.balanceReferenceNumber || null,   // in-store payment: transfer / receipt number
+    balanceReminderAt: isoOf(payment.balanceReminderAt),               // last "please pay the balance" nudge
     balancePaidAt: isoOf(payment.balancePaidAt),
+    discountBy: payment.discountBy || null,
+    discountAt: isoOf(payment.discountAt),
 
     // ── refund in flight (if any) ──
     refundRequestID: openRefund ? openRefund.id : null,
@@ -356,17 +376,6 @@ const promoteBookingIfToPay = async (bookingID) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// Confirm a booking's initial payment as received — for Cash/in-person
-// payments where staff or the driver physically receive the initial
-// portion (Full/Downpayment/Deposit) directly at the counter or at
-// pickup, rather than it coming through PayMongo (GCash/Maya/QRPH),
-// which is already auto-confirmed by handleWebhook() on the customer
-// side the moment it settles — no manual step needed there at all.
-//
-// This lets Car Tracking / My Trips confirm cash on the spot instead of
-// requiring a trip to the Payments page just to click Approve.
-// ─────────────────────────────────────────────
 // Records a staff action in paymentEntries. WHO took the money, WHEN, HOW and HOW MUCH (confirmedBy / confirmedAt,
 // balanceCollected / balanceCollectedAmount / balanceMethod / balanceCollectedBy / balanceCollectedAt) are written to
 // the entry row only -- never onto the payment document, which keeps just the status and amounts. The sync is idempotent, so a failure is retried
@@ -407,98 +416,22 @@ const withStaffNames = async (rows) => {
   return Array.isArray(rows) ? named : named[0];
 };
 
-export const confirmInitialPayment = async (bookingID, confirmedBy, paymentMethod) => {
-  if (!bookingID) throw new Error("bookingID is required.");
-  assertValidPaymentMethod(paymentMethod);
-
-  const snap = await db.collection("payments")
-    .where("bookingID", "==", bookingID)
-    .limit(1)
-    .get();
-  if (snap.empty) throw new Error("No payment record found for this booking.");
-
-  const doc  = snap.docs[0];
-  const data = doc.data();
-
-  const status = (data.status || "").toLowerCase();
-  const wasApproved = status === "approved" || status === "paid";
-  // Approved but with no deposit row = an earlier confirmation saved the status and then failed to write the row.
-  // Pressing Confirm again repairs it (writes the row, log and booking step) instead of refusing. An online
-  // payment, or one that already has its row, really is confirmed.
-  // Online-ness comes from the entries (the payment document no longer stores the PayMongo fields).
-  const seen = await hydratePaymentData(data, doc.id);
-  const looksOnline = !!(seen.paymongoChannel || seen.depositPaymongoPaymentID || seen.paymongoPaymentID);
-  if (wasApproved && (looksOnline || await hasSuccessRow(data, doc.id, "deposit"))) {
-    throw new Error("This payment is already confirmed.");
-  }
-  if (status === "rejected" || status === "cancelled" || status === "refunded") {
-    throw new Error(`Cannot confirm: payment is ${data.status}.`);
-  }
-
-  // What staff actually received now — the deposit portion, NOT the grand total.
-  // (It used to log data.amount, so a Partial booking put ₱5,000 in the ledger
-  // for ₱2,500 received, and the later balance entry then counted the rest again.)
-  const depositReceived = getPaymentBreakdown({ ...data, status: "paid" }).depositCollected;
-
-  if (!wasApproved) await doc.ref.update({
-    status:        "Approved",
-    // This is the first point the actual mode is ever captured for a
-    // cash/in-person initial payment — previously this field just held
-    // whatever default ("Cash") was set at booking creation, whether or
-    // not that was actually how the customer paid. Overwriting it here is
-    // safe (unlike the balance case below) since this IS the payment the
-    // method describes, not a second one layered on top of an earlier one.
-    paymentMethod,
-    updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
-  });
-
-  // Write the deposit row: who confirmed it and when go to the entry, not the payment document.
-  await recordInEntries(doc.ref, doc.id, { confirmedBy: confirmedBy || "—", confirmedAt: new Date() });
-
-  createTransactionLog({
-    bookingID,
-    paymentID: data.paymentID || doc.id,
-    userID: data.userID || null,
-    type: "Payment",
-    amount: depositReceived,
-    status: "Success",
-    paymentMethod,
-    description: `Cash payment of ₱${depositReceived.toLocaleString()} confirmed by staff for booking ${bookingID} via ${paymentMethod}.`,
-    performedBy: confirmedBy || "—",
-    logID: `${data.paymentID || doc.id}_deposit`, // same key the customer app uses → never logged twice
-    paymentEntryID: `${data.paymentID || doc.id}_deposit`, // the deposit paymentEntries row this log describes
-  });
-
-  // Bookings now start at "to pay". A staff-confirmed cash deposit is the other
-  // way (besides PayMongo) that a booking becomes real, so promote it here too —
-  // otherwise it would sit at "to pay" and be auto-cancelled with the money in hand.
-  const promoted = await promoteBookingIfToPay(bookingID);
-
-  auditSafe({
-    action: "update",
-    description: `Payment for booking ${bookingID} confirmed by staff as received (₱${depositReceived.toLocaleString()} via ${paymentMethod})${promoted ? "; booking moved from to pay to upcoming" : ""}.`,
-    userID: confirmedBy || null,
-    bookingID,
-    paymentID: data.paymentID || doc.id,
-  });
-
-  return { id: doc.id, bookingID };
-};
-
 // ─────────────────────────────────────────────
-// Manually mark a booking's remaining balance as collected — for
-// Cash/in-person payments where staff or the driver physically receive
-// the rest of the fee at pickup or return, rather than it coming through
-// an online GCash/Maya proof that gets Approved on the Payments page.
+// IN-STORE payment of the remaining balance.
 //
-// Requires the payment's initial portion to already be Approved/Paid
-// first (this mirrors the same gate updateBooking() already applies
-// before a booking can move to "ongoing" — by the time anyone is at
-// pickup, the payment record is guaranteed to already be Approved).
+// The normal way to pay the balance is online through PayMongo (the customer is
+// reminded with notifyBalanceDue below). This is the exception: the customer
+// chose to pay at the store. The route only lets Supervisor / Admin / Owner
+// call it (drivers no longer collect cash), and it needs a proper record:
+// payment mode, the reference number (required for anything but cash), who
+// received it and when -- all of which land on the balance paymentEntries row.
+//
+// Requires the first payment to already be received through PayMongo.
 // ─────────────────────────────────────────────
-export const collectRemainingBalance = async (bookingID, collectedBy, paymentMethod) => {
+export const collectRemainingBalance = async (bookingID, collectedBy, paymentMethod, referenceNumber = "") => {
   if (!bookingID) throw new Error("bookingID is required.");
   assertValidPaymentMethod(paymentMethod);
+  const reference = cleanReference(paymentMethod, referenceNumber);
 
   const snap = await db.collection("payments")
     .where("bookingID", "==", bookingID)
@@ -537,6 +470,10 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     if (String(data.balanceStatus || "").toLowerCase() === "paid") {
       throw new Error("The customer already paid the balance online — there is nothing left to collect.");
     }
+    // The customer is paying the balance online right now: taking it in store as well would charge them twice.
+    if (String(data.balanceStatus || "").toLowerCase() === "pending") {
+      throw new Error("The customer has a balance payment in progress on PayMongo. Wait for it to finish (or fail) before recording an in-store payment.");
+    }
     // Don't take more money on a payment that's mid-refund.
     const openRefund = await findOpenRefundRequest(data.paymentID || doc.id);
     if (openRefund) {
@@ -555,6 +492,7 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     balanceCollected: true,
     balanceCollectedAmount: balance,
     balanceMethod: paymentMethod,
+    balanceReferenceNumber: reference,
     balanceCollectedBy: collectedBy || "—",
     balanceCollectedAt: new Date(),
   });
@@ -575,7 +513,8 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
     // field is deliberately left alone here since it still describes the
     // original deposit, not this separate balance collection.
     paymentMethod,
-    description: `Remaining balance of ₱${balance.toLocaleString()} collected in person for booking ${bookingID} via ${paymentMethod}.`,
+    referenceNumber: reference,
+    description: `Remaining balance of ₱${balance.toLocaleString()} received in store for booking ${bookingID} via ${paymentMethod}${reference ? ` (ref ${reference})` : ""}.`,
     performedBy: collectedBy || "—",
     logID: `${data.paymentID || doc.id}_balance`,
     paymentEntryID: `${data.paymentID || doc.id}_balance`, // the balance paymentEntries row this log describes
@@ -583,7 +522,7 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
 
   auditSafe({
     action: "update",
-    description: `Remaining balance of ₱${balance.toLocaleString()} collected in person via ${paymentMethod} for booking ${bookingID}.`,
+    description: `Remaining balance of ₱${balance.toLocaleString()} received in store via ${paymentMethod}${reference ? ` (ref ${reference})` : ""} for booking ${bookingID}.`,
     userID: collectedBy || null,
     bookingID,
     paymentID: data.paymentID || doc.id,
@@ -593,17 +532,55 @@ export const collectRemainingBalance = async (bookingID, collectedBy, paymentMet
 };
 
 // ─────────────────────────────────────────────
-// Staff applying a flat-peso discount to a booking's payment — e.g. a
-// goodwill deduction at pickup. Flat peso only, deliberately no
-// percentage option (matches how discounts are actually decided in
-// person). Staff-only to CALL (Payments.jsx or Car Tracking). Drivers
-// don't handle payments, so they are not notified about discounts.
+// Where does a discount's refund come from?
+//
+// A discount on a fully paid booking is money going back to the customer. It goes back the same
+// way it came in: through PayMongo, against ONE payment that is big enough to cover it (so it is
+// either entirely done or entirely refused -- never half refunded). Money that was never on
+// PayMongo (a balance received in store) can only be returned in store, which a Supervisor / Admin
+// / Owner records with markRefundIssued().
+//
+//   { paymongo: { paymongoPaymentID, kind } }   refund it through PayMongo
+//   { inStore: true }                           hand it back in store, then mark it returned
+//   { error }                                   can't be done as one refund
+// ─────────────────────────────────────────────
+const planDiscountRefund = (payment, amount) => {
+  const ids = resolvePaymongoIDs(payment);
+  const b = getPaymentBreakdown({ ...payment, discountAmount: 0 });
+  const depositOnline = depositWasOnline(payment, ids);
+
+  // Newest money first: the balance, then the first payment.
+  const online = [];
+  if (b.balanceOnline > 0) online.push({ kind: "balance", id: ids.balance, cap: b.balanceOnline });
+  if (b.depositCollected > 0 && depositOnline) online.push({ kind: "deposit", id: ids.deposit, cap: b.depositCollected });
+
+  const hit = online.find((o) => o.id && o.cap >= amount);
+  if (hit) return { paymongo: { paymongoPaymentID: hit.id, kind: hit.kind } };
+
+  const inStoreMoney = b.balanceInPerson + (depositOnline ? 0 : b.depositCollected);
+  if (inStoreMoney >= amount) return { inStore: true };
+
+  if (online.some((o) => !o.id)) {
+    return { error: "This payment's PayMongo record is incomplete, so the discount can't be refunded automatically. Please check the payment in PayMongo first." };
+  }
+  return { error: "That discount is bigger than any single payment on this booking, so PayMongo can't refund it in one go. Give a smaller discount." };
+};
+
+// ─────────────────────────────────────────────
+// Giving a discount — ONCE per booking. It can't be edited, corrected or given again.
+//
+//   • Payment still partial  -> the discount is taken off the REMAINING balance (nothing moves;
+//                               it can't be more than that balance).
+//   • Payment already full   -> PayMongo refunds the discount amount to the customer. The refund is
+//                               made FIRST: if PayMongo refuses it, no discount is saved.
+//
+// Flat pesos only. Staff-only to call. Drivers don't handle payments, so they are not notified.
 // ─────────────────────────────────────────────
 export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   if (!bookingID) throw new Error("bookingID is required.");
   const discountAmount = Number(amount);
-  if (!Number.isFinite(discountAmount) || discountAmount < 0) {
-    throw new Error("Discount must be a valid, non-negative peso amount.");
+  if (!Number.isFinite(discountAmount) || discountAmount <= 0) {
+    throw new Error("Enter a discount greater than ₱0.");
   }
 
   const snap = await db.collection("payments")
@@ -613,87 +590,125 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   if (snap.empty) throw new Error("No payment record found for this booking.");
 
   const doc = snap.docs[0];
-  // Read through the entries: "balance collected in person" is no longer stored on the payment document.
+  // Read through the entries: "balance collected in person" is not stored on the payment document.
   const existing = await hydratePaymentData(doc.data(), doc.id);
 
-  // Can't discount more than the booking is actually worth — previously
-  // unbounded, so a discount larger than the total fee would spill past
-  // everything the customer ever paid and create a refundDue for money
-  // that was never collected in the first place.
+  // One discount per booking -- no rewriting it, no sending a new one.
+  if (Number(existing.discountAmount) > 0) {
+    throw new Error("A discount has already been given for this booking. It can't be changed or given again.");
+  }
+
+  const status = String(existing.status || "").toLowerCase();
+  if (status === "refunded") {
+    throw new Error("This payment has already been refunded — a discount can't be applied to it.");
+  }
+  if (status !== "paid" && status !== "approved") {
+    throw new Error("A discount can only be given after the customer's first payment has been received through PayMongo.");
+  }
+
+  // What the discount can be at most: the remaining balance while the payment is partial, otherwise
+  // what the customer has paid (capped at the booking's total fee).
+  const before = computeAmounts({ ...existing, discountAmount: 0 });
   const totalFee = Number(existing.amount) || 0;
-  if (discountAmount > totalFee) {
-    throw new Error(`Discount can't exceed the total fee of ₱${totalFee.toLocaleString()}.`);
+  const maxDiscount = before.balance > 0 ? before.balance : Math.min(totalFee, before.amountPaid);
+  if (discountAmount > maxDiscount) {
+    throw new Error(
+      before.balance > 0
+        ? `A discount on a partial payment can't be more than the remaining balance of ₱${before.balance.toLocaleString()}.`
+        : `The discount can't be more than ₱${maxDiscount.toLocaleString()}.`
+    );
   }
 
   // Need the booking doc as a fallback source for the customer's userID
   // (see resolveCustomerUserID).
   const booking = await findBookingByBookingID(bookingID);
 
-  // Once a refund created by this discount has already been physically
-  // handed back (refundIssued: true), this route is no longer the right
-  // one — reopening/renotifying over a discount that's already been
-  // settled in person would be misleading (see correctIssuedDiscount()
-  // below, which is the Admin-only path for fixing the number on record
-  // after the fact, without reopening or re-notifying anyone).
-  if (existing.refundIssued) {
-    throw new Error(
-      "This discount's refund has already been marked as returned. " +
-      "Only an Admin can correct the recorded amount now, via the discount correction option."
-    );
-  }
-
-  // Payment is already fully refunded — closed out, nothing left to
-  // discount against. Writing a discount here wouldn't change any money
-  // (the math short-circuits to zero) but it would sit on the record
-  // looking like an active discount on a payment that's already settled.
-  if (String(existing.status || "").toLowerCase() === "refunded") {
-    throw new Error("This payment has already been refunded — a discount can't be applied to it.");
-  }
-
-  // A refund request is open (Pending review or Approved but not yet
-  // physically returned). Changing the discount now would silently shift
-  // the numbers computeRefundPlan is using mid-flight, or disagree with
-  // an amount that's already gone out via PayMongo/cash.
+  // A refund request is open for this payment: changing the numbers now would disagree with it.
   const openRefundRequest = await findOpenRefundRequest(existing.paymentID || doc.id);
   if (openRefundRequest) {
     throw new Error(
       "A refund request is already open for this payment. " +
-      "Resolve or cancel that refund request before applying a new discount."
+      "Resolve or cancel that refund request before giving a discount."
     );
   }
 
-  // A balance checkout is open on PayMongo for this booking. PayMongo fixes the amount when the
-  // session is created, so a discount applied now could never reach what the customer is charged
-  // (they would pay the old amount and the difference would come back as a hand-back).
-  // Let it finish -- paid, failed or cancelled -- then apply the discount.
+  // A balance checkout is open on PayMongo. PayMongo fixes the amount when the session is created,
+  // so a discount given now could never reach what the customer is charged. Let it finish first.
   if (String(existing.balanceStatus || "").toLowerCase() === "pending") {
     throw new Error(
       "A balance payment is in progress on PayMongo for this booking. " +
-      "Wait for it to finish (or fail) before applying a discount, so the customer is charged the right amount."
+      "Wait for it to finish (or fail) before giving a discount, so the customer is charged the right amount."
     );
   }
 
-  // Figure out if this new discount amount spills past the outstanding
-  // balance — i.e. creates a refund owed to the customer. Reset
-  // refundIssued to false here: this is a fresh discount value, so any
-  // earlier "returned" mark doesn't necessarily still apply to it.
+  // Only what spills past the balance is money going back to the customer.
   const { refundDue } = computeAmounts({ ...existing, discountAmount, refundIssued: false });
+  const paymentID = existing.paymentID || doc.id;
+  const customerUserID = resolveCustomerUserID(existing.userID, booking);
+  const refundNote = reason ? `Discount for booking ${bookingID}: ${reason}` : `Discount for booking ${bookingID}`;
 
-  await doc.ref.update({
+  // The money goes back FIRST. If PayMongo refuses, nothing below is saved.
+  let refund = null; // { refundID, kind } when PayMongo accepted it
+  let inStoreRefund = false;
+  if (refundDue > 0) {
+    const plan = planDiscountRefund(existing, refundDue);
+    if (plan.error) throw new Error(plan.error);
+    if (plan.paymongo) {
+      const refundID = await createPaymongoRefund({
+        paymongoPaymentID: plan.paymongo.paymongoPaymentID,
+        amount: refundDue,
+        reason: refundNote,
+      });
+      refund = { refundID, kind: plan.paymongo.kind };
+    } else {
+      inStoreRefund = true;
+    }
+  }
+
+  // One batch: the discount and (when PayMongo took the refund) the "money out" row, so the two can
+  // never disagree.
+  const now = new Date();
+  const batch = db.batch();
+  batch.update(doc.ref, {
     discountAmount,
     discountReason: reason || "",
     discountBy:     appliedBy || "—",
     discountAt:     admin.firestore.FieldValue.serverTimestamp(),
-    refundDue,
-    refundIssued:   false,
+    refundDue:      refund ? 0 : refundDue,
+    refundIssued:   !!refund,
     updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
   });
+  if (refund) {
+    batch.set(db.collection(ENTRY_COLLECTION).doc(`${paymentID}_discountrefund`), {
+      paymentEntryID: `${paymentID}_discountrefund`,
+      paymentID,
+      bookingID,
+      userID: existing.userID || customerUserID || null,
+      refundReqID: null,
+      penaltyID: null,
+      direction: "out",
+      phase: refund.kind,
+      source: "online",
+      method: null,
+      amount: refundDue,
+      status: "pending",              // PayMongo confirms the refund afterwards
+      referenceNumber: refund.refundID,
+      sessionID: null,
+      transactionFee: null,
+      processedBy: appliedBy || null,
+      processedAt: now,
+      settledAt: null,
+      groupID: null,
+      transactionErrorNote: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  await batch.commit();
 
-  // Lightweight bell ping to Owner/Admin/Supervisor for EVERY discount —
-  // separate from the refund_due alert below, which is specifically about
-  // money owed back and stays as its own actionable notification. This one
-  // is just "a discount happened," so staff aren't blind to discounts that
-  // never create a refund.
+  const after = computeAmounts({ ...existing, discountAmount, refundIssued: !!refund });
+
+  // Bell ping to Owner/Admin/Supervisor for every discount.
   await notifyStaff({
     type: "discount_applied",
     refID: bookingID,
@@ -702,134 +717,135 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     message: `A discount of ₱${discountAmount.toLocaleString()} was applied to booking ${bookingID}${reason ? ` (${reason})` : ""}.`,
   });
 
-  if (refundDue > 0) {
-    // Fanned out to Owner/Admin/Supervisor only — no longer a global
-    // userID:null doc.
+  if (inStoreRefund) {
+    // Only money that was never on PayMongo ends up here: staff have to return it in store.
     await notifyStaff({
       type: "refund_due",
       refID: bookingID,
       refCollection: "bookings",
       title: "Refund due to customer",
-      message: `A discount was applied to booking ${bookingID} after it was already paid — ₱${refundDue.toLocaleString()} needs to be returned to the customer.`,
+      message: `A discount was given on booking ${bookingID} after it was paid in store — ₱${refundDue.toLocaleString()} needs to be returned to the customer in store.`,
     });
   } else {
-    // Discount was reduced/removed so it no longer creates a refund —
-    // clear out any stale active alert for this booking.
     await resolveNotification("refund_due", bookingID);
   }
 
-  // Customer-facing bell — separate from the staff alert above. A discount
-  // is good news for the customer either way, so this fires regardless of
-  // whether it also created a refund; the wording just adds the refund
-  // line when there is one, without exposing the internal discountReason.
-  const customerUserID = resolveCustomerUserID(existing.userID, booking);
+  // Customer-facing bell: what the discount did for THEM.
   await notifyCustomer(
     customerUserID, bookingID, "discount_applied", "Discount Applied",
-    refundDue > 0
-      ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Since you already paid, ₱${refundDue.toLocaleString()} will be returned to you.`
-      : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}.`
+    refund
+      ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. ₱${refundDue.toLocaleString()} is being refunded to your original payment method.`
+      : inStoreRefund
+        ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. ₱${refundDue.toLocaleString()} will be returned to you in store.`
+        : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Your remaining balance is now ₱${after.balance.toLocaleString()}.`
   );
 
   createTransactionLog({
     bookingID,
-    paymentID: existing.paymentID || doc.id,
+    paymentID,
     userID: customerUserID,
     type: "Discount",
     amount: discountAmount,
     status: "Success",
     description: reason
-      ? `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}: ${reason}`
-      : `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}.`,
+      ? `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}: ${reason}${refund ? ` (refunded via PayMongo, ref ${refund.refundID})` : ""}`
+      : `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${refund ? ` (refunded via PayMongo, ref ${refund.refundID})` : ""}.`,
     performedBy: appliedBy || "—",
   });
 
   auditSafe({
     action: "update",
-    description: `Discount of ₱${discountAmount.toLocaleString()} applied to booking ${bookingID}${reason ? ` (${reason})` : ""}${refundDue > 0 ? `; ₱${refundDue.toLocaleString()} now owed back to the customer` : ""}.`,
+    description: `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${reason ? ` (${reason})` : ""}${refund ? `; ₱${refundDue.toLocaleString()} refunded through PayMongo (${refund.refundID})` : inStoreRefund ? `; ₱${refundDue.toLocaleString()} to be returned in store` : `; remaining balance is now ₱${after.balance.toLocaleString()}`}.`,
     userID: appliedBy || null,
     bookingID,
-    paymentID: existing.paymentID || doc.id,
+    paymentID,
   });
 
-  return { id: doc.id, bookingID, discountAmount, refundDue };
+  return {
+    id: doc.id, bookingID, discountAmount,
+    refundDue: refund ? 0 : refundDue,
+    refundedVia: refund ? "paymongo" : inStoreRefund ? "in_store" : null,
+    balanceAfter: after.balance,
+  };
 };
 
 // ─────────────────────────────────────────────
-// Admin-only "backdoor" correction — for when a discount's refund has
-// ALREADY been marked as returned (refundIssued: true) via
-// markRefundIssued(), but the recorded amount was wrong (e.g. staff
-// verbally told the driver ₱500 but only entered ₱50 in the system, the
-// driver handed over ₱500 and clicked "given" against the ₱50 figure).
+// "Notify customer to pay" the remaining balance.
 //
-// This exists purely to fix the paper trail after the fact — it does NOT
-// reopen the refund (refundIssued stays true) and does NOT create or
-// touch the refund_due notification, since nothing further is being
-// asked of the driver or anyone else; the money already changed hands.
-// Route-gated to Admin only (see payments.routes.js) — Owner and
-// Supervisor go through the normal applyDiscount() edit flow instead,
-// which is blocked once refundIssued is true (see above).
+// The balance is paid online (PayMongo) from the customer's own booking. This just nudges them
+// with a bell notification. It can't be spammed: one reminder per booking every 6 hours.
 // ─────────────────────────────────────────────
-export const correctIssuedDiscount = async (bookingID, amount, reason, correctedBy) => {
+const BALANCE_REMINDER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+export const notifyBalanceDue = async (bookingID, notifiedBy) => {
   if (!bookingID) throw new Error("bookingID is required.");
-  const discountAmount = Number(amount);
-  if (!Number.isFinite(discountAmount) || discountAmount < 0) {
-    throw new Error("Discount must be a valid, non-negative peso amount.");
-  }
-  if (!reason || !reason.trim()) {
-    throw new Error("A reason is required when correcting an already-issued discount.");
-  }
 
-  const snap = await db.collection("payments")
-    .where("bookingID", "==", bookingID)
-    .limit(1)
-    .get();
+  const snap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   if (snap.empty) throw new Error("No payment record found for this booking.");
-
   const doc = snap.docs[0];
-  const existing = await hydratePaymentData(doc.data(), doc.id);
+  const data = await hydratePaymentData(doc.data(), doc.id);
 
-  if (!existing.refundIssued) {
-    throw new Error(
-      "This booking's refund hasn't been marked as returned yet — use the normal discount edit instead."
-    );
+  const status = String(data.status || "").toLowerCase();
+  if (status !== "paid" && status !== "approved") {
+    throw new Error("The first payment hasn't been received yet — there is no remaining balance to remind about.");
+  }
+  const balanceStatus = String(data.balanceStatus || "").toLowerCase();
+  if (balanceStatus === "pending") {
+    throw new Error("The customer already has a balance payment in progress on PayMongo.");
+  }
+  const { balance } = computeAmounts(data);
+  if (balanceStatus === "paid" || balance <= 0) {
+    throw new Error("There is no remaining balance on this booking.");
+  }
+  if (await findOpenRefundRequest(data.paymentID || doc.id)) {
+    throw new Error("A refund request is open for this booking — resolve it before asking for the balance.");
   }
 
-  // Same cap as applyDiscount — a correction still can't record a discount
-  // bigger than the booking was ever worth.
-  const totalFee = Number(existing.amount) || 0;
-  if (discountAmount > totalFee) {
-    throw new Error(`Discount can't exceed the total fee of ₱${totalFee.toLocaleString()}.`);
+  const last = data.balanceReminderAt?.toDate ? data.balanceReminderAt.toDate()
+             : data.balanceReminderAt ? new Date(data.balanceReminderAt) : null;
+  if (last && Date.now() - last.getTime() < BALANCE_REMINDER_COOLDOWN_MS) {
+    const err = new Error("The customer was already reminded recently. Please wait before sending another reminder.");
+    err.status = 429;
+    err.retryAfterSeconds = Math.ceil((BALANCE_REMINDER_COOLDOWN_MS - (Date.now() - last.getTime())) / 1000);
+    err.lastNotifiedAt = last.toISOString();
+    throw err;
   }
 
-  const previousAmount = Number(existing.discountAmount) || 0;
+  const booking = await findBookingByBookingID(bookingID);
+  const customerUserID = resolveCustomerUserID(data.userID, booking);
+  if (!customerUserID) throw new Error("This booking has no customer account to notify.");
 
-  // Recompute refundDue against the corrected number, but leave
-  // refundIssued exactly as it was (true) — this is a records-only fix,
-  // not a new refund event.
-  const { refundDue } = computeAmounts({ ...existing, discountAmount, refundIssued: true });
-
+  await notifyCustomer(
+    customerUserID, bookingID, "balance_reminder", "Remaining balance due",
+    `Please pay the remaining ₱${balance.toLocaleString()} for your booking ${bookingID}. You can pay it online from your booking.`
+  );
   await doc.ref.update({
-    discountAmount,
-    discountReason: reason.trim(),
-    refundDue,
-    discountCorrectedBy: correctedBy || "—",
-    discountCorrectedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt:           admin.firestore.FieldValue.serverTimestamp(),
+    balanceReminderAt: admin.firestore.FieldValue.serverTimestamp(),
+    balanceReminderBy: notifiedBy || null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Deliberately no createNotification()/resolveNotification() call here
-  // — see comment above.
+  auditSafe({
+    action: "update",
+    description: `Customer reminded to pay the remaining ₱${balance.toLocaleString()} for booking ${bookingID}.`,
+    userID: notifiedBy || null,
+    bookingID,
+    paymentID: data.paymentID || doc.id,
+  });
 
-  return { id: doc.id, bookingID, previousAmount, discountAmount, refundDue };
+  return { bookingID, balance, notifiedAt: new Date().toISOString() };
 };
 
 // ─────────────────────────────────────────────
-// Staff OR the driver holding the cash confirming a refund-due amount
-// (see applyDiscount()'s refundDue above) was actually handed back to
-// the customer. Resolves the refund_due notification once marked.
+// A refund that could NOT go back through PayMongo (the money was received in store) is handed
+// back in store. A Supervisor / Admin / Owner records it here with how it was returned and, for
+// anything but cash, the reference number. Drivers no longer do this.
+// Resolves the refund_due notification once marked.
 // ─────────────────────────────────────────────
-export const markRefundIssued = async (bookingID, issuedBy) => {
+export const markRefundIssued = async (bookingID, issuedBy, details = {}) => {
   if (!bookingID) throw new Error("bookingID is required.");
+  const method = details.paymentMethod || "Cash";
+  assertValidPaymentMethod(method);
+  const reference = cleanReference(method, details.referenceNumber);
 
   const snap = await db.collection("payments")
     .where("bookingID", "==", bookingID)
@@ -869,10 +885,10 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
     direction: "out",
     phase: data.balanceCollected ? "balance" : "deposit",
     source: "in_person",
-    method: "cash",
+    method: method.toLowerCase().replace(/\s+/g, "_"),
     amount: refundDue,
     status: "success",
-    referenceNumber: null,
+    referenceNumber: reference,
     sessionID: null,
     transactionFee: null,
     processedBy: issuedBy || null,
@@ -901,7 +917,9 @@ export const markRefundIssued = async (bookingID, issuedBy) => {
     type: "Refund",
     amount: refundDue,
     status: "Refunded",
-    description: `Discount-spillover refund of ₱${refundDue.toLocaleString()} handed back to customer for booking ${bookingID}.`,
+    paymentMethod: method,
+    referenceNumber: reference,
+    description: `Discount refund of ₱${refundDue.toLocaleString()} returned to customer in store for booking ${bookingID} via ${method}${reference ? ` (ref ${reference})` : ""}.`,
     performedBy: issuedBy || "—",
   });
 
@@ -966,6 +984,11 @@ export const getAllPayments = async () => {
 export const updatePaymentStatus = async (id, status, performedBy = null) => {
   const allowed = ["Pending", "Approved", "Rejected", "Cancelled"];
   if (!allowed.includes(status)) throw new Error("Invalid status.");
+  // Every payment goes through PayMongo, which confirms it by itself the moment the customer pays.
+  // Staff can no longer mark a payment as received by hand.
+  if (status === "Approved") {
+    throw new Error("Payments can't be approved by hand any more. They are marked as paid automatically when the customer pays through PayMongo.");
+  }
 
   const ref  = db.collection("payments").doc(id);
   const snap = await ref.get();

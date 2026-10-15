@@ -3,9 +3,8 @@ import {
   updatePaymentStatus,
   getPaymentById,
   collectRemainingBalance,
-  confirmInitialPayment,
   applyDiscount,
-  correctIssuedDiscount,
+  notifyBalanceDue,
   markRefundIssued,
 } from "../../services/payments/payments.service.js";
 
@@ -66,32 +65,15 @@ export const discountPayment = async (req, res) => {
   }
 };
 
-// Admin-only "backdoor" — corrects an already-issued discount's recorded
-// amount (see correctIssuedDiscount() for why this is separate from
-// discountPayment above). Owner/Supervisor cannot call this route at all
-// (see payments.routes.js) — they get a 403 before this ever runs.
-export const correctDiscount = async (req, res) => {
-  try {
-    const { bookingID } = req.params;
-    const { amount, reason } = req.body;
-    const correctedBy = req.user?.email || req.user?.uid || "admin";
-    const result = await correctIssuedDiscount(bookingID, amount, reason, correctedBy);
-    return res.status(200).json({ success: true, data: result, message: "Discount record corrected." });
-  } catch (error) {
-    console.error("[PAYMENTS] discount correction error:", error);
-    return res.status(400).json({ success: false, message: error.message });
-  }
-};
-
-// Staff (Owner/Admin/Supervisor) confirming a refund-due amount (see
-// applyDiscount's refundDue) was actually handed back to the customer.
-// See driverDispatch controller's myRefundIssued for the driver-facing
-// equivalent — the driver holding the cash can mark this too.
+// Supervisor / Admin / Owner recording that a refund which could NOT go back through PayMongo
+// (money received in store) was handed back in store. Needs how it was returned and, for
+// anything but cash, the reference number.
 export const refundIssued = async (req, res) => {
   try {
     const { bookingID } = req.params;
+    const { paymentMethod, referenceNumber } = req.body || {};
     const issuedBy = actorUid(req) || "staff";
-    await markRefundIssued(bookingID, issuedBy);
+    await markRefundIssued(bookingID, issuedBy, { paymentMethod, referenceNumber });
     return res.status(200).json({ success: true, message: "Refund marked as returned." });
   } catch (error) {
     console.error("[PAYMENTS] refund-issued error:", error);
@@ -99,37 +81,34 @@ export const refundIssued = async (req, res) => {
   }
 };
 
-// Staff (Owner/Admin/Supervisor) confirming cash/in-person receipt of a
-// booking's initial payment — e.g. at the counter or at pickup — without
-// having to leave Car Tracking for the Payments page. PayMongo payments
-// never need this; the webhook already confirms those automatically.
-// See driverDispatch controller's confirmPayment for the driver-facing
-// equivalent of this.
-export const confirmPayment = async (req, res) => {
+// IN-STORE payment of the remaining balance — Supervisor / Admin / Owner only (drivers no longer
+// collect cash). The normal way to pay is online; this records the exception with its details:
+// payment mode and reference number (required for anything but cash).
+export const collectBalance = async (req, res) => {
   try {
     const { bookingID } = req.params;
-    const { paymentMethod } = req.body;
-    const confirmedBy = actorUid(req) || "staff";
-    await confirmInitialPayment(bookingID, confirmedBy, paymentMethod);
-    return res.status(200).json({ success: true, message: "Payment marked as received." });
+    const { paymentMethod, referenceNumber } = req.body || {};
+    const collectedBy = actorUid(req) || "staff";
+    await collectRemainingBalance(bookingID, collectedBy, paymentMethod, referenceNumber);
+    return res.status(200).json({ success: true, message: "In-store payment recorded." });
   } catch (error) {
-    console.error("[PAYMENTS] confirm error:", error);
+    console.error("[PAYMENTS] collect-balance error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };
 
-// Staff (Owner/Admin/Supervisor) receiving cash/in-person payment of the
-// remaining balance — e.g. before or during pickup. See driverDispatch
-// controller's collectBalance for the driver-facing equivalent of this.
-export const collectBalance = async (req, res) => {
+// "Notify customer to pay" the remaining balance (bell notification, 6-hour cooldown per booking).
+export const notifyBalance = async (req, res) => {
   try {
     const { bookingID } = req.params;
-    const { paymentMethod } = req.body;
-    const collectedBy = actorUid(req) || "staff";
-    await collectRemainingBalance(bookingID, collectedBy, paymentMethod);
-    return res.status(200).json({ success: true, message: "Balance marked as collected." });
+    const data = await notifyBalanceDue(bookingID, actorUid(req) || null);
+    return res.status(200).json({ success: true, data, message: "Customer notified." });
   } catch (error) {
-    console.error("[PAYMENTS] collect-balance error:", error);
-    return res.status(400).json({ success: false, message: error.message });
+    if (error.status !== 429) console.warn("[PAYMENTS] notify-balance rejected:", error.message);
+    return res.status(error.status || 400).json({
+      success: false,
+      message: error.message,
+      ...(error.retryAfterSeconds != null ? { retryAfterSeconds: error.retryAfterSeconds, lastNotifiedAt: error.lastNotifiedAt } : {}),
+    });
   }
 };

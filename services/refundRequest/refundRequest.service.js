@@ -300,7 +300,7 @@ export const getStaffRefundOutcome = async (bookingID) => {
 };
 
 // One PayMongo refund against one payment. Returns the PayMongo refund id.
-const createPaymongoRefund = async ({ paymongoPaymentID, amount, reason }) => {
+export const createPaymongoRefund = async ({ paymongoPaymentID, amount, reason }) => {
   let response;
   try {
     response = await fetch(`${PAYMONGO_V1}/refunds`, {

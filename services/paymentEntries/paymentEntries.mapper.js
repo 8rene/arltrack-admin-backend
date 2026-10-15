@@ -161,7 +161,7 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
       method: m.method,
       amount: recorded ? Number(rec) : expectedBalance,
       status: "success",
-      referenceNumber: null,
+      referenceNumber: nullIfSentinel(p.balanceReferenceNumber),
       sessionID: null,
       transactionFee: null,
       processedBy: nullIfSentinel(p.balanceCollectedBy),
@@ -346,7 +346,7 @@ const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
   "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoChannel", "lastSettledVia",
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
-  "balanceMethod", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
+  "balanceMethod", "balanceReferenceNumber", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
   // staff collected the balance in person / handed a discount spillover back: both are facts of an entry row
   "balanceCollected", "balanceCollectedAmount", "refundIssuedBy", "refundIssuedAt",
 ];
@@ -393,6 +393,7 @@ const hydratePayment = (payment, entries, opts = {}) => {
       if (bal.status === "success") fill("balancePaidAt", bal.settledAt);
     } else {
       fill("balanceMethod", BALANCE_METHOD_LABEL[bal.method] || null);
+      fill("balanceReferenceNumber", bal.referenceNumber);
       fill("balanceCollectedBy", bal.processedBy);
       fill("balanceCollectedAt", bal.processedAt || bal.settledAt);
       // "staff collected the balance" is no longer stored on the payment: it IS a settled in-person balance row.
