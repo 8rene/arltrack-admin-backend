@@ -51,11 +51,44 @@ export const listTermsVersions = async (limit = 50) => {
   return snap.docs.map((d) => shape(d.id, d.data(), { withContent: false }));
 };
 
+// Bookings made BEFORE the customer app switched to termsVersions were accepted against a
+// hash in `termsSnapshots/{hash}` ({ version, sections:[{ title, highlight?, body?, list?, footer? }] }).
+// Read-only: converted to the same Markdown shape so those old agreements can still be opened.
+const sectionsToMarkdown = (sections = []) => {
+  const out = ["# ARL Car Rental — Terms & Conditions", ""];
+  sections.forEach((s, i) => {
+    out.push(`## ${i + 1}. ${s.title}`, "");
+    if (s.highlight) out.push(`**${s.highlight}**`, "");
+    if (s.body) out.push(s.body, "");
+    if (Array.isArray(s.list)) { s.list.forEach((it) => out.push(`- **${it.label}:** ${it.value}`)); out.push(""); }
+    if (s.footer) out.push(s.footer, "");
+  });
+  return out.join("\n").replace(/\n+$/, "\n");
+};
+
+const getLegacyTermsByHash = async (hash) => {
+  const doc = await db.collection("termsSnapshots").doc(String(hash)).get();
+  if (!doc.exists) return null;
+  const snap = doc.data();
+  return {
+    termsVersionID: null,
+    version: snap.version ?? null,
+    changeNote: "",
+    contentLength: 0,
+    createdAt: null,
+    createdBy: null,
+    content: sectionsToMarkdown(snap.sections),
+    legacy: true,
+  };
+};
+
 // One specific version, with content (for "view" / "restore").
+// `id` is normally a termsVersions doc ID; if there is no such doc it may be the hash of an
+// older (pre-termsVersions) agreement, which is read from termsSnapshots instead.
 export const getTermsVersion = async (id) => {
   const doc = await db.collection(COLLECTION).doc(String(id)).get();
-  if (!doc.exists) return null;
-  return shape(doc.id, doc.data());
+  if (doc.exists) return shape(doc.id, doc.data());
+  return getLegacyTermsByHash(id);
 };
 
 // Create the next version. Runs in a transaction so two admins saving at the

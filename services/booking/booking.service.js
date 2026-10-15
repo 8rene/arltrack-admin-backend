@@ -246,6 +246,17 @@ const archiveNotification = async ({ userID, bookingID, docID, oldStatus, newSta
 // Main service functions
 // ─────────────────────────────────────────────
 
+// The T&C number (1.00, 1.01 …) a booking agreed to. The booking only stores the immutable
+// termsVersions doc ID, so the number is read from that doc. null if it can't be found.
+const resolveTermsVersionNumber = async (id) => {
+  try {
+    const doc = await db.collection("termsVersions").doc(String(id)).get();
+    return doc.exists ? (doc.data().version ?? null) : null;
+  } catch {
+    return null;
+  }
+};
+
 export const getAllBookings = async (statusFilter) => {
   const filter = statusFilter?.toLowerCase();
 
@@ -350,6 +361,11 @@ export const getAllBookings = async (statusFilter) => {
   const historyMap     = Object.fromEntries(historyEntries);
   const beforeDocsMap  = Object.fromEntries(beforeDocsEntries);
   const afterDocsMap   = Object.fromEntries(afterDocsEntries);
+  // Which T&C version each booking agreed to — one read per DISTINCT termsVersionID.
+  const termsIDs = [...new Set(rows.map((b) => b.termsVersionID).filter(Boolean))];
+  const termsMap = Object.fromEntries(
+    await Promise.all(termsIDs.map((id) => resolveTermsVersionNumber(id).then((v) => [id, v])))
+  );
 
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
@@ -402,6 +418,12 @@ export const getAllBookings = async (statusFilter) => {
       driverName:       b.driverID ? (driverMap[b.driverID]?.customerName || "—") : null,
       driverPhone:      b.driverID ? (driverMap[b.driverID]?.phone || "—") : null,
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
+      // T&C the customer agreed to. termsVersionID + termsAcceptedAt are already on `b`.
+      // termsViewID is what /terms?version=<id> opens: the termsVersions doc ID, or (for bookings
+      // from before the switch) the old termsHash. termsVersionNumber is the readable 1.00 / 1.01.
+      termsViewID:        b.termsVersionID || b.termsHash || null,
+      termsVersionNumber: b.termsVersionID ? (termsMap[b.termsVersionID] ?? null) : (b.termsVersion ?? null),
+      termsLegacy:        !b.termsVersionID && !!b.termsHash,
       hasHistory:       histInfo.hasHistory,
       bookingSessionID: histInfo.bookingSessionID,
       lastArchivedAt:   histInfo.lastArchivedAt,

@@ -15,7 +15,7 @@
 //
 // Booking-time warnings keep a copy of the rule, not a live link:
 // bookingSessions.codingWarnings[] copies city / dayOfWeek / startTime / endTime and
-// stores this doc's ID as codingRulesID only as a trace. Editing or deleting a rule
+// stores this doc's ID as ruleID only as a trace. Editing or deleting a rule
 // here never changes what an old booking was warned about.
 //
 // This is a plain shape, same convention as models/car/car.model.js — no
