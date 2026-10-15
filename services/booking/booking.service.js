@@ -344,6 +344,13 @@ export const getAllBookings = async (statusFilter) => {
   const beforeDocsMap  = Object.fromEntries(beforeDocsEntries);
   const afterDocsMap   = Object.fromEntries(afterDocsEntries);
 
+  // Terms version the customer agreed to: one small lookup per distinct termsVersionID
+  // (usually only a handful of versions exist), read from the immutable termsVersions doc.
+  const termsIDs = [...new Set(rows.map((b) => b.termsVersionID).filter(Boolean))];
+  const termsMap = Object.fromEntries(await Promise.all(
+    termsIDs.map((id) => db.collection("termsVersions").doc(String(id)).get().then((d) => [id, d.exists ? d.data().version : null]))
+  ));
+
   return rows.map((b) => {
     const bID     = b.bookingID || b.id;
     const payInfo = paymentMap[bID] || EMPTY_PAYMENT_INFO;
@@ -395,6 +402,10 @@ export const getAllBookings = async (statusFilter) => {
       driverName:       b.driverID ? (driverMap[b.driverID]?.customerName || "—") : null,
       driverPhone:      b.driverID ? (driverMap[b.driverID]?.phone || "—") : null,
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
+      // Which Terms & Conditions the customer accepted for this booking (null on older bookings).
+      termsVersionID:   b.termsVersionID || null,
+      termsVersion:     b.termsVersionID ? (termsMap[b.termsVersionID] ?? null) : null,
+      termsAcceptedAt:  b.termsAcceptedAt || null,
       hasHistory:       histInfo.hasHistory,
       bookingSessionID: histInfo.bookingSessionID,
       lastArchivedAt:   histInfo.lastArchivedAt,

@@ -15,6 +15,11 @@ export const Booking = {
   isReviewed: false,
   userRating: null,
   notesUser: "",
+  // Terms & Conditions the customer agreed to for THIS booking (written once by the customer
+  // backend at creation, never edited). termsVersionID points to the exact immutable doc in
+  // termsVersions; the version number is read from it when needed.
+  termsVersionID: "",
+  termsAcceptedAt: null,   // server timestamp of the checkbox agreement
   notesAdmin: "",
   createdAt: null,
   updatedAt: null,    // stamped on every admin change (edit, cancel, reject, driver assign / unassign, payment approval, refund cancel)

@@ -1,18 +1,24 @@
-import crypto from "crypto";
 import admin from "firebase-admin";
 import { db } from "../../config/firebaseConnection/firebase.js";
 
 const COLLECTION = "termsVersions";
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
-const MAX_TITLE_LEN = 150;
 const MAX_NOTE_LEN = 500;
 // Bytes, not characters — express.json() rejects bodies over 100 kb, so stay under it.
 const MAX_CONTENT_BYTES = 90000;
 
 const normalize = (s) => String(s ?? "").replace(/\r\n/g, "\n").trim();
-const hashOf = (title, content) =>
-  crypto.createHash("sha256").update(`${title}\n${content}`).digest("hex");
+
+// Versions are compared in hundredths (1.01 -> 101) so there is no floating-point drift.
+// Returns null unless the value is a number with at most 2 decimals.
+const toCents = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  const c = Math.round(n * 100);
+  return Math.abs(n * 100 - c) > 1e-6 ? null : c;
+};
+const fmtVersion = (cents) => (cents / 100).toFixed(2);
 
 const iso = (ts) => (ts && typeof ts.toDate === "function" ? ts.toDate().toISOString() : null);
 
@@ -21,9 +27,7 @@ const shape = (id, data, { withContent = true } = {}) => {
   const out = {
     termsVersionID: id,
     version: data.version,
-    title: data.title,
     changeNote: data.changeNote || "",
-    contentHash: data.contentHash || "",
     contentLength: (data.content || "").length,
     createdAt: iso(data.createdAt),
     createdBy: data.createdBy || null,
@@ -57,13 +61,9 @@ export const getTermsVersion = async (id) => {
 // Create the next version. Runs in a transaction so two admins saving at the
 // same moment can't both claim the same version number.
 export const createTermsVersion = async (payload, actor) => {
-  const title = normalize(payload?.title) || "Terms & Conditions";
   const content = normalize(payload?.content);
   const changeNote = normalize(payload?.changeNote);
 
-  if (title.length > MAX_TITLE_LEN) {
-    throw new Error(`Title must be ${MAX_TITLE_LEN} characters or fewer.`);
-  }
   if (!content) {
     throw new Error("Terms content cannot be empty.");
   }
@@ -74,7 +74,6 @@ export const createTermsVersion = async (payload, actor) => {
     throw new Error(`Change note must be ${MAX_NOTE_LEN} characters or fewer.`);
   }
 
-  const contentHash = hashOf(title, content);
   const createdBy = actor
     ? { userID: actor.userID || actor.id || null, name: actor.name || actor.username || null }
     : null;
@@ -86,17 +85,28 @@ export const createTermsVersion = async (payload, actor) => {
     const latestSnap = await tx.get(latestQuery);
     const latest = latestSnap.empty ? null : latestSnap.docs[0].data();
 
-    if (latest && latest.contentHash === contentHash) {
+    // Compare the text itself so identical content can't be published as a new version.
+    if (latest && latest.content === content) {
       throw new Error("No changes detected — the Terms are identical to the current version.");
     }
 
-    const nextVersion = latest ? latest.version + 1 : 1;
+    // Version: editor's choice, must be strictly higher than the current one.
+    // If none is sent, default to the next step (+0.01).
+    const latestCents = latest ? toCents(latest.version) ?? Math.round(Number(latest.version) * 100) : 0;
+    const asked = payload?.version;
+    const hasAsked = asked !== undefined && asked !== null && String(asked).trim() !== "";
+    const cents = hasAsked ? toCents(asked) : (latest ? latestCents + 1 : 100);
+    if (cents === null || cents < 100) {
+      throw new Error("Version must be a number like 1.00 or 1.01 (2 decimals, at least 1.00).");
+    }
+    if (latest && cents <= latestCents) {
+      throw new Error(`Version must be higher than the current version (${fmtVersion(latestCents)}).`);
+    }
+    const nextVersion = cents / 100;
     tx.set(newRef, {
       termsVersionID: newRef.id,
       version: nextVersion,
-      title,
       content,
-      contentHash,
       changeNote,
       createdAt: timestamp(),
       createdBy,

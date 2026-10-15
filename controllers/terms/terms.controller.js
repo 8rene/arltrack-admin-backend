@@ -13,10 +13,10 @@ export const getPublicTerms = async (req, res) => {
     const t = await getCurrentTerms();
     res.set("Cache-Control", "public, max-age=60");
     if (!t) return res.status(200).json({ success: true, data: null });
-    const { termsVersionID, version, title, content, contentHash, createdAt } = t;
+    const { termsVersionID, version, content, createdAt } = t;
     return res.status(200).json({
       success: true,
-      data: { termsVersionID, version, title, content, contentHash, effectiveAt: createdAt },
+      data: { termsVersionID, version, content, effectiveAt: createdAt },
     });
   } catch (error) {
     console.error("[TERMS] getPublicTerms error:", error);
@@ -59,7 +59,8 @@ export const getVersion = async (req, res) => {
 };
 
 // POST /api/settings/terms
-// Body: { title?, content, changeNote? } → creates the NEXT version.
+// Body: { content, version?, changeNote? } → creates a new version.
+// `version` (e.g. 1.01) must be higher than the current one; omitted = current + 0.01.
 export const createVersion = async (req, res) => {
   try {
     const actor = req.user ? { userID: req.user.uid, name: req.user.email } : null;
