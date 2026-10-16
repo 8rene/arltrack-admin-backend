@@ -1,26 +1,34 @@
-// Receipt builder for ONE money movement (a paymentEntries row). (was receipt.core.js + receipt.service.js)
+// Receipts + Booking Statement + the shared email limit.
 //
-// A receipt is generated on demand from the entry -- nothing about it is stored, so it can never disagree with the
-// money rows. `makeReceiptBuilder` takes `db`, `resolveName` and `getSettings` so it can run against a fake; `buildReceipt` at the
-// bottom is the one bound to the real Firestore.
+// A hand-ported copy of this logic lives in the customer backend (utils/receipt/receipt.util.js), so a customer and a staff
+// member see the same numbers. Change one, change the other.
 //
-//   kind "payment"         money in, phase deposit | balance      -> "Payment Receipt"
-//   kind "penalty"         money in, phase penalty                -> "Penalty Receipt" (one line per penalty paid together, via groupID)
-//   kind "refund"          money out, a refund of deposit/balance/penalty -> "Refund Slip"
-//   kind "deposit_return"  money out, the security deposit handed back   -> "Deposit Return Slip"
-//
-// Only a SUCCESSFUL entry gets one: pending / failed / cancelled / unrefundable movements are not receipts.
 import crypto from "crypto";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { resolveUserName } from "../archives/resolveUserName.service.js";
 import { getSystemSettings } from "../systemSettings/systemSettings.service.js";
 
-const LIVE = "paymentEntries";
-const ARCHIVE = "paymentEntryArchives";
+// A RECEIPT is for ONE money movement (a paymentEntries row):
+//   kind "payment"         money in, phase deposit | balance                -> "Payment Receipt"
+//   kind "penalty"         money in, phase penalty (one line per penalty paid together, via groupID) -> "Penalty Receipt"
+//   kind "refund"          money out, a refund of deposit/balance/penalty   -> "Refund Slip"
+//   kind "deposit_return"  money out, the security deposit handed back      -> "Security Deposit Return Slip"
+// Only a SUCCESSFUL entry gets one: pending / failed / cancelled / unrefundable movements are not receipts.
+//
+// A BOOKING STATEMENT is ONE overall document for a whole booking: every payment, every penalty, the deposit, refunds,
+// what is still pending, and the overall figures -- as of the moment it is built.
+//
+// Both are generated on demand and nothing about them is stored, so they can never disagree with the money rows.
+
+const ENTRY_COLLECTIONS = ["paymentEntries", "paymentEntryArchives"];   // live first: a live row wins
+const PENALTY_COLLECTIONS = ["penalties", "penaltyArchives"];
 
 const toISO = (v) => (v?.toDate ? v.toDate().toISOString() : v instanceof Date ? v.toISOString() : v ?? null);
+const toMs = (v) => { const d = v?.toDate ? v.toDate() : v ? new Date(v) : null; return d && !isNaN(d) ? d.getTime() : 0; };
 const num = (v) => Number(v) || 0;
 const round2 = (n) => Math.round(n * 100) / 100;
+const sum = (rows, f = (r) => r.amount) => round2(rows.reduce((s, r) => s + num(f(r)), 0));
+const httpError = (status, message) => Object.assign(new Error(message), { status });
 
 export const KIND_TITLES = {
   payment: "Payment Receipt",
@@ -36,29 +44,34 @@ export const kindOf = (e) => {
   return e.phase === "penalty" ? "penalty" : "payment";
 };
 
+const ymdManila = (iso) => {
+  const d = iso ? new Date(iso) : null;
+  return d && !isNaN(d) ? d.toLocaleDateString("en-CA", { timeZone: "Asia/Manila" }).replace(/-/g, "").slice(2) : "000000";
+};
+
 // Same entry always gets the same number: <prefix>-<yyMMdd (Manila time) of the money moving>-<6 hex chars of the id>.
 // Penalties paid together share one receipt, so they hash the groupID instead of the individual entry id.
 export const receiptNumberFor = (entry, kind, whenISO) => {
-  const d = whenISO ? new Date(whenISO) : null;
-  const ymd = d && !isNaN(d)
-    ? d.toLocaleDateString("en-CA", { timeZone: "Asia/Manila" }).replace(/-/g, "").slice(2)
-    : "000000";
   const key = entry.groupID ? `group:${entry.groupID}` : String(entry.id);
   const hash = crypto.createHash("sha1").update(key).digest("hex").slice(0, 6).toUpperCase();
-  return `${KIND_PREFIX[kind]}-${ymd}-${hash}`;
+  return `${KIND_PREFIX[kind]}-${ymdManila(whenISO)}-${hash}`;
 };
 
-// j***@gmail.com -- enough for staff to confirm it is the right inbox without showing the whole address.
+// BS-<yyMMdd (Manila) the statement was generated>-<6 hex chars of the bookingID>. Same booking + same day = same number;
+// a later statement of the same booking gets a new date, which is right: its figures may have moved.
+export const statementNumberFor = (bookingID, atISO) => {
+  const hash = crypto.createHash("sha1").update(`statement:${bookingID}`).digest("hex").slice(0, 6).toUpperCase();
+  return `BS-${ymdManila(atISO)}-${hash}`;
+};
+
+// j***@gmail.com -- enough to confirm it is the right inbox without showing the whole address.
 export const maskEmail = (email) => {
   const [local, domain] = String(email || "").split("@");
   return local && domain ? `${local[0]}***@${domain}` : null;
 };
 
-const EMAIL_COOLDOWN_MS = 5 * 60 * 1000;   // one email per receipt every 5 minutes
-
-const httpError = (status, message) => Object.assign(new Error(message), { status });
-
-export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSettings = async () => ({}) }) => {
+// ───────────────────────── shared lookups ─────────────────────────
+const makeStore = (db) => {
   const docById = async (collections, id) => {
     if (!id) return null;
     for (const c of collections) {
@@ -75,16 +88,14 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
     }
     return null;
   };
-  // live first, then archive; a live row wins (same rule as the Money movements panel).
-  const rowsWhere = async (field, value) => {
+  const rowsWhere = async (collections, field, value) => {
     const rows = new Map();
-    for (const c of [LIVE, ARCHIVE]) {
+    for (const c of collections) {
       const snap = await db.collection(c).where(field, "==", value).get();
       snap.docs.forEach((d) => { if (!rows.has(d.id)) rows.set(d.id, { id: d.id, ...d.data() }); });
     }
     return [...rows.values()];
   };
-
   const vehicleName = async (carID) => {
     try {
       const car = await docById(["cars"], carID);
@@ -95,30 +106,38 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
       return [brand?.brandName, model.modelName].filter(Boolean).join(" ") || null;
     } catch { return null; }
   };
-
-  // The customer's login email -- the ONLY address a receipt is ever sent to.
+  // The customer's login email -- the ONLY address a receipt or statement is ever sent to.
   const emailOf = async (userID) => {
     try { return (await docById(["user"], userID))?.email || null; } catch { return null; }
   };
+  return { docById, firstWhere, rowsWhere, vehicleName, emailOf };
+};
 
-  // Seconds left before this receipt may be emailed again (0 = go ahead). Read from the audit log, which already
-  // records every send with the receipt number, so no extra field is written anywhere.
-  const emailCooldownLeft = async ({ paymentID, receiptNo }) => {
-    try {
-      if (!paymentID) return 0;
-      const snap = await db.collection("auditLogs").where("paymentID", "==", paymentID).get();
-      const times = snap.docs.map((d) => d.data())
-        .filter((a) => String(a.description || "").includes(receiptNo) && String(a.description).includes("emailed"))
-        .map((a) => new Date(toISO(a.createdAt) || 0).getTime());
-      const last = times.length ? Math.max(...times) : 0;
-      return Math.max(0, Math.ceil((last + EMAIL_COOLDOWN_MS - Date.now()) / 1000));
-    } catch { return 0; }
-  };
+const whenOf = (r) => toISO(r.settledAt) || toISO(r.processedAt) || toISO(r.createdAt) || "";
+const byTime = (a, b) => whenOf(a).localeCompare(whenOf(b)) || String(a.id).localeCompare(String(b.id));
 
-  const whenOf = (r) => toISO(r.settledAt) || toISO(r.processedAt) || toISO(r.createdAt) || "";
+const labelOf = (e) => {
+  if (e.direction === "out") {
+    if (e.phase === "deposit_return") return "Security deposit returned";
+    if (String(e.id).endsWith("_discountrefund")) return "Discount refund";
+    return `Refund of ${String(PHASE_LABEL[e.phase] || "payment").toLowerCase()}`;
+  }
+  return `${PHASE_LABEL[e.phase] || "Payment"} payment`;
+};
+const lineOf = (e) => ({
+  id: e.id, date: whenOf(e) || null, label: labelOf(e), amount: num(e.amount), status: e.status,
+  method: e.method || null, source: e.source || null, referenceNumber: e.referenceNumber || null,
+});
 
+// ───────────────────────── one-money-movement receipt ─────────────────────────
+export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSettings = async () => ({}), markCopies = true }) => {
+  const { docById, firstWhere, rowsWhere, vehicleName, emailOf } = makeStore(db);
+  const entryRows = (field, value) => rowsWhere(ENTRY_COLLECTIONS, field, value);
+
+  // A reprint is a COPY. Staff prints are written to the audit log with the receipt number, so look there.
+  // (The customer backend turns this off: a customer opening their own receipt is not a "reprint".)
   const alreadyPrinted = async (entry, receiptNo) => {
-    // A reprint is a COPY. Every print is written to the audit log with the receipt number, so look there.
+    if (!markCopies) return false;
     try {
       if (!entry.paymentID) return false;
       const snap = await db.collection("auditLogs").where("paymentID", "==", entry.paymentID).get();
@@ -127,7 +146,7 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
   };
 
   const buildReceipt = async ({ entryID, printedByUserID = null }) => {
-    const entry = await docById([LIVE, ARCHIVE], entryID);
+    const entry = await docById(ENTRY_COLLECTIONS, entryID);
     if (!entry) throw httpError(404, "Money movement not found.");
     if (entry.status !== "success") throw httpError(409, "Only a completed money movement has a receipt.");
 
@@ -136,9 +155,9 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
     // Rows from ONE checkout that covered several penalties share a groupID -> one receipt, one line each.
     let rows = [entry];
     if (entry.groupID) {
-      const group = (await rowsWhere("groupID", entry.groupID))
+      const group = (await entryRows("groupID", entry.groupID))
         .filter((r) => r.status === "success" && r.direction === entry.direction && r.phase === entry.phase);
-      if (group.length) rows = group.sort((a, b) => whenOf(a).localeCompare(whenOf(b)) || String(a.id).localeCompare(String(b.id)));
+      if (group.length) rows = group.sort(byTime);
     }
 
     const [booking, payment] = await Promise.all([
@@ -156,14 +175,14 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
 
     for (const [idx, r] of rows.entries()) {
       if (kind === "penalty") {
-        const p = await docById(["penalties", "penaltyArchives"], r.penaltyID);
+        const p = await docById(PENALTY_COLLECTIONS, r.penaltyID);
         const items = Array.isArray(p?.lineItems)
           ? p.lineItems.filter((i) => i && (i.description || num(i.amount))).map((i) => ({ description: i.description || "Charge", amount: num(i.amount) }))
           : [];
 
         // Every successful payment on THIS penalty, to split "paid before" from "this payment".
         const all = r.penaltyID
-          ? (await rowsWhere("penaltyID", r.penaltyID)).filter((e) => e.direction === "in" && e.status === "success" && e.phase === "penalty")
+          ? (await entryRows("penaltyID", r.penaltyID)).filter((e) => e.direction === "in" && e.status === "success" && e.phase === "penalty")
           : [r];
         const rWhen = whenOf(r);
         const earlier = (e) => whenOf(e) < rWhen || (whenOf(e) === rWhen && String(e.id) < String(r.id));
@@ -202,7 +221,7 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
     if (kind === "payment" && payment) {
       const bookingTotal = round2(num(payment.amount) - num(payment.discountAmount));
       const mine = whenOf(entry);
-      const paidSoFar = round2((await rowsWhere("paymentID", entry.paymentID))
+      const paidSoFar = round2((await entryRows("paymentID", entry.paymentID))
         .filter((r) => r.direction === "in" && r.status === "success" && (r.phase === "deposit" || r.phase === "balance")
           && (whenOf(r) < mine || r.id === entry.id || (whenOf(r) === mine && String(r.id) < String(entry.id))))
         .reduce((s, r) => s + num(r.amount), 0));
@@ -247,13 +266,232 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
       handledBy: entry.source === "in_person" ? handledByName : null,
       summary,
       printedBy: printedByName, printedAt: new Date().toISOString(),
-      // for the audit log written by the controller
+      // for the audit log / ownership check done by the caller
       _email: customerEmail,
       _audit: { paymentID: entry.paymentID || null, bookingID: entry.bookingID || null },
     };
   };
 
-  return { buildReceipt, emailCooldownLeft };
+  return { buildReceipt };
 };
 
-export const { buildReceipt, emailCooldownLeft } = makeReceiptBuilder({ db, resolveName: resolveUserName, getSettings: getSystemSettings });
+// ───────────────────────── booking statement ─────────────────────────
+//   1. Payments    every successful deposit / balance payment, numbered, with the balance left on the booking
+//   2. Penalties   every penalty with its charges, what was paid (cash / online) and what the security deposit covered
+//   3. Deposit     how the security deposit was used / returned, and any refunds (only when there is something to show)
+//   4. Pending     money movements that are not done yet -- listed, NEVER counted in a total
+//   5. Overall     charges, paid, still owed, refunded, net received
+// `movements` is the same money, newest last, as ONE flat list (every successful payment, penalty payment, refund and
+// deposit return, penalties paid together folded into one row) with the receipt number and the entry that opens it --
+// what the customer app lists as "money flow".
+// It is a snapshot "as of" the moment it is built -- a statement mid-rental shows unpaid penalties as still owed and
+// never implies the booking is settled.
+export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSettings = async () => ({}), now = () => new Date() }) => {
+  const { firstWhere, rowsWhere, vehicleName, emailOf } = makeStore(db);
+
+  const buildStatement = async ({ bookingID, printedByUserID = null }) => {
+    if (!bookingID) throw httpError(400, "A booking is required.");
+
+    const [booking, payment, entries, penaltyRows] = await Promise.all([
+      firstWhere(["bookings", "bookingArchives"], "bookingID", bookingID),
+      firstWhere(["payments", "paymentsArchives"], "bookingID", bookingID),
+      rowsWhere(ENTRY_COLLECTIONS, "bookingID", bookingID),
+      rowsWhere(PENALTY_COLLECTIONS, "bookingID", bookingID),
+    ]);
+    if (!booking && !payment && entries.length === 0 && penaltyRows.length === 0) throw httpError(404, "Booking not found.");
+    entries.sort(byTime);
+
+    const done = (e) => e.status === "success";
+    const bookingPayments = entries.filter((e) => e.direction === "in" && done(e) && (e.phase === "deposit" || e.phase === "balance"));
+    const penaltyPayments = entries.filter((e) => e.direction === "in" && done(e) && e.phase === "penalty");
+    const refunds = entries.filter((e) => e.direction === "out" && done(e) && e.phase !== "deposit_return");
+    const depositReturns = entries.filter((e) => e.direction === "out" && done(e) && e.phase === "deposit_return");
+    // Not done yet. "failed" / "cancelled" attempts moved no money and are left off the statement.
+    const pendingRows = entries.filter((e) => e.status === "pending" || e.status === "unrefundable");
+
+    // ---- booking charges and payments
+    const customerID = booking?.userID || payment?.userID || entries.find((e) => e.userID)?.userID || penaltyRows.find((p) => p.userID)?.userID || null;
+    const cancelled = String(booking?.status || "").toLowerCase() === "cancelled";
+    let charges = null;
+    if (payment) {
+      const gross = num(payment.amount);
+      const discount = num(payment.discountAmount);
+      charges = {
+        gross, discount, discountReason: discount > 0 ? payment.discountReason || null : null,
+        total: round2(gross - discount),
+        securityDeposit: num(payment.securityDeposit),
+      };
+    }
+    const bookingPaid = sum(bookingPayments);
+    // A cancelled booking owes nothing more: whatever was paid is dealt with through its refund.
+    const balanceRemaining = charges && !cancelled ? Math.max(0, round2(charges.total - bookingPaid)) : 0;
+
+    // ---- penalties
+    // A deposit offset moves no money, so it has no entry. penalties.paidAmount counts it, though: whatever paidAmount
+    // holds beyond the real payments was covered by the security deposit. The deposit can only cover as much as was
+    // actually used (payments.depositSettled), so that pool is handed out penalty by penalty, oldest first.
+    let depositPool = num(payment?.depositSettled);
+    const penalties = [];
+    for (const p of penaltyRows.sort((a, b) => String(toISO(a.createdAt) || "").localeCompare(String(toISO(b.createdAt) || "")) || String(a.id).localeCompare(String(b.id)))) {
+      const status = p.status || "Confirmed";
+      const active = status === "Confirmed";
+      const mine = penaltyPayments.filter((e) => e.penaltyID === (p.penaltyID || p.id));
+      const paid = sum(mine);
+      const amount = num(p.amount);
+      let covered = 0;
+      if (active) {
+        covered = Math.min(Math.max(0, round2(num(p.paidAmount) - paid)), depositPool);
+        depositPool = round2(depositPool - covered);
+      }
+      const items = Array.isArray(p.lineItems)
+        ? p.lineItems.filter((i) => i && (i.description || num(i.amount))).map((i) => ({ description: i.description || "Charge", amount: num(i.amount) }))
+        : [];
+      penalties.push({
+        penaltyID: p.penaltyID || p.id, status, active, reason: !active ? p.statusReason || null : null, date: toISO(p.createdAt),
+        items: items.length ? items : [{ description: "Penalty charge", amount }],
+        amount, paid, coveredByDeposit: covered,
+        outstanding: active ? Math.max(0, round2(amount - paid - covered)) : 0,
+        payments: mine.map(lineOf),
+      });
+    }
+    const live = penalties.filter((p) => p.active);
+    const penaltyTotals = {
+      count: live.length,
+      charged: sum(live, (p) => p.amount), paid: sum(live, (p) => p.paid),
+      coveredByDeposit: sum(live, (p) => p.coveredByDeposit), outstanding: sum(live, (p) => p.outstanding),
+    };
+
+    // ---- security deposit and refunds
+    const heldDeposit = num(payment?.securityDeposit);
+    const returnedAmount = depositReturns.length ? sum(depositReturns) : num(payment?.depositReturned);
+    const deposit = heldDeposit > 0
+      ? { held: heldDeposit, status: payment?.depositStatus || null, usedForPenalties: num(payment?.depositSettled), returned: returnedAmount }
+      : null;
+    const refundTotal = sum(refunds);
+
+    // ---- overall
+    const paidIn = round2(bookingPaid + sum(penaltyPayments));
+    const overall = {
+      totalCharges: round2((charges?.total || 0) + penaltyTotals.charged),
+      paidIn,
+      coveredByDeposit: penaltyTotals.coveredByDeposit,
+      stillOwed: round2(balanceRemaining + penaltyTotals.outstanding),
+      refunded: refundTotal,
+      depositReturned: returnedAmount,
+      netReceived: round2(paidIn - refundTotal - returnedAmount),
+    };
+
+    // ---- money flow: every successful movement, one row per receipt (penalties paid together fold into one)
+    const movements = [];
+    const byGroup = new Map();
+    for (const e of entries.filter(done)) {
+      const groupKey = e.groupID ? `${e.direction}:${e.phase}:${e.groupID}` : null;
+      if (groupKey && byGroup.has(groupKey)) {
+        const m = byGroup.get(groupKey);
+        m.amount = round2(m.amount + num(e.amount));
+        m.count += 1;
+        continue;
+      }
+      const kind = kindOf(e);
+      const when = whenOf(e) || null;
+      const m = {
+        entryID: e.id, receiptNo: receiptNumberFor(e, kind, when), kind, title: KIND_TITLES[kind],
+        label: labelOf(e), direction: e.direction, date: when, amount: num(e.amount), count: 1,
+        method: e.method || null, source: e.source || null, referenceNumber: e.referenceNumber || null,
+      };
+      movements.push(m);
+      if (groupKey) byGroup.set(groupKey, m);
+    }
+
+    const pending = pendingRows.map((e) => ({ ...lineOf(e), direction: e.direction }));
+    const asOf = now().toISOString();
+    const statementNo = statementNumberFor(bookingID, asOf);
+
+    const [settings, customerName, customerEmail, printedByName, vehicle] = await Promise.all([
+      getSettings().catch(() => ({})),
+      customerID ? resolveName(customerID).catch(() => "—") : "—",
+      emailOf(customerID),
+      printedByUserID ? resolveName(printedByUserID).catch(() => null) : null,
+      vehicleName(booking?.carID),
+    ]);
+
+    return {
+      statementNo, title: "Booking Statement", asOf,
+      business: {
+        name: settings?.storeName || "ARL Car Rental",
+        address: settings?.storeAddress || null,
+        phone: settings?.storePhone || null,
+        email: settings?.storeEmail || null,
+      },
+      customer: { name: customerName, emailMasked: maskEmail(customerEmail) },
+      booking: {
+        bookingID, vehicle, status: booking?.status || null,
+        startDateTime: toISO(booking?.startDateTime), endDateTime: toISO(booking?.endDateTime),
+      },
+      charges,
+      payments: bookingPayments.map(lineOf),
+      paymentTotals: { paid: bookingPaid, balanceRemaining },
+      penalties, penaltyTotals,
+      deposit,
+      refunds: refunds.map(lineOf),
+      movements,
+      pending,
+      overall,
+      printedBy: printedByName, printedAt: asOf,
+      // for the audit log / ownership check done by the caller
+      _email: customerEmail,
+      _audit: { paymentID: payment?.paymentID || null, bookingID },
+      _ownerID: customerID,
+    };
+  };
+
+  return { buildStatement };
+};
+
+// ───────────────────────── one shared email limit ─────────────────────────
+// ONE small record per receipt / statement in `receiptEmails`, written by BOTH backends, so an email sent by staff and one
+// sent by the customer share the same 5-minute limit. `claim` runs in a transaction: two simultaneous requests cannot both
+// pass. It stamps the time BEFORE the send; if the send then fails, `release` puts the previous value back so a failed send
+// doesn't lock the customer out.
+export const EMAIL_COOLDOWN_MS = 5 * 60 * 1000;
+export const EMAIL_LIMIT_COLLECTION = "receiptEmails";
+const safeKey = (k) => String(k).replace(/[\/\s]/g, "_");
+// receipts are keyed by receipt number (stable for an entry); statements by booking (the number carries today's date)
+export const emailKeyFor = {
+  receipt: (receiptNo) => safeKey(`receipt_${receiptNo}`),
+  statement: (bookingID) => safeKey(`statement_${bookingID}`),
+};
+
+export const makeEmailLimiter = (db, { now = () => Date.now(), cooldownMs = EMAIL_COOLDOWN_MS } = {}) => {
+  const ref = (key) => db.collection(EMAIL_LIMIT_COLLECTION).doc(key);
+  const waitFrom = (rec) => Math.max(0, Math.ceil((toMs(rec?.lastSentAt) + cooldownMs - now()) / 1000));
+
+  // -> { ok: true, previous } | { ok: false, wait }   (wait = seconds left)
+  const claim = (key, by = null) => db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref(key));
+    const prev = snap.exists ? snap.data() : null;
+    const wait = waitFrom(prev);
+    if (wait > 0) return { ok: false, wait };
+    tx.set(ref(key), { lastSentAt: new Date(now()), lastSentBy: by });
+    return { ok: true, previous: prev };
+  });
+  const release = async (key, previous) => {
+    try { previous ? await ref(key).set(previous) : await ref(key).delete(); } catch { /* best effort */ }
+  };
+  // for an email that was just sent outside the claim flow (the automatic one after a payment settles)
+  const record = async (key, by = null) => {
+    try { await ref(key).set({ lastSentAt: new Date(now()), lastSentBy: by }); } catch { /* best effort */ }
+  };
+  const cooldownLeft = async (key) => {
+    try { const s = await ref(key).get(); return s.exists ? waitFrom(s.data()) : 0; } catch { return 0; }
+  };
+  return { claim, release, record, cooldownLeft };
+};
+
+
+// ───────────────────────── bound to the real Firestore ─────────────────────────
+const deps = { db, resolveName: resolveUserName, getSettings: getSystemSettings };
+export const { buildReceipt } = makeReceiptBuilder(deps);
+export const { buildStatement } = makeStatementBuilder(deps);
+// the 5-minute email limit, shared with the customer backend (collection `receiptEmails`)
+export const emailLimiter = makeEmailLimiter(db);

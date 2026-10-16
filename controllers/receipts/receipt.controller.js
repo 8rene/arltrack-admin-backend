@@ -1,11 +1,9 @@
-import { buildReceipt, emailCooldownLeft } from "../../services/receipts/receipt.service.js";
-import { sendReceiptEmail } from "../../services/receipts/receiptEmail.service.js";
-import { buildStatement, emailCooldownLeft as statementCooldownLeft } from "../../services/receipts/statement.service.js";
-import { sendStatementEmail } from "../../services/receipts/statementEmail.service.js";
+import { buildReceipt, buildStatement, emailLimiter, emailKeyFor } from "../../services/receipts/receipt.service.js";
+import { sendReceiptEmail, sendStatementEmail } from "../../services/receipts/receiptEmail.service.js";
 import { auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 
 const actorUid = (req) => req.user?.userID || req.user?.uid || null;
-const publicView = ({ _audit, _email, ...data }) => data;   // never send the real address or internals to the browser
+const publicView = ({ _audit, _email, _ownerID, ...data }) => data;   // never send the real address or internals to the browser
 
 // GET /api/payment-entries/:entryID/receipt
 // Builds the receipt for one successful money movement and writes an audit log line each time one is printed,
@@ -41,14 +39,18 @@ export const emailReceipt = async (req, res) => {
       return res.status(422).json({ success: false, message: "This customer has no email address on their account." });
     }
 
-    const wait = await emailCooldownLeft({ paymentID: receipt._audit.paymentID, receiptNo: receipt.receiptNo });
-    if (wait > 0) {
-      return res.status(429).json({ success: false, retryAfterSeconds: wait,
-        message: `This receipt was just emailed. Please wait ${Math.ceil(wait / 60)} more minute(s) before sending it again.` });
+    // One shared limit (staff AND the customer's own button): claimed in a transaction BEFORE sending so two quick
+    // requests cannot both pass; given back if the send fails.
+    const key = emailKeyFor.receipt(receipt.receiptNo);
+    const slot = await emailLimiter.claim(key, actorUid(req));
+    if (!slot.ok) {
+      return res.status(429).json({ success: false, retryAfterSeconds: slot.wait,
+        message: `This receipt was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.` });
     }
 
     const sent = await sendReceiptEmail({ receipt, toEmail: receipt._email });
     if (!sent.success) {
+      await emailLimiter.release(key, slot.previous);
       console.error("[RECEIPT] email failed:", sent.error);
       return res.status(502).json({ success: false, message: "Couldn't send the email. Please try again in a bit." });
     }
@@ -103,14 +105,16 @@ export const emailStatement = async (req, res) => {
       return res.status(422).json({ success: false, message: "This customer has no email address on their account." });
     }
 
-    const wait = await statementCooldownLeft({ bookingID: statement._audit.bookingID, statementNo: statement.statementNo });
-    if (wait > 0) {
-      return res.status(429).json({ success: false, retryAfterSeconds: wait,
-        message: `This statement was just emailed. Please wait ${Math.ceil(wait / 60)} more minute(s) before sending it again.` });
+    const key = emailKeyFor.statement(statement.booking.bookingID);
+    const slot = await emailLimiter.claim(key, actorUid(req));
+    if (!slot.ok) {
+      return res.status(429).json({ success: false, retryAfterSeconds: slot.wait,
+        message: `This statement was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.` });
     }
 
     const sent = await sendStatementEmail({ statement, toEmail: statement._email });
     if (!sent.success) {
+      await emailLimiter.release(key, slot.previous);
       console.error("[STATEMENT] email failed:", sent.error);
       return res.status(502).json({ success: false, message: "Couldn't send the email. Please try again in a bit." });
     }
