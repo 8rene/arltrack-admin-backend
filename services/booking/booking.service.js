@@ -548,6 +548,19 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   });
 
+  // ── Stolen only makes sense for a trip that is out on the road: the booking must be
+  // ongoing and the car not yet marked dropped off (a dropped-off car is back). The Car
+  // Tracking button already hides this; this stops a direct API call from skipping it. ──
+  if (filtered.status === "stolen" && oldStatus?.toLowerCase() !== "stolen") {
+    if (oldStatus?.toLowerCase() !== "ongoing") {
+      throw new Error(`Cannot flag as stolen: booking status is "${oldStatus}", not "ongoing".`);
+    }
+    const stolenSession = await getSessionByBookingID(bookingID || docID);
+    if (stolenSession?.data?.droppedOffTime) {
+      throw new Error("Cannot flag as stolen: the car was already marked dropped off.");
+    }
+  }
+
   // ── Map-picked location: { address, lat, lng } from the admin map picker (same
   // shape the customer's picker produces). The text goes on bookings.location as
   // before; the coordinates move the destination geofence zone on the session. ──

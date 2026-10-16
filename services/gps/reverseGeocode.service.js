@@ -44,7 +44,7 @@ export function reverseGeocodeCity(lat, lng) {
   if (pending.has(key)) return pending.get(key);
 
   const promise = scheduleCall(() =>
-    fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18`, {
+    fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&accept-language=en`, {
       headers: {
         "User-Agent": "ARLTrack-AdminBackend/1.0 (set a real contact email here before deploying)",
       },
