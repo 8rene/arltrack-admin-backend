@@ -234,7 +234,7 @@ const resolveCarLabel = async (carDocID) => {
   try {
     const carDoc = await db.collection("cars").doc(carDocID).get();
     if (!carDoc.exists) return null;
-    const { modelID, platenumber, plateNumber } = carDoc.data();
+    const { modelID, plateNumber } = carDoc.data();
     let label = null;
     if (modelID) {
       const modelDoc = await db.collection("model").doc(modelID).get();
@@ -244,7 +244,7 @@ const resolveCarLabel = async (carDocID) => {
         label = [brandDoc?.exists ? brandDoc.data().brandName : "", modelName].filter(Boolean).join(" ") || null;
       }
     }
-    return { label, plateNumber: platenumber || plateNumber || null };
+    return { label, plateNumber: plateNumber || null };
   } catch { return null; }
 };
 

@@ -99,7 +99,7 @@ export const getAllReviewsGroupedByCar = async () => {
         d.id,
         {
           carLabel: `${brand.brandName || ""} ${model.modelName || ""}`.trim() || d.id,
-          plateNumber: c.plateNumber || c.platenumber || "",
+          plateNumber: c.plateNumber || "",
         },
       ];
     })

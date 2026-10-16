@@ -58,7 +58,7 @@ export const getCar = async (req, res) => {
 };
 
 // POST /api/fleet/cars
-// Body: { brandID, modelID, platenumber, color, bodyType, year, seatingCapacity,
+// Body: { brandID, modelID, plateNumber, color, bodyType, year, seatingCapacity,
 //         fuelType, transmission, status, shortDescription, longDescription,
 //         pricing: [{ durationType, price }] }
 export const createCar = async (req, res) => {
