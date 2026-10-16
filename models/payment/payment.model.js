@@ -50,8 +50,7 @@ export const Payment = {
   discountReason: "",
   discountBy: "",
   discountAt: null,
-  discountCorrectedBy: "",   // set by correctIssuedDiscount() when a discount is changed after its refund was issued
-  discountCorrectedAt: null,
+
   // Set by applyDiscount() when a discount is applied to a booking that's
   // already fully (or partially) paid past what the new discount covers —
   // the spillover is cash that's now owed back to the customer. 0 means
