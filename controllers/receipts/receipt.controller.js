@@ -1,5 +1,7 @@
 import { buildReceipt, emailCooldownLeft } from "../../services/receipts/receipt.service.js";
 import { sendReceiptEmail } from "../../services/receipts/receiptEmail.service.js";
+import { buildStatement, emailCooldownLeft as statementCooldownLeft } from "../../services/receipts/statement.service.js";
+import { sendStatementEmail } from "../../services/receipts/statementEmail.service.js";
 import { auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 
 const actorUid = (req) => req.user?.userID || req.user?.uid || null;
@@ -63,6 +65,68 @@ export const emailReceipt = async (req, res) => {
   } catch (error) {
     if (error.status) return res.status(error.status).json({ success: false, message: error.message });
     console.error("[RECEIPT] email error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/payment-entries/booking/:bookingID/statement
+// Builds the Booking Statement (every payment, every penalty, the totals) as of right now and writes an audit log
+// line each time one is printed.
+export const getStatement = async (req, res) => {
+  try {
+    const statement = await buildStatement({ bookingID: req.params.bookingID, printedByUserID: actorUid(req) });
+    const data = publicView(statement);
+
+    auditSafe({
+      action: "export",
+      description: `${data.title} ${data.statementNo} printed for booking ${data.booking.bookingID}.`,
+      userID: actorUid(req),
+      bookingID: statement._audit.bookingID,
+      paymentID: statement._audit.paymentID,
+    });
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, message: error.message });
+    console.error("[STATEMENT] build error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/payment-entries/booking/:bookingID/statement/email
+// Same rules as the receipt email: only the address on the customer's account (no body, staff cannot choose the
+// recipient), one send per statement every 5 minutes, every send written to the audit log.
+export const emailStatement = async (req, res) => {
+  try {
+    const statement = await buildStatement({ bookingID: req.params.bookingID, printedByUserID: actorUid(req) });
+    if (!statement._email) {
+      return res.status(422).json({ success: false, message: "This customer has no email address on their account." });
+    }
+
+    const wait = await statementCooldownLeft({ bookingID: statement._audit.bookingID, statementNo: statement.statementNo });
+    if (wait > 0) {
+      return res.status(429).json({ success: false, retryAfterSeconds: wait,
+        message: `This statement was just emailed. Please wait ${Math.ceil(wait / 60)} more minute(s) before sending it again.` });
+    }
+
+    const sent = await sendStatementEmail({ statement, toEmail: statement._email });
+    if (!sent.success) {
+      console.error("[STATEMENT] email failed:", sent.error);
+      return res.status(502).json({ success: false, message: "Couldn't send the email. Please try again in a bit." });
+    }
+
+    auditSafe({
+      action: "export",
+      description: `${statement.title} ${statement.statementNo} emailed to ${statement.customer.emailMasked} for booking ${statement.booking.bookingID}.`,
+      userID: actorUid(req),
+      bookingID: statement._audit.bookingID,
+      paymentID: statement._audit.paymentID,
+    });
+
+    return res.status(200).json({ success: true, message: `Statement emailed to ${statement.customer.emailMasked}.` });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, message: error.message });
+    console.error("[STATEMENT] email error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

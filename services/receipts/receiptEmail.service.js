@@ -4,37 +4,39 @@
 //     same four settings in THIS backend's .env: EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, EMAILJS_PUBLIC_KEY,
 //     EMAILJS_PRIVATE_KEY. (Node 18+ built-in fetch; no extra package.)
 
-const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const peso = (n) => `₱${(Number(n) || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const when = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleString("en-PH", { timeZone: "Asia/Manila", dateStyle: "medium", timeStyle: "short" }) : "—"; };
-const day = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", dateStyle: "medium" }) : null; };
-const METHOD = { gcash: "GCash", maya: "Maya", qrph: "QR Ph", cash: "Cash", bank_transfer: "Bank transfer" };
+export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+export const peso = (n) => `₱${(Number(n) || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export const when = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleString("en-PH", { timeZone: "Asia/Manila", dateStyle: "medium", timeStyle: "short" }) : "—"; };
+export const day = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", dateStyle: "medium" }) : null; };
+export const METHOD = { gcash: "GCash", maya: "Maya", qrph: "QR Ph", cash: "Cash", bank_transfer: "Bank transfer" };
 
-const BRAND = "#1e3a8a";
-const FONT = "font-family:Arial,Helvetica,sans-serif;";
+export const BRAND = "#1e3a8a";
+export const FONT = "font-family:Arial,Helvetica,sans-serif;";
 
 // one label / value line of the details block
-const row = (label, value, strong = false) => (value == null || value === "" ? "" : `
+export const row = (label, value, strong = false) => (value == null || value === "" ? "" : `
         <tr>
           <td style="${FONT}padding:11px 0;border-bottom:1px solid #eef0f3;font-size:14px;color:#6b7280;width:42%;vertical-align:top;">${esc(label)}</td>
           <td style="${FONT}padding:11px 0;border-bottom:1px solid #eef0f3;font-size:14px;color:#111827;text-align:right;vertical-align:top;word-break:break-word;${strong ? "font-weight:bold;" : ""}">${esc(value)}</td>
         </tr>`);
 
-const sectionTitle = (text) => `
+export const sectionTitle = (text) => `
         <tr><td colspan="2" style="${FONT}padding:22px 0 4px;font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:${BRAND};">${esc(text)}</td></tr>`;
 
 
 // small grey box used for the extra sections (penalty charges, deposit use, a note)
-const box = (inner) => `
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:18px;background:#f9fafb;border-radius:10px;">
+export const box = (inner) => `
+        <div style="height:18px;line-height:18px;font-size:0;">&nbsp;</div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:10px;">
           <tr><td style="padding:14px 20px;">${inner}</td></tr>
         </table>`;
-const pair = (label, value, strong = false) => `
+export const pair = (label, value, strong = false) => `
             <tr>
               <td style="${FONT}padding:4px 0;font-size:14px;color:${strong ? "#111827" : "#475569"};${strong ? "font-weight:bold;" : ""}">${esc(label)}</td>
               <td style="${FONT}padding:4px 0 4px 16px;font-size:14px;color:#111827;text-align:right;white-space:nowrap;${strong ? "font-weight:bold;" : ""}">${value}</td>
             </tr>`;
-const boxTitle = (text) => `<div style="${FONT}font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:${BRAND};padding-bottom:6px;">${esc(text)}</div>`;
+export const spacer = (px) => `<div style="height:${px}px;line-height:${px}px;font-size:0;">&nbsp;</div>`;
+export const boxTitle = (text) => `<div style="${FONT}font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:${BRAND};padding-bottom:6px;">${esc(text)}</div>`;
 
 export const renderReceiptEmail = (r) => {
   const out = r.direction === "out";
@@ -48,7 +50,8 @@ export const renderReceiptEmail = (r) => {
           </tr>`).join("");
 
   const summary = r.summary ? `
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;background:#eff6ff;border-radius:10px;">
+      ${spacer(20)}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eff6ff;border-radius:10px;">
         <tr><td style="padding:16px 20px;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
             <tr><td style="${FONT}padding:4px 0;font-size:14px;color:#475569;">Booking total</td><td style="${FONT}padding:4px 0;font-size:14px;color:#111827;text-align:right;">${peso(r.summary.bookingTotal)}</td></tr>
@@ -58,7 +61,7 @@ export const renderReceiptEmail = (r) => {
         </td></tr>
       </table>` : "";
 
-  const noteHtml = r.note ? `<div style="${FONT}margin-top:18px;font-size:13px;line-height:1.5;color:#4b5563;background:#f9fafb;border-radius:8px;padding:10px 14px;">${esc(r.note)}</div>` : "";
+  const noteHtml = r.note ? `${spacer(18)}<div style="${FONT}font-size:13px;line-height:1.5;color:#4b5563;background:#f9fafb;border-radius:8px;padding:10px 14px;">${esc(r.note)}</div>` : "";
 
   const penaltyHtml = (r.penalties || []).map((p, i, all) => box(`
             ${boxTitle(all.length > 1 ? `Penalty ${i + 1}` : "Penalty charges")}
@@ -90,15 +93,15 @@ export const renderReceiptEmail = (r) => {
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e5e7eb;">
 
       <tr><td align="center" style="background:${BRAND};padding:30px 24px;">
-        <div style="${FONT}font-size:22px;font-weight:bold;color:#ffffff;margin-bottom:6px;">${esc(r.business.name)}</div>
+        <div style="${FONT}font-size:22px;font-weight:bold;color:#ffffff;padding-bottom:6px;">${esc(r.business.name)}</div>
         ${contact}
       </td></tr>
 
       <tr><td align="center" style="padding:30px 32px 8px;">
         <div style="${FONT}display:inline-block;font-size:12px;font-weight:bold;letter-spacing:1.5px;text-transform:uppercase;color:${BRAND};background:#eff6ff;border-radius:999px;padding:6px 14px;">${esc(r.title)}${r.isCopy ? " · copy" : ""}</div>
-        <div style="${FONT}font-size:15px;color:#374151;margin:18px 0 6px;">Hi ${esc(customer)}, here is your ${out ? "slip" : "receipt"}.</div>
+        <div style="${FONT}font-size:15px;color:#374151;padding:18px 0 6px;">Hi ${esc(customer)}, here is your ${out ? "slip" : "receipt"}.</div>
         <div style="${FONT}font-size:36px;font-weight:bold;color:#111827;line-height:1.2;">${peso(r.total)}</div>
-        <div style="${FONT}font-size:13px;color:#6b7280;margin-top:4px;">${out ? "Total returned" : "Total received"} · ${esc(when(r.date))}</div>
+        <div style="${FONT}font-size:13px;color:#6b7280;padding-top:4px;">${out ? "Total returned" : "Total received"} · ${esc(when(r.date))}</div>
       </td></tr>
 
       <tr><td style="padding:8px 32px 28px;">
@@ -108,7 +111,8 @@ export const renderReceiptEmail = (r) => {
           ${row("Booking", r.booking?.bookingID)}${row("Vehicle", r.booking?.vehicle)}${row("Rental period", period)}
         </table>
 
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:22px;background:#f9fafb;border-radius:10px;">
+        ${spacer(22)}
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:10px;">
           <tr><td style="padding:14px 20px 10px;">
             <div style="${FONT}font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:${BRAND};padding-bottom:4px;">${out ? "Returned" : "Paid for"}</div>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${lines}
@@ -141,8 +145,8 @@ export const renderReceiptEmail = (r) => {
   return { subject: `${r.title} ${r.receiptNo}${r.booking?.bookingID ? ` — Booking ${r.booking.bookingID}` : ""}`, bodyHtml };
 };
 
-export const sendReceiptEmail = async ({ receipt, toEmail }) => {
-  const { subject, bodyHtml } = renderReceiptEmail(receipt);
+// One send through the shared EmailJS template. Used by the receipt email and the booking statement email.
+export const sendEmailJS = async ({ subject, bodyHtml, toEmail }) => {
   const { EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, EMAILJS_PUBLIC_KEY, EMAILJS_PRIVATE_KEY } = process.env;
   if (!EMAILJS_SERVICE_ID || !EMAILJS_TEMPLATE_ID || !EMAILJS_PUBLIC_KEY || !EMAILJS_PRIVATE_KEY) {
     return { success: false, error: "Email is not configured on the server (EMAILJS_* settings are missing)." };
@@ -162,4 +166,9 @@ export const sendReceiptEmail = async ({ receipt, toEmail }) => {
   } catch (e) {
     return { success: false, error: e.message };
   }
+};
+
+export const sendReceiptEmail = async ({ receipt, toEmail }) => {
+  const { subject, bodyHtml } = renderReceiptEmail(receipt);
+  return sendEmailJS({ subject, bodyHtml, toEmail });
 };
