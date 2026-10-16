@@ -218,6 +218,75 @@ const fetchPenalties = async (bookingID) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Gathering what a booking owns -- one table failing must not take the whole dialog down
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Reads ONE linked table. A table that has nothing for this booking (or does not exist yet) simply comes back empty.
+ * A table that cannot be READ (missing index, permission, timeout ...) is recorded in `problems` instead of throwing,
+ * so the preview still opens and the delete still goes ahead. It is shown as a WARNING (never a blocker): rows left in
+ * that table could not be archived and stay live, pointing at a booking that no longer exists.
+ */
+const readTable = async (label, fn, fallback, problems) => {
+  try {
+    return await fn();
+  } catch (error) {
+    console.error(`[DELETE] could not read ${label}:`, error);
+    problems.push({ table: label, reason: error?.message || "unknown error" });
+    return fallback;
+  }
+};
+
+const unreadableWarnings = (problems) => problems.map((p) => ({
+  code: "table_unreadable",
+  message: `Could not read ${p.table} (${p.reason}). Anything there linked to this booking will not be archived and stays as it is.`,
+}));
+
+/** Everything a booking owns, read table by table. Only the booking itself is mandatory (throws "not found"). */
+const gatherBookingBundle = async (bookingDocID) => {
+  const { docRef: bookingRef, data: bookingData } = await fetchBooking(bookingDocID);
+  const bookingID = bookingData.bookingID ?? bookingDocID;
+  const keys = [bookingID, bookingDocID];
+  const problems = [];
+
+  const paymentResult = await readTable("payments", () => fetchPayment(bookingID), null, problems);
+  const reviewResults = await readTable("reviews", () => fetchReviews(bookingID), [], problems);
+  const sessionResult = await readTable("booking sessions", () => fetchBookingSession(bookingID), null, problems);
+  const refundRequestResults = await readTable("refund requests", () => fetchRefundRequests(bookingID), [], problems);
+  const penaltyResults = await readTable("penalties", () => fetchPenalties(bookingID), [], problems);
+
+  // driverAssignments / cancellationRequests / paymentEntries rows of this booking (see linkedArchives.service.js).
+  // Found by every key the booking is known by; entries written without a bookingID are found through the payment id.
+  const linkedRows = await readTable(
+    "payment entries / driver assignments / cancellation requests",
+    () => collectLinkedForBooking({
+      bookingKeys: keys,
+      paymentIDs: paymentResult ? [paymentResult.data.paymentID ?? paymentResult.docRef.id] : [],
+    }),
+    { driverAssignments: [], cancellationRequests: [], paymentEntries: [] },
+    problems
+  );
+  // maintenance records linked to this booking (post-rental jobs). Routine maintenance has no bookingID and is not touched.
+  const maintenanceRows = await readTable("maintenance", () => collectMaintenanceForBooking({ bookingKeys: keys }), [], problems);
+  // vehicle inspection records (part condition + photos) of this booking: archived as one doc, files stay in Storage.
+  const inspectionRows = await readTable("vehicle inspections", () => collectInspectionForBooking({ bookingKeys: keys }), [], problems);
+
+  const guard = evaluateGuards({
+    booking: bookingData,
+    payments: paymentResult ? [paymentResult.data] : [],
+    refunds: refundRequestResults.map((r) => ({ ...r.data, id: r.docRef.id })),
+    penalties: penaltyResults.map((r) => ({ ...r.data, id: r.docRef.id })),
+  });
+  guard.warnings.push(...unreadableWarnings(problems));
+
+  return {
+    bookingRef, bookingData, bookingID, problems, guard,
+    paymentResult, reviewResults, sessionResult, refundRequestResults, penaltyResults,
+    linkedRows, maintenanceRows, inspectionRows,
+  };
+};
+
+// ─────────────────────────────────────────────────────────────
 // Archive writers
 // ─────────────────────────────────────────────────────────────
 
@@ -385,30 +454,12 @@ const archivePenalty = async (penaltyDocID, penaltyData, archivedBy = "admin") =
  * @returns {object} Summary of what was archived / deleted
  */
 export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin", opts = {}) => {
-  // ── 1. Fetch source documents (fail fast if booking missing) ──────────────
-  const { docRef: bookingRef, data: bookingData } = await fetchBooking(bookingDocID);
-
-  // The bookingID stored inside the document (may differ from Firestore doc ID)
-  const bookingID = bookingData.bookingID ?? bookingDocID;
-
-  const paymentResult = await fetchPayment(bookingID);
-  const reviewResults = await fetchReviews(bookingID);
-  const sessionResult = await fetchBookingSession(bookingID);
-  const refundRequestResults = await fetchRefundRequests(bookingID);
-  const penaltyResults = await fetchPenalties(bookingID);
-
-  // driverAssignments / cancellationRequests / paymentEntries rows of this booking (see linkedArchives.service.js).
-  // Found by every key the booking is known by; entries written without a bookingID are found through the payment id.
-  const linkedRows = await collectLinkedForBooking({
-    bookingKeys: [bookingID, bookingDocID],
-    paymentIDs: paymentResult ? [paymentResult.data.paymentID ?? paymentResult.docRef.id] : [],
-  });
-
-  // maintenance records linked to this booking (post-rental jobs). Routine maintenance has no bookingID and is not touched.
-  const maintenanceRows = await collectMaintenanceForBooking({ bookingKeys: [bookingID, bookingDocID] });
-
-  // vehicle inspection records (part condition + photos) of this booking: archived as one doc, files stay in Storage.
-  const inspectionRows = await collectInspectionForBooking({ bookingKeys: [bookingID, bookingDocID] });
+  // ── 1. Fetch source documents (fail fast if booking missing; a linked table that cannot be read is reported) ──
+  const {
+    bookingRef, bookingData, bookingID, guard,
+    paymentResult, reviewResults, sessionResult, refundRequestResults, penaltyResults,
+    linkedRows, maintenanceRows, inspectionRows,
+  } = await gatherBookingBundle(bookingDocID);
 
   console.log(
     `[DELETE] Booking ${bookingDocID} | ` +
@@ -425,12 +476,6 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
   );
 
   // ── 1b. Delete guard: refuse while a trip / refund / penalty / held deposit is still in flight ─────────
-  const guard = evaluateGuards({
-    booking: bookingData,
-    payments: paymentResult ? [paymentResult.data] : [],
-    refunds: refundRequestResults.map((r) => ({ ...r.data, id: r.docRef.id })),
-    penalties: penaltyResults.map((r) => ({ ...r.data, id: r.docRef.id })),
-  });
   if (guard.blockers.length && !mayForce(opts)) {
     throw new DeleteBlockedError(guard.blockers[0].message, { ...guard, canForce: Boolean(opts.canForce) });
   }
@@ -620,27 +665,11 @@ export const deleteBookingWithCascade = async (bookingDocID, archivedBy = "admin
  * deleteBookingWithCascade would archive and runs the same guard. Writes nothing.
  */
 export const previewBookingDelete = async (bookingDocID) => {
-  const { data: bookingData } = await fetchBooking(bookingDocID);
-  const bookingID = bookingData.bookingID ?? bookingDocID;
-
-  const paymentResult = await fetchPayment(bookingID);
-  const reviewResults = await fetchReviews(bookingID);
-  const sessionResult = await fetchBookingSession(bookingID);
-  const refundRequestResults = await fetchRefundRequests(bookingID);
-  const penaltyResults = await fetchPenalties(bookingID);
-  const linkedRows = await collectLinkedForBooking({
-    bookingKeys: [bookingID, bookingDocID],
-    paymentIDs: paymentResult ? [paymentResult.data.paymentID ?? paymentResult.docRef.id] : [],
-  });
-  const maintenanceRows = await collectMaintenanceForBooking({ bookingKeys: [bookingID, bookingDocID] });
-  const inspectionRows = await collectInspectionForBooking({ bookingKeys: [bookingID, bookingDocID] });
-
-  const guard = evaluateGuards({
-    booking: bookingData,
-    payments: paymentResult ? [paymentResult.data] : [],
-    refunds: refundRequestResults.map((r) => ({ ...r.data, id: r.docRef.id })),
-    penalties: penaltyResults.map((r) => ({ ...r.data, id: r.docRef.id })),
-  });
+  const {
+    bookingData, bookingID, guard,
+    paymentResult, reviewResults, sessionResult, refundRequestResults, penaltyResults,
+    linkedRows, maintenanceRows, inspectionRows,
+  } = await gatherBookingBundle(bookingDocID);
 
   return {
     mode: "bundle",
@@ -658,6 +687,14 @@ export const previewBookingDelete = async (bookingDocID) => {
       maintenance: maintenanceRows.length,
       inspection: inspectionRows.length,
     },
+    // tables that were read fine but hold nothing for this booking -> the dialog says "none found" for them
+    missing: [
+      !paymentResult && "payment", !reviewResults.length && "reviews", !sessionResult && "trip session",
+      !refundRequestResults.length && "refund requests", !penaltyResults.length && "penalties",
+      !linkedRows.paymentEntries.length && "money entries", !linkedRows.driverAssignments.length && "driver assignments",
+      !linkedRows.cancellationRequests.length && "cancellation records", !maintenanceRows.length && "maintenance records",
+      !inspectionRows.length && "vehicle inspection records",
+    ].filter(Boolean),
     ...guard,
   };
 };
@@ -675,9 +712,13 @@ const ITEM_KINDS = {
 };
 
 const loadItem = async (kind, id) => {
-  const snap = await db.collection(ITEM_KINDS[kind].live).doc(id).get();
-  if (!snap.exists) throw new Error(`${kind === "payment" ? "Payment" : "Penalty"} not found: ${id}`);
-  return { ref: snap.ref, data: snap.data() };
+  const K = ITEM_KINDS[kind];
+  const snap = await db.collection(K.live).doc(id).get();
+  if (snap.exists) return { ref: snap.ref, data: snap.data() };
+  // The screen may hold the record's own id (paymentID / penaltyID) rather than the Firestore doc id.
+  const byOwnID = await db.collection(K.live).where(K.ownIdField, "==", id).limit(1).get();
+  if (!byOwnID.empty) return { ref: byOwnID.docs[0].ref, data: byOwnID.docs[0].data() };
+  throw new Error(`${kind === "payment" ? "Payment" : "Penalty"} not found: ${id}`);
 };
 
 /** The live booking this record belongs to, or null (hard-deleted, or already archived). */
@@ -691,9 +732,16 @@ const findLiveBooking = async (bookingID) => {
 
 const aloneGuards = async (kind, id, data) => {
   if (kind === "penalty") return evaluateGuards({ penalties: [{ ...data, id }] });
-  const refunds = (await db.collection("refundRequests").where("paymentID", "==", data.paymentID || id).get())
-    .docs.map((d) => ({ ...d.data(), id: d.id }));
-  return evaluateGuards({ payments: [data], refunds });
+  const problems = [];
+  const refunds = await readTable(
+    "refund requests",
+    async () => (await db.collection("refundRequests").where("paymentID", "==", data.paymentID || id).get()).docs.map((d) => ({ ...d.data(), id: d.id })),
+    [],
+    problems
+  );
+  const guards = evaluateGuards({ payments: [data], refunds });
+  guards.warnings.push(...unreadableWarnings(problems));
+  return guards;
 };
 
 /** The dry run for the Payments / Penalties delete dialog. Writes nothing. */

@@ -23,7 +23,8 @@ const fail = (res, error) => {
     return res.status(409).json({ success: false, code: "BLOCKED", message: error.message, ...error.details });
   }
   const notFound = /not found/i.test(error.message || "");
-  return res.status(notFound ? 404 : 400).json({ success: false, message: error.message });
+  if (notFound) return res.status(404).json({ success: false, code: "NOT_FOUND", message: `${error.message} It no longer exists, so there is nothing to delete (it may already have been deleted).` });
+  return res.status(400).json({ success: false, message: error.message });
 };
 
 export const previewDeleteHandler = (kind, param = "id") => async (req, res) => {

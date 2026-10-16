@@ -1,4 +1,5 @@
 import { listPayments, getPayment, patchPaymentStatus, collectBalance, notifyBalance, discountPayment, refundIssued } from "../../controllers/payments/payments.controller.js";
+import { deleteHandler, previewDeleteHandler } from "../../controllers/booking/bookingDelete.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -9,6 +10,11 @@ export const registerPaymentsRoutes = (app) => {
   app.get("/api/payments",             verifyToken, requireRole(allowed), listPayments);
   app.get("/api/payments/:id",         verifyToken, requireRole(allowed), getPayment);
   app.patch("/api/payments/:id/status",verifyToken, requireRole(allowed), patchPaymentStatus);
+
+  // Owner / Admin only (same rule as penalties). Booking exists -> the whole booking is archived with it;
+  // booking gone -> just this payment. Preview first (writes nothing), then DELETE[?force=true].
+  app.get   ("/api/payments/:id/delete-preview", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), previewDeleteHandler("payment"));
+  app.delete("/api/payments/:id",                verifyToken, requireRole([roles.ADMIN, roles.OWNER]), deleteHandler("payment"));
   // Keyed by bookingID (not the payment doc id) since that's what staff
   // screens have on hand for a booking.
   //

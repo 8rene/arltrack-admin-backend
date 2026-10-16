@@ -8,15 +8,45 @@
 // more than ~1 request/sec at Nominatim no matter how many cars are pinging),
 // but this one runs server-side, so it can set a real identifying User-Agent
 // per Nominatim's usage policy — a browser blocks JS from doing that.
+//
+// SET ONE OF THESE in the backend's environment (Vercel project settings):
+//   NOMINATIM_CONTACT_EMAIL   a real contact address, e.g. admin@yourdomain.com  (recommended)
+//   NOMINATIM_USER_AGENT      or a full custom User-Agent string
+// Nominatim may block requests that do not identify the app, which would leave every coding
+// check on the fixed fallback schedule.
 
-const cache = new Map();   // roundKey -> city string | null (null = resolved-but-unknown OR lookup failed)
+const RESOLVED_CACHE_MAX = 5000;          // cells remembered per instance (oldest dropped first)
+const FAILED_RETRY_MS = 2 * 60 * 1000;    // a FAILED lookup (network / 4xx / 5xx / timeout) is retried after this
+const REQUEST_TIMEOUT_MS = 5000;          // a hung request must not block the queue for every car behind it
+const MIN_SPACING_MS = 1100;
+
+// roundKey -> { city: string|null, expires: ms | Infinity }
+//   Resolved answers (a city, or "Nominatim answered but has no city here") are kept for good.
+//   Failures are kept only FAILED_RETRY_MS so a short outage does not leave a spot "unknown" until the next deploy.
+const cache = new Map();
 const pending = new Map(); // roundKey -> in-flight Promise, shared across simultaneous pings for the same spot
 
 let queueTail = Promise.resolve();
-const MIN_SPACING_MS = 1100;
+let warnedNoContact = false;
 
 function roundKey(lat, lng) {
   return `${lat.toFixed(4)},${lng.toFixed(4)}`;
+}
+
+function remember(key, city, ttlMs) {
+  cache.delete(key); // re-insert so the oldest-first trim below drops the least recently written
+  if (cache.size >= RESOLVED_CACHE_MAX) cache.delete(cache.keys().next().value);
+  cache.set(key, { city, expires: ttlMs === Infinity ? Infinity : Date.now() + ttlMs });
+}
+
+function userAgent() {
+  if (process.env.NOMINATIM_USER_AGENT) return process.env.NOMINATIM_USER_AGENT;
+  const contact = process.env.NOMINATIM_CONTACT_EMAIL;
+  if (!contact && !warnedNoContact) {
+    warnedNoContact = true;
+    console.warn("[GEOCODE] NOMINATIM_CONTACT_EMAIL is not set — Nominatim may block anonymous requests, and coding checks would fall back to the fixed schedule.");
+  }
+  return `ARLTrack-AdminBackend/1.0${contact ? ` (${contact})` : ""}`;
 }
 
 function scheduleCall(fn) {
@@ -29,35 +59,36 @@ function scheduleCall(fn) {
  * Resolves { lat, lng } to the raw administrative city/town Nominatim puts
  * it in (e.g. "Makati"), or null if unresolved/failed. Never throws.
  *
- * NOTE: a `null` result is cached for this process's lifetime, same as the
- * frontend version — a car idling in the same spot shouldn't retry every
- * ping. If Nominatim has a brief outage, affected cells stay "unknown"
- * until the next deploy/restart clears the in-memory cache. That's an
- * acceptable trade for not hammering a free public API; if it ever matters
- * in practice, give failed lookups a short TTL instead of caching forever.
+ * Caching: a lookup Nominatim ANSWERED (with or without a city) is remembered for the life of the process.
+ * A lookup that FAILED (network error, timeout, 403 / 429 / 5xx) is remembered for only FAILED_RETRY_MS, so one
+ * bad minute does not leave that spot "unknown" until the next deploy, and a blocked client is not hammered either.
  */
 export function reverseGeocodeCity(lat, lng) {
   if (typeof lat !== "number" || typeof lng !== "number") return Promise.resolve(null);
   const key = roundKey(lat, lng);
 
-  if (cache.has(key)) return Promise.resolve(cache.get(key));
+  const hit = cache.get(key);
+  if (hit && hit.expires > Date.now()) return Promise.resolve(hit.city);
   if (pending.has(key)) return pending.get(key);
 
   const promise = scheduleCall(() =>
     fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&accept-language=en`, {
-      headers: {
-        "User-Agent": "ARLTrack-AdminBackend/1.0 (set a real contact email here before deploying)",
-      },
+      headers: { "User-Agent": userAgent() },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (!res.ok) throw new Error(`Nominatim answered ${res.status}`);
+        return res.json();
+      })
       .then((json) => {
         const a = json?.address || {};
         const city = a.city || a.town || a.municipality || a.county || null;
-        cache.set(key, city);
+        remember(key, city, Infinity);
         return city;
       })
-      .catch(() => {
-        cache.set(key, null);
+      .catch((err) => {
+        console.error(`[GEOCODE] lookup failed for ${key} (retry in ${FAILED_RETRY_MS / 1000}s):`, err.message);
+        remember(key, null, FAILED_RETRY_MS);
         return null;
       })
       .finally(() => pending.delete(key))
