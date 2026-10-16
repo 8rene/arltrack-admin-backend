@@ -147,17 +147,50 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
     ]);
     const customerID = entry.userID || booking?.userID || payment?.userID || null;
 
-    // ---- lines
+    // ---- lines (what was PAID / RETURNED in this movement)
     const lines = [];
-    for (const r of rows) {
+    let penalties = null;   // penalty receipts only: the charges behind each payment and where each penalty stands
+    let note = null;
+    const depositAtMs = payment?.depositSettledAt ? new Date(toISO(payment.depositSettledAt)).getTime() : 0;
+    const depositPool = num(payment?.depositSettled);
+
+    for (const [idx, r] of rows.entries()) {
       if (kind === "penalty") {
         const p = await docById(["penalties", "penaltyArchives"], r.penaltyID);
-        const items = Array.isArray(p?.lineItems) ? p.lineItems.map((i) => i.description).filter(Boolean) : [];
-        lines.push({ label: items.length ? items.join(", ") : `Penalty ${r.penaltyID || ""}`.trim(), detail: r.penaltyID || null, amount: num(r.amount) });
+        const items = Array.isArray(p?.lineItems)
+          ? p.lineItems.filter((i) => i && (i.description || num(i.amount))).map((i) => ({ description: i.description || "Charge", amount: num(i.amount) }))
+          : [];
+
+        // Every successful payment on THIS penalty, to split "paid before" from "this payment".
+        const all = r.penaltyID
+          ? (await rowsWhere("penaltyID", r.penaltyID)).filter((e) => e.direction === "in" && e.status === "success" && e.phase === "penalty")
+          : [r];
+        const rWhen = whenOf(r);
+        const earlier = (e) => whenOf(e) < rWhen || (whenOf(e) === rWhen && String(e.id) < String(r.id));
+        const paidBefore = round2(all.filter((e) => e.id !== r.id && earlier(e)).reduce((x, e) => x + num(e.amount), 0));
+        const paidAll = round2(all.reduce((x, e) => x + num(e.amount), 0));
+
+        // A deposit offset moves no money, so it has no entry. penalties.paidAmount counts it, though: whatever
+        // paidAmount holds beyond the real payments was covered by the security deposit (never more than the
+        // deposit settlement actually used). It counts as "before" unless it was settled after this payment.
+        const depositCovered = p ? Math.min(Math.max(0, round2(num(p.paidAmount) - paidAll)), depositPool) : 0;
+        const coveredByDeposit = depositCovered > 0 && (!depositAtMs || depositAtMs <= (rWhen ? new Date(rWhen).getTime() : Infinity)) ? depositCovered : 0;
+        const total = p ? num(p.amount) : null;
+
+        penalties ||= [];
+        penalties.push({
+          penaltyID: r.penaltyID || null, items, total, paidBefore, thisPayment: num(r.amount), coveredByDeposit,
+          remaining: total == null ? null : Math.max(0, round2(total - paidBefore - coveredByDeposit - num(r.amount))),
+        });
+        lines.push({ label: rows.length > 1 ? `Penalty payment ${idx + 1}` : "Penalty payment", detail: r.penaltyID || null, amount: num(r.amount) });
       } else if (kind === "payment") {
         lines.push({ label: `${PHASE_LABEL[r.phase] || "Payment"} payment`, detail: null, amount: num(r.amount) });
       } else if (kind === "deposit_return") {
         lines.push({ label: "Security deposit returned", detail: null, amount: num(r.amount) });
+      } else if (String(r.id).endsWith("_discountrefund")) {
+        // cash / online money handed back because a staff discount exceeded what the customer still owed
+        lines.push({ label: "Discount refund", detail: null, amount: num(r.amount) });
+        note = payment?.discountReason ? `Discount reason: ${payment.discountReason}` : "Refund of the amount paid above the discounted total.";
       } else {
         lines.push({ label: `Refund of ${String(PHASE_LABEL[r.phase] || "payment").toLowerCase()}`, detail: null, amount: num(r.amount) });
       }
@@ -174,6 +207,12 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
           && (whenOf(r) < mine || r.id === entry.id || (whenOf(r) === mine && String(r.id) < String(entry.id))))
         .reduce((s, r) => s + num(r.amount), 0));
       summary = { bookingTotal, paidToDate: paidSoFar, balanceAfter: Math.max(0, round2(bookingTotal - paidSoFar)) };
+    }
+
+    // deposit return slip: how the held deposit was used (the settlement itself moves no money, only the return does)
+    let depositSummary = null;
+    if (kind === "deposit_return" && payment && num(payment.securityDeposit) > 0) {
+      depositSummary = { held: num(payment.securityDeposit), usedForPenalties: num(payment.depositSettled), returned: total };
     }
 
     const when = whenOf(rows[0]) || whenOf(entry) || null;   // a combined penalty receipt is dated by its first row
@@ -202,7 +241,7 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
         bookingID: entry.bookingID || null, vehicle,
         startDateTime: toISO(booking?.startDateTime), endDateTime: toISO(booking?.endDateTime),
       },
-      lines, total,
+      lines, total, note, penalties, depositSummary,
       method: entry.method || null, source: entry.source || null,
       referenceNumber: entry.referenceNumber || null,
       handledBy: entry.source === "in_person" ? handledByName : null,

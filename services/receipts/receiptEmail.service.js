@@ -10,38 +10,133 @@ const when = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN
 const day = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", dateStyle: "medium" }) : null; };
 const METHOD = { gcash: "GCash", maya: "Maya", qrph: "QR Ph", cash: "Cash", bank_transfer: "Bank transfer" };
 
-const row = (label, value) => (value == null || value === "" ? "" : `
-  <tr><td style="padding:3px 0;color:#6b7280;font-size:13px;">${esc(label)}</td><td style="padding:3px 0;text-align:right;font-size:13px;color:#111827;">${esc(value)}</td></tr>`);
-const rule = `<tr><td colspan="2" style="padding:6px 0;"><div style="border-top:1px dashed #d1d5db;"></div></td></tr>`;
+const BRAND = "#1e3a8a";
+const FONT = "font-family:Arial,Helvetica,sans-serif;";
+
+// one label / value line of the details block
+const row = (label, value, strong = false) => (value == null || value === "" ? "" : `
+        <tr>
+          <td style="${FONT}padding:11px 0;border-bottom:1px solid #eef0f3;font-size:14px;color:#6b7280;width:42%;vertical-align:top;">${esc(label)}</td>
+          <td style="${FONT}padding:11px 0;border-bottom:1px solid #eef0f3;font-size:14px;color:#111827;text-align:right;vertical-align:top;word-break:break-word;${strong ? "font-weight:bold;" : ""}">${esc(value)}</td>
+        </tr>`);
+
+const sectionTitle = (text) => `
+        <tr><td colspan="2" style="${FONT}padding:22px 0 4px;font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:${BRAND};">${esc(text)}</td></tr>`;
+
+
+// small grey box used for the extra sections (penalty charges, deposit use, a note)
+const box = (inner) => `
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:18px;background:#f9fafb;border-radius:10px;">
+          <tr><td style="padding:14px 20px;">${inner}</td></tr>
+        </table>`;
+const pair = (label, value, strong = false) => `
+            <tr>
+              <td style="${FONT}padding:4px 0;font-size:14px;color:${strong ? "#111827" : "#475569"};${strong ? "font-weight:bold;" : ""}">${esc(label)}</td>
+              <td style="${FONT}padding:4px 0 4px 16px;font-size:14px;color:#111827;text-align:right;white-space:nowrap;${strong ? "font-weight:bold;" : ""}">${value}</td>
+            </tr>`;
+const boxTitle = (text) => `<div style="${FONT}font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:${BRAND};padding-bottom:6px;">${esc(text)}</div>`;
 
 export const renderReceiptEmail = (r) => {
   const out = r.direction === "out";
   const period = day(r.booking?.startDateTime) ? `${day(r.booking.startDateTime)} – ${day(r.booking.endDateTime) || "—"}` : null;
+  const customer = r.customer.name && r.customer.name !== "—" ? r.customer.name : "Valued Customer";
+
   const lines = r.lines.map((l) => `
-  <tr><td style="padding:3px 0;font-size:14px;color:#1f2937;">${esc(l.label)}</td><td style="padding:3px 0;text-align:right;font-size:14px;font-weight:bold;color:#111827;">${peso(l.amount)}</td></tr>`).join("");
-  const summary = r.summary ? `${rule}${row("Booking total", peso(r.summary.bookingTotal))}${row("Paid to date", peso(r.summary.paidToDate))}${row("Balance remaining", peso(r.summary.balanceAfter))}` : "";
+          <tr>
+            <td style="${FONT}padding:9px 0;font-size:15px;color:#1f2937;vertical-align:top;">${esc(l.label)}</td>
+            <td style="${FONT}padding:9px 0 9px 16px;font-size:15px;font-weight:bold;color:#111827;text-align:right;white-space:nowrap;vertical-align:top;">${peso(l.amount)}</td>
+          </tr>`).join("");
+
+  const summary = r.summary ? `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;background:#eff6ff;border-radius:10px;">
+        <tr><td style="padding:16px 20px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <tr><td style="${FONT}padding:4px 0;font-size:14px;color:#475569;">Booking total</td><td style="${FONT}padding:4px 0;font-size:14px;color:#111827;text-align:right;">${peso(r.summary.bookingTotal)}</td></tr>
+            <tr><td style="${FONT}padding:4px 0;font-size:14px;color:#475569;">Paid to date</td><td style="${FONT}padding:4px 0;font-size:14px;color:#111827;text-align:right;">${peso(r.summary.paidToDate)}</td></tr>
+            <tr><td style="${FONT}padding:10px 0 2px;border-top:1px solid #bfdbfe;font-size:15px;font-weight:bold;color:${BRAND};">Balance remaining</td><td style="${FONT}padding:10px 0 2px;border-top:1px solid #bfdbfe;font-size:15px;font-weight:bold;color:${BRAND};text-align:right;">${peso(r.summary.balanceAfter)}</td></tr>
+          </table>
+        </td></tr>
+      </table>` : "";
+
+  const noteHtml = r.note ? `<div style="${FONT}margin-top:18px;font-size:13px;line-height:1.5;color:#4b5563;background:#f9fafb;border-radius:8px;padding:10px 14px;">${esc(r.note)}</div>` : "";
+
+  const penaltyHtml = (r.penalties || []).map((p, i, all) => box(`
+            ${boxTitle(all.length > 1 ? `Penalty ${i + 1}` : "Penalty charges")}
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              ${p.items.map((it) => pair(it.description, peso(it.amount))).join("")}
+              ${p.total == null ? "" : `
+              <tr><td colspan="2" style="padding:4px 0;"><div style="border-top:1px solid #e5e7eb;"></div></td></tr>
+              ${pair("Penalty total", peso(p.total))}
+              ${p.paidBefore > 0 ? pair("Paid before", peso(p.paidBefore)) : ""}
+              ${p.coveredByDeposit > 0 ? pair("Covered by security deposit", peso(p.coveredByDeposit)) : ""}
+              ${pair("This payment", peso(p.thisPayment))}
+              ${pair("Remaining", peso(p.remaining), true)}`}
+            </table>`)).join("");
+
+  const depositHtml = r.depositSummary ? box(`
+            ${boxTitle("Security deposit")}
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              ${pair("Deposit held", peso(r.depositSummary.held))}
+              ${pair("Used for penalties", peso(r.depositSummary.usedForPenalties))}
+              ${pair("Returned to you", peso(r.depositSummary.returned), true)}
+            </table>`) : "";
+
+  const contact = [r.business.address, [r.business.phone, r.business.email].filter(Boolean).join(" · ")].filter(Boolean)
+    .map((t) => `<div style="${FONT}font-size:13px;color:#c7d2fe;line-height:1.5;">${esc(t)}</div>`).join("");
 
   const bodyHtml = `
-  <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; color: #1f2937;">
-    <h2 style="color:#1e3a8a;margin:0 0 4px;text-align:center;">${esc(r.business.name)}</h2>
-    ${r.business.address ? `<p style="margin:0;text-align:center;font-size:12px;color:#6b7280;">${esc(r.business.address)}</p>` : ""}
-    ${r.business.phone || r.business.email ? `<p style="margin:0;text-align:center;font-size:12px;color:#6b7280;">${esc([r.business.phone, r.business.email].filter(Boolean).join(" · "))}</p>` : ""}
-    <p style="margin:12px 0 4px;text-align:center;font-size:14px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#374151;">${esc(r.title)}${r.isCopy ? " (copy)" : ""}</p>
-    <p style="margin:0 0 12px;text-align:center;font-size:14px;">Hi ${esc(r.customer.name && r.customer.name !== "—" ? r.customer.name : "Valued Customer")}, here is your ${out ? "slip" : "receipt"}.</p>
-    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-      ${rule}
-      ${row("Receipt no.", r.receiptNo)}${row("Date", when(r.date))}${row(out ? "Paid to" : "Received from", r.customer.name)}
-      ${row("Booking", r.booking?.bookingID)}${row("Vehicle", r.booking?.vehicle)}${row("Rental period", period)}
-      ${rule}
-      ${lines}
-      <tr><td style="padding:8px 0 3px;border-top:1px solid #d1d5db;font-size:14px;font-weight:bold;">${out ? "Total returned" : "Total received"}</td><td style="padding:8px 0 3px;border-top:1px solid #d1d5db;text-align:right;font-size:16px;font-weight:bold;">${peso(r.total)}</td></tr>
-      ${rule}
-      ${row("Method", METHOD[r.method] || r.method)}${row("Channel", r.source === "in_person" ? "In person" : "Online (PayMongo)")}
-      ${row("Reference no.", r.referenceNumber)}${row(out ? "Handed back by" : "Received by", r.handledBy)}
-      ${summary}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;">
+  <tr><td align="center" style="padding:28px 12px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e5e7eb;">
+
+      <tr><td align="center" style="background:${BRAND};padding:30px 24px;">
+        <div style="${FONT}font-size:22px;font-weight:bold;color:#ffffff;margin-bottom:6px;">${esc(r.business.name)}</div>
+        ${contact}
+      </td></tr>
+
+      <tr><td align="center" style="padding:30px 32px 8px;">
+        <div style="${FONT}display:inline-block;font-size:12px;font-weight:bold;letter-spacing:1.5px;text-transform:uppercase;color:${BRAND};background:#eff6ff;border-radius:999px;padding:6px 14px;">${esc(r.title)}${r.isCopy ? " · copy" : ""}</div>
+        <div style="${FONT}font-size:15px;color:#374151;margin:18px 0 6px;">Hi ${esc(customer)}, here is your ${out ? "slip" : "receipt"}.</div>
+        <div style="${FONT}font-size:36px;font-weight:bold;color:#111827;line-height:1.2;">${peso(r.total)}</div>
+        <div style="${FONT}font-size:13px;color:#6b7280;margin-top:4px;">${out ? "Total returned" : "Total received"} · ${esc(when(r.date))}</div>
+      </td></tr>
+
+      <tr><td style="padding:8px 32px 28px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          ${sectionTitle("Details")}
+          ${row("Receipt no.", r.receiptNo, true)}${row(out ? "Paid to" : "Received from", r.customer.name)}
+          ${row("Booking", r.booking?.bookingID)}${row("Vehicle", r.booking?.vehicle)}${row("Rental period", period)}
+        </table>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:22px;background:#f9fafb;border-radius:10px;">
+          <tr><td style="padding:14px 20px 10px;">
+            <div style="${FONT}font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:${BRAND};padding-bottom:4px;">${out ? "Returned" : "Paid for"}</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${lines}
+              <tr>
+                <td style="${FONT}padding:12px 0 4px;border-top:1px solid #e5e7eb;font-size:15px;font-weight:bold;color:#111827;">${out ? "Total returned" : "Total received"}</td>
+                <td style="${FONT}padding:12px 0 4px 16px;border-top:1px solid #e5e7eb;font-size:17px;font-weight:bold;color:#111827;text-align:right;white-space:nowrap;">${peso(r.total)}</td>
+              </tr>
+            </table>
+          </td></tr>
+        </table>
+
+        ${noteHtml}${penaltyHtml}${depositHtml}
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          ${sectionTitle("Payment")}
+          ${row("Method", METHOD[r.method] || r.method)}${row("Channel", r.source === "in_person" ? "In person" : "Online (PayMongo)")}
+          ${row("Reference no.", r.referenceNumber)}${row(out ? "Handed back by" : "Received by", r.handledBy)}
+        </table>
+        ${summary}
+      </td></tr>
+
+      <tr><td style="background:#f9fafb;border-top:1px solid #eef0f3;padding:20px 32px;">
+        <div style="${FONT}font-size:12px;line-height:1.6;color:#6b7280;text-align:center;">This is a system-generated acknowledgment of the transaction above.<br>Please keep it for your records and don't reply directly to this email.</div>
+      </td></tr>
+
     </table>
-    <p style="margin-top:24px;font-size:12px;color:#6b7280;">This is a system-generated acknowledgment of the transaction above. Please don't reply directly to this email.</p>
-  </div>`;
+  </td></tr>
+</table>`;
 
   return { subject: `${r.title} ${r.receiptNo}${r.booking?.bookingID ? ` — Booking ${r.booking.bookingID}` : ""}`, bodyHtml };
 };
