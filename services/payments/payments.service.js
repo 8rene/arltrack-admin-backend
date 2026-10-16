@@ -4,7 +4,8 @@ import { notifyStaff, resolveNotification, createNotification } from "../notific
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf, depositWasOnline } from "./paymentBreakdown.js";
-import { createPaymongoRefund } from "../refundRequest/refundRequest.service.js";
+import { createPaymongoRefund, resolveCustomerContact } from "../refundRequest/refundRequest.service.js";
+import { sendBalanceReminderEmail } from "../email/email.service.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolveUserNames } from "../archives/resolveUserName.service.js";
 
@@ -818,6 +819,26 @@ export const notifyBalanceDue = async (bookingID, notifiedBy) => {
     customerUserID, bookingID, "balance_reminder", "Remaining balance due",
     `Please pay the remaining ₱${balance.toLocaleString()} for your booking ${bookingID}. You can pay it online from your booking.`
   );
+
+  // The same reminder by email. Awaited (not fire-and-forget) so a serverless host can't cut it off and so
+  // staff are told whether it went out. A failed or impossible email never fails the reminder itself:
+  // the bell notification above has already been sent.
+  let emailed = false;
+  let emailNote = null;
+  try {
+    const { email, name } = await resolveCustomerContact(customerUserID);
+    if (!email) {
+      emailNote = "This customer has no email address on file.";
+    } else {
+      const result = await sendBalanceReminderEmail({ toEmail: email, toName: name, bookingID, balance });
+      emailed = !!result.success;
+      if (!emailed) emailNote = "The email service could not send it.";
+    }
+  } catch (err) {
+    console.error("[PAYMENTS] balance reminder email failed:", err.message);
+    emailNote = "The email could not be sent.";
+  }
+
   await doc.ref.update({
     balanceReminderAt: admin.firestore.FieldValue.serverTimestamp(),
     balanceReminderBy: notifiedBy || null,
@@ -826,13 +847,13 @@ export const notifyBalanceDue = async (bookingID, notifiedBy) => {
 
   auditSafe({
     action: "update",
-    description: `Customer reminded to pay the remaining ₱${balance.toLocaleString()} for booking ${bookingID}.`,
+    description: `Customer reminded to pay the remaining ₱${balance.toLocaleString()} for booking ${bookingID} (in the app${emailed ? " and by email" : "; email not sent"}).`,
     userID: notifiedBy || null,
     bookingID,
     paymentID: data.paymentID || doc.id,
   });
 
-  return { bookingID, balance, notifiedAt: new Date().toISOString() };
+  return { bookingID, balance, notifiedAt: new Date().toISOString(), emailed, emailNote };
 };
 
 // ─────────────────────────────────────────────

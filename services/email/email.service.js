@@ -165,6 +165,28 @@ export const sendRefundEmail = async ({ toEmail, toName, bookingID, amount, manu
   });
 };
 
+// Sent when staff press "Notify customer to pay" on a booking with a remaining balance -- the email
+// counterpart to the "balance_reminder" bell notification (see notifyBalanceDue in payments.service.js).
+// Always goes through the shared general-purpose template (EMAILJS_TEMPLATE_ID): no extra template needed.
+// Never throws: returns { success, reason?, error? }.
+export const sendBalanceReminderEmail = async ({ toEmail, toName, bookingID, balance }) => {
+  const peso = (n) => `₱${Number(n || 0).toLocaleString()}`;
+  const displayName = toName || toEmail.split("@")[0];
+  return sendTransactionalEmail({
+    label: "Balance reminder",
+    dedicatedTemplateID: undefined,
+    toEmail, toName, bookingID, amount: peso(balance),
+    subject: `Reminder: please pay the remaining balance for booking ${bookingID || ""}`.trim(),
+    text:
+      `Hi ${displayName},\n\n` +
+      `This is a friendly reminder that the remaining balance of ${peso(balance)} for your booking${bookingID ? ` (${bookingID})` : ""} is still unpaid.\n\n` +
+      `You can pay it online through PayMongo: open My Bookings, tap your booking, then choose "Pay balance now". ` +
+      `The vehicle can't be released at pickup until the balance is settled.\n\n` +
+      `If you have already paid, or you plan to pay in store, please let our staff know.\n\n` +
+      `Best regards,\nARL Car Rental Team`,
+  });
+};
+
 // Sent when staff cancel a booking and NO money is being returned (cancel-only,
 // or nothing had been paid). Uses EMAILJS_CANCEL_TEMPLATE_ID or
 // EMAILJS_REFUND_TEMPLATE_ID if either is set, else the shared template.
