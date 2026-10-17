@@ -110,6 +110,6 @@ export const removeMaintenance = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[MAINTENANCE] removeMaintenance error:", error);
-    return res.status(400).json({ success: false, message: error.message });
+    return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };

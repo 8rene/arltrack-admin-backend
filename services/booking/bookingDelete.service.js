@@ -53,7 +53,7 @@ import {
 } from "../archives/vehicleInspectionArchives.service.js";
 import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 // ═══ DELETE GUARD ═══════════════════════════════════════════════════════════════════════════════════════════
-// What is still "in flight" on a booking (or on one payment / penalty), so a delete does not silently bury money.
+// What is still "in flight" on a booking , so a delete does not silently bury money.
 //   blockers  stop the delete. Owner / Admin can force past them (the records are archived, not destroyed);
 //             a Supervisor never can.
 //   warnings  are shown in the confirm dialog but never stop anything.
@@ -699,91 +699,3 @@ export const previewBookingDelete = async (bookingDocID) => {
   };
 };
 
-
-// ═══ DELETE A SINGLE PAYMENT OR PENALTY (Owner / Admin only -- the route enforces that) ═══════════════════════
-//   booking is live  -> the WHOLE booking goes with it (deleteBookingWithCascade): a payment or penalty never leaves its
-//                       booking behind half-deleted.
-//   booking is gone  -> nothing else exists to take along, so just this one record is archived (one atomic batch:
-//                       archive copy + live delete). Its money rows (paymentEntries) stay where they are.
-// "Delete" always means ARCHIVE here; permanent deletion only happens on the archive pages.
-const ITEM_KINDS = {
-  payment: { live: "payments",  archive: "paymentsArchives", archiveIdField: "paymentsArchivesID", ownIdField: "paymentID" },
-  penalty: { live: "penalties", archive: "penaltyArchives",  archiveIdField: "penaltyArchivesId",  ownIdField: "penaltyID" },
-};
-
-const loadItem = async (kind, id) => {
-  const K = ITEM_KINDS[kind];
-  const snap = await db.collection(K.live).doc(id).get();
-  if (snap.exists) return { ref: snap.ref, data: snap.data() };
-  // The screen may hold the record's own id (paymentID / penaltyID) rather than the Firestore doc id.
-  const byOwnID = await db.collection(K.live).where(K.ownIdField, "==", id).limit(1).get();
-  if (!byOwnID.empty) return { ref: byOwnID.docs[0].ref, data: byOwnID.docs[0].data() };
-  throw new Error(`${kind === "payment" ? "Payment" : "Penalty"} not found: ${id}`);
-};
-
-/** The live booking this record belongs to, or null (hard-deleted, or already archived). */
-const findLiveBooking = async (bookingID) => {
-  if (!bookingID) return null;
-  const direct = await db.collection("bookings").doc(String(bookingID)).get();
-  if (direct.exists) return { id: direct.id };
-  const q = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
-  return q.empty ? null : { id: q.docs[0].id };
-};
-
-const aloneGuards = async (kind, id, data) => {
-  if (kind === "penalty") return evaluateGuards({ penalties: [{ ...data, id }] });
-  const problems = [];
-  const refunds = await readTable(
-    "refund requests",
-    async () => (await db.collection("refundRequests").where("paymentID", "==", data.paymentID || id).get()).docs.map((d) => ({ ...d.data(), id: d.id })),
-    [],
-    problems
-  );
-  const guards = evaluateGuards({ payments: [data], refunds });
-  guards.warnings.push(...unreadableWarnings(problems));
-  return guards;
-};
-
-/** The dry run for the Payments / Penalties delete dialog. Writes nothing. */
-export const previewItemDelete = async (kind, id) => {
-  const item = await loadItem(kind, id);
-  const booking = await findLiveBooking(item.data.bookingID);
-  if (booking) return { ...(await previewBookingDelete(booking.id)), target: { kind, id } };
-  const guards = await aloneGuards(kind, id, item.data);
-  return {
-    mode: "alone", target: { kind, id }, booking: null, counts: { [kind]: 1 }, ...guards,
-    note: "Its booking no longer exists in the live bookings, so only this record is removed.",
-  };
-};
-
-export const deleteItem = async (kind, id, archivedBy = "admin", opts = {}) => {
-  const item = await loadItem(kind, id);
-  const booking = await findLiveBooking(item.data.bookingID);
-  if (booking) return deleteBookingWithCascade(booking.id, archivedBy, opts);
-
-  const guards = await aloneGuards(kind, id, item.data);
-  if (guards.blockers.length && !mayForce(opts)) {
-    throw new DeleteBlockedError(guards.blockers[0].message, { ...guards, canForce: Boolean(opts.canForce) });
-  }
-  const K = ITEM_KINDS[kind];
-  const archiveRef = db.collection(K.archive).doc();
-  const batch = db.batch();
-  batch.set(archiveRef, {
-    [K.archiveIdField]: archiveRef.id,
-    [K.ownIdField]: item.data[K.ownIdField] ?? id,
-    originalId: id,
-    archiveDate: admin.firestore.FieldValue.serverTimestamp(),
-    archivedAt: admin.firestore.FieldValue.serverTimestamp(),
-    archivedBy,
-    ...item.data,
-  });
-  batch.delete(item.ref);
-  await batch.commit();
-  // An inspection / maintenance record may have just been removed -> refresh that car's live part condition.
-  await syncCarPartConditions(item.data.carID);
-  return {
-    success: true, mode: "alone", kind, archiveID: archiveRef.id, bookingID: item.data.bookingID ?? null,
-    counts: { [kind]: 1 }, warnings: guards.warnings, forced: guards.blockers.length > 0,
-    message: `Its booking no longer exists, so only this ${kind} was archived.`,
-  };
-};

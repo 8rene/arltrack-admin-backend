@@ -5,6 +5,10 @@ import {
   getLinkedPaymentArchiveHandler,
   getLinkedVehicleInspectionHandler,
   getLinkedBookingSessionHandler,
+  getLinkedPenaltiesHandler,
+  getLinkedRefundRequestsHandler,
+  getLinkedReviewsHandler,
+  getLinkedMaintenanceHandler,
 } from "../../controllers/archives/bookingArchiveController.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
@@ -25,4 +29,9 @@ export const registerBookingArchiveRoutes = (app) => {
   app.get("/api/archives/bookings/:bookingArchivesId/payment",             verifyToken, requireRole(allowed), getLinkedPaymentArchiveHandler);
   app.get("/api/archives/bookings/:bookingArchivesId/vehicle-inspection",  verifyToken, requireRole(allowed), getLinkedVehicleInspectionHandler);
   app.get("/api/archives/bookings/:bookingArchivesId/booking-session",     verifyToken, requireRole(allowed), getLinkedBookingSessionHandler);
+  // Lists (a booking can have several of each): penalties, refund requests, reviews, maintenance records.
+  app.get("/api/archives/bookings/:bookingArchivesId/penalties",           verifyToken, requireRole(allowed), getLinkedPenaltiesHandler);
+  app.get("/api/archives/bookings/:bookingArchivesId/refund-requests",     verifyToken, requireRole(allowed), getLinkedRefundRequestsHandler);
+  app.get("/api/archives/bookings/:bookingArchivesId/reviews",             verifyToken, requireRole(allowed), getLinkedReviewsHandler);
+  app.get("/api/archives/bookings/:bookingArchivesId/maintenance",         verifyToken, requireRole(allowed), getLinkedMaintenanceHandler);
 };

@@ -86,9 +86,9 @@ export const returnChecklist = async (req, res) => {
 };
 
 // ── DELETE (archives the booking with everything linked to it) ───────────
-// Same handlers as the Payments / Penalties delete: see bookingDelete.controller.js (preview + guard + force).
-export const deleteBooking = deleteHandler("booking");
-export const deleteBookingPreview = previewDeleteHandler("booking");
+// The one delete in the system: see bookingDelete.controller.js (preview + guard + force).
+export const deleteBooking = deleteHandler;
+export const deleteBookingPreview = previewDeleteHandler;
 
 // ── Admin: refund + cancel (or cancel only) an upcoming / to-pay booking ──
 // GET  /api/bookings/:id/refund-preview            → what a refund would return

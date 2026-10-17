@@ -1,17 +1,12 @@
 import {
   listPenaltyArchives,
-  restorePenaltyArchiveHandler,
-  deletePenaltyArchiveHandler,
 } from "../../controllers/archives/penaltyArchiveController.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// View + restore: Owner and Admin. Permanent delete: Owner only.
+// Read-only. Restore and permanent delete are done from the Booking Archive only (they always take the whole booking).
 const allowed = [roles.OWNER, roles.ADMIN];
-const deleteAllowed = [roles.OWNER, roles.ADMIN]; // Admin may permanently delete too; a delete always takes the whole booking while its booking archive exists
 
 export const registerPenaltyArchiveRoutes = (app) => {
   app.get("/api/archives/penalties",                             verifyToken, requireRole(allowed), listPenaltyArchives);
-  app.post("/api/archives/penalties/:penaltyArchivesId/restore", verifyToken, requireRole(allowed), restorePenaltyArchiveHandler);
-  app.delete("/api/archives/penalties/:penaltyArchivesId",       verifyToken, requireRole(deleteAllowed), deletePenaltyArchiveHandler);
 };

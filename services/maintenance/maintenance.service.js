@@ -572,6 +572,15 @@ export const deleteMaintenance = async (maintenanceID, editedBy = null) => {
   if (!doc.exists) throw new Error("Maintenance record not found.");
   const record = doc.data();
 
+  // A record that belongs to a booking (post-rental job) is part of that booking's bundle: it is archived and
+  // restored together with the booking, and can only be removed by deleting the booking. Routine maintenance has
+  // no booking and keeps this delete.
+  if (record.bookingID) {
+    const err = new Error(`This maintenance record belongs to booking ${record.bookingID}. Delete that booking to remove it (it is archived together with the booking).`);
+    err.status = 409;
+    throw err;
+  }
+
   await ref.delete();
 
   // Deleting a Completed job un-resolves the parts it had fixed.

@@ -208,16 +208,8 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   // ── 3. Find and restore linked reviews archives ──
   const reviewArchiveDocs = await findLinkedReviewArchives(bookingID);
   for (const reviewDoc of reviewArchiveDocs) {
-    const {
-      reviewsArchivesID: _ri,
-      originalId: revOriginalId,
-      archiveDate: _rad,
-      archivedAt: _ra,
-      archivedBy: _rab,
-      restoredAt: _rr,
-      restoredBy: _rrb,
-      ...reviewOriginalData
-    } = reviewDoc.data();
+    const revOriginalId = reviewDoc.data().originalId;
+    const reviewOriginalData = stripArchiveMeta(reviewDoc.data());
 
     const reviewActiveRef = revOriginalId
       ? db.collection("reviews").doc(revOriginalId)

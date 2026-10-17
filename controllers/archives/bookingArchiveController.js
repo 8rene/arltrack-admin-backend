@@ -20,6 +20,42 @@ const resolveBookingID = async (bookingArchivesId) => {
   return data.bookingID ?? data.originalId ?? null;
 };
 
+// Firestore Timestamps (also nested ones) -> ISO strings, so the page can show them.
+const plain = (v) => {
+  if (v?.toDate) return v.toDate().toISOString();
+  if (Array.isArray(v)) return v.map(plain);
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, plain(x)]));
+  return v;
+};
+
+// "View penalties / refund requests / reviews / maintenance" on the Booking Archive page: every archived record of
+// THIS booking from one archive collection, newest first. Read-only. An empty list is a normal answer (that booking had none).
+const linkedRecordsHandler = (collection, label) => async (req, res) => {
+  try {
+    const bookingDoc = await db.collection("bookingArchives").doc(req.params.bookingArchivesId).get();
+    if (!bookingDoc.exists) return res.status(404).json({ success: false, message: "Archived booking not found." });
+    const b = bookingDoc.data();
+    // archived rows may carry the booking's own bookingID or its Firestore doc id
+    const keys = [...new Set([b.bookingID, b.originalId].filter(Boolean))];
+    const found = new Map();
+    await Promise.all(keys.map(async (key) => {
+      (await db.collection(collection).where("bookingID", "==", key).get()).docs.forEach((d) => found.set(d.id, d));
+    }));
+    const data = [...found.values()]
+      .map((d) => ({ id: d.id, ...plain(d.data()) }))
+      .sort((x, y) => String(y.archivedAt || "").localeCompare(String(x.archivedAt || "")));
+    return res.status(200).json({ success: true, data, message: data.length ? undefined : `No ${label} were archived with this booking.` });
+  } catch (error) {
+    console.error(`[BOOKING ARCHIVE] linked ${label} error:`, error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getLinkedPenaltiesHandler       = linkedRecordsHandler("penaltyArchives",     "penalties");
+export const getLinkedRefundRequestsHandler  = linkedRecordsHandler("refundArchives",      "refund requests");
+export const getLinkedReviewsHandler         = linkedRecordsHandler("reviewsArchives",     "reviews");
+export const getLinkedMaintenanceHandler     = linkedRecordsHandler("maintenanceArchives", "maintenance records");
+
 export const listBookingArchives = async (req, res) => {
   try {
     const data = await getAllBookingArchives();

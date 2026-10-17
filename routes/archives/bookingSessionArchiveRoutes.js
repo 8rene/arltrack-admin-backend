@@ -1,18 +1,12 @@
 import {
   listBookingSessionArchives,
-  restoreBookingSessionArchiveHandler,
-  deleteBookingSessionArchiveHandler,
 } from "../../controllers/archives/bookingSessionArchiveController.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
-// View + restore: Owner and Admin. Permanent delete: Owner only
-// (irreversible, so kept out of Admin's reach even if that account is compromised).
+// Read-only. Restore and permanent delete are done from the Booking Archive only (they always take the whole booking).
 const allowed = [roles.OWNER, roles.ADMIN];
-const deleteAllowed = [roles.OWNER, roles.ADMIN]; // Admin may permanently delete too; a delete always takes the whole booking while its booking archive exists
 
 export const registerBookingSessionArchiveRoutes = (app) => {
   app.get("/api/archives/booking-sessions",                                          verifyToken, requireRole(allowed), listBookingSessionArchives);
-  app.post("/api/archives/booking-sessions/:bookingSessionArchivesId/restore",       verifyToken, requireRole(allowed), restoreBookingSessionArchiveHandler);
-  app.delete("/api/archives/booking-sessions/:bookingSessionArchivesId",             verifyToken, requireRole(deleteAllowed), deleteBookingSessionArchiveHandler);
 };
