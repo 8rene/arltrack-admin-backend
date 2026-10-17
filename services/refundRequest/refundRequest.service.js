@@ -1334,7 +1334,7 @@ export const rejectRefundRequest = async (refundRequestID, adminUserID, reasonIn
 
   await notifyCustomer(
     refundRequest.userID, refundRequest.bookingID, "refund_rejected", "Refund Rejected",
-    rejectReason ? `Your refund request was rejected: ${rejectReason}` : "Your refund request was rejected.",
+    rejectReason ? `Your refund request was rejected: ${rejectReason} Your booking will continue as scheduled.` : "Your refund request was rejected. Your booking will continue as scheduled.",
     { renotify: true }
   );
 
