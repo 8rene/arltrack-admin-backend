@@ -122,6 +122,52 @@ export const updateSessionDestination = async (bookingID, oldLabel, { address, l
   return true;
 };
 
+/**
+ * Move one or more extra-stop / destination geofence zones to new coordinates.
+ *
+ * A booking can have several locations (geofenceZones = [Pickup, <destination>,
+ * ...extra stops]), so edits are addressed by zone index instead of assuming a
+ * single destination. Each edit is { zoneIndex, oldLabel, address, lat, lng }:
+ *   - zoneIndex >= 0: replaces that zone, keeping its radius. oldLabel must still
+ *     match the zone's current label, so an admin editing a stale copy of the
+ *     booking can't overwrite a different stop.
+ *   - zoneIndex null: the booking's destination had no zone of its own (older
+ *     bookings) — falls back to updateSessionDestination's find-or-append rule.
+ * Pickup/dropoff zones are never touched here. All edits are applied in one write.
+ * Returns false when the booking has no session.
+ */
+export const updateSessionStops = async (bookingID, edits) => {
+  const session = await getSessionByBookingID(bookingID);
+  if (!session) return false;
+
+  const zones = Array.isArray(session.data.geofenceZones) ? [...session.data.geofenceZones] : [];
+  const norm = (s) => (s || "").trim().toLowerCase();
+  const isFixed = (z) => /pickup|drop/.test(norm(z?.label));
+
+  for (const e of edits) {
+    const next = { label: e.address, lat: e.lat, lng: e.lng };
+    if (e.zoneIndex === null || e.zoneIndex === undefined) {
+      let idx = norm(e.oldLabel) && norm(e.oldLabel) !== "pickup"
+        ? zones.findIndex((z) => z && norm(z.label) === norm(e.oldLabel))
+        : -1;
+      if (idx === -1 && zones.length >= 2 && norm(zones[0]?.label) === "pickup") idx = 1;
+      const radius = zones[idx]?.radius ?? zones[0]?.radius ?? 500;
+      if (idx === -1) zones.push({ ...next, radius }); else zones[idx] = { ...next, radius };
+      continue;
+    }
+    const zone = zones[e.zoneIndex];
+    if (!zone) throw new Error("This booking's stops have changed — close the editor and reopen it.");
+    if (isFixed(zone)) throw new Error("Pickup and dropoff locations can't be changed here.");
+    if (norm(zone.label) !== norm(e.oldLabel)) {
+      throw new Error("This booking's stops have changed — close the editor and reopen it.");
+    }
+    zones[e.zoneIndex] = { ...next, radius: zone.radius ?? zones[0]?.radius ?? 500 };
+  }
+
+  await session.ref.update({ geofenceZones: zones });
+  return true;
+};
+
 /** Look a session up by the bookingID FK — used when a booking's status changes. */
 export const getSessionByBookingID = async (bookingID) => {
   const snap = await SESSIONS().where("bookingID", "==", bookingID).limit(1).get();

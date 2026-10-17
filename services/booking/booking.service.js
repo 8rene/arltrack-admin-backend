@@ -1,6 +1,6 @@
 import { db, bucket } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination } from "../../services/booking/bookingSession.service.js";
+import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination, updateSessionStops } from "../../services/booking/bookingSession.service.js";
 import { toDate, sessionStartedAt } from "../../utils/date/sessionDates.js";
 import { fetchSessionRows } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
@@ -540,7 +540,9 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     throw new Error(`Cannot edit a booking with status: ${oldStatus}`);
   }
 
-  const allowed = ["location", "startDateTime", "endDateTime", "notesAdmin", "notesUser", "status"];
+  // "location" (free text) is deliberately not editable: the name always comes from a map pick (stopEdits below),
+  // so the text and the geofence pin can never drift apart.
+  const allowed = ["startDateTime", "endDateTime", "notesAdmin", "notesUser", "status"];
   const filtered = {};
   allowed.forEach((k) => {
     if (updates[k] !== undefined && !(k === "status" && !updates[k])) { // "" status = "no change"
@@ -561,20 +563,32 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
-  // ── Map-picked location: { address, lat, lng } from the admin map picker (same
-  // shape the customer's picker produces). The text goes on bookings.location as
-  // before; the coordinates move the destination geofence zone on the session. ──
-  let pickedLocation = null;
-  const lc = updates.locationCoords;
-  if (lc && typeof lc === "object") {
-    const lat = Number(lc.lat), lng = Number(lc.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
-      throw new Error("Invalid map coordinates for location.");
+  // ── Map-picked stops: a booking can have several locations (destination + extra
+  // stops), so the admin sends stopEdits = [{ zoneIndex, oldLabel, address, lat, lng }],
+  // one per stop they moved. The zones on the session move; if one of them is the
+  // booking's destination, bookings.location follows its new address. ──
+  let stopEdits = [];
+  if (updates.stopEdits !== undefined) {
+    if (!Array.isArray(updates.stopEdits)) throw new Error("stopEdits must be an array.");
+    stopEdits = updates.stopEdits.map((e) => {
+      const lat = Number(e?.lat), lng = Number(e?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+        throw new Error("Invalid map coordinates for location.");
+      }
+      const address = String(e?.address || "").trim();
+      if (!address) throw new Error("A location address is required.");
+      const zoneIndex = Number.isInteger(e?.zoneIndex) && e.zoneIndex >= 0 ? e.zoneIndex : null;
+      return { zoneIndex, oldLabel: String(e?.oldLabel || ""), address, lat, lng };
+    });
+    const seen = new Set();
+    for (const e of stopEdits) {
+      if (e.zoneIndex === null) continue;
+      if (seen.has(e.zoneIndex)) throw new Error("The same stop was edited twice.");
+      seen.add(e.zoneIndex);
     }
-    const address = String(lc.address || filtered.location || "").trim();
-    if (!address) throw new Error("A location address is required.");
-    pickedLocation = { address, lat, lng };
-    filtered.location = address;
+    const normLabel = (x) => (x || "").trim().toLowerCase();
+    const destEdit = stopEdits.find((e) => normLabel(e.oldLabel) && normLabel(e.oldLabel) === normLabel(bookingData.location));
+    if (destEdit) filtered.location = destEdit.address;
   }
 
   // ── Payment validation: cannot mark picked-up/ongoing if payment is not yet approved/paid ──
@@ -708,8 +722,8 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
 
   // Move the destination geofence zone BEFORE saving the booking, so a failure here
   // surfaces to the admin instead of leaving the text and the pin out of sync.
-  if (pickedLocation) {
-    await updateSessionDestination(bookingID || docID, bookingData.location, pickedLocation);
+  if (stopEdits.length) {
+    await updateSessionStops(bookingID || docID, stopEdits);
   }
 
   const bookingRef = db.collection("bookings").doc(docID);
@@ -745,12 +759,15 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     await bookingRef.update(filtered);
   }
 
-  if (filtered.location !== undefined && filtered.location !== bookingData.location) {
+  if (stopEdits.length) {
+    const changes = stopEdits
+      .map((e) => `"${e.oldLabel || "—"}" → "${e.address}"`)
+      .join(", ");
     createAuditLog({
       action: "update",
       userID: performedBy,
       bookingID: bookingID || docID,
-      description: `Changed location on booking ${bookingID || docID} from "${bookingData.location || "—"}" to "${filtered.location || "—"}"${pickedLocation ? " (pin moved on map)" : ""}.`,
+      description: `Moved ${stopEdits.length === 1 ? "a stop" : `${stopEdits.length} stops`} on booking ${bookingID || docID} (pin moved on map): ${changes}.`,
     }).catch((err) => console.error("[AuditLog] Location edit log failed:", err.message));
   }
 
