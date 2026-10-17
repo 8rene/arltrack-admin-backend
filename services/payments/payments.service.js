@@ -8,6 +8,7 @@ import { createPaymongoRefund, resolveCustomerContact } from "../refundRequest/r
 import { sendBalanceReminderEmail } from "../email/email.service.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolveUserNames } from "../archives/resolveUserName.service.js";
+import { getDepositView } from "./paymentHelpers.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
 // in refundRequest.service.js. No-ops quietly if there's no userID on the
@@ -277,6 +278,7 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
   if (bookingStatus === "cancelled" && status !== "Refunded") status = "Cancelled";
 
   const paymongoIDs = resolvePaymongoIDs(payment);
+  const dep = getDepositView(payment);   // understands both the flat and the old nested deposit shape
   const paymentStage = derivePaymentStage(payment, { bookingStatus, hasOpenRefund: !!openRefund });
 
   return {
@@ -307,6 +309,9 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     serviceFee: Number(payment.serviceFee) || 0,
     gatewayFee: Number(payment.gatewayFee) || 0,
     securityDeposit: Number(payment.securityDeposit) || 0,
+    depositStatus: dep ? dep.status : null,                 // Held | Waived | Settled | Forfeited | Refunded
+    depositSettled: dep ? Number(dep.deducted) || 0 : 0,    // pesos of the deposit used to pay penalties
+    depositReturned: dep ? Number(dep.returnedAmount) || 0 : 0, // pesos of the deposit handed back to the customer
     // % rates + the base the gateway fee was computed on (saved at booking time)
     serviceFeeRate: Number(payment.serviceFeeRate) || 0,
     gatewayFeeRate: Number(payment.gatewayFeeRate) || 0,
