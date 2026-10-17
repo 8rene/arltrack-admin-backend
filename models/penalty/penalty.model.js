@@ -82,6 +82,16 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   amount:         data.amount         ?? 0, // amount actually charged (editable while Draft)
   overrideReason: data.overrideReason || "", // required once amount !== computedAmount
 
+  // The online payment (gateway) fee % in System Settings when this penalty was created, saved like payments.gatewayFeeRate
+  // so a later settings change can't alter what this penalty costs to pay online. It is charged ONLY if the customer pays it
+  // through PayMongo (never in store or from the deposit), on what is still owed at that moment.
+  // null = created before this existed: the current setting is used instead.
+  gatewayFeeRate: data.gatewayFeeRate ?? null,
+  // The online payment fee the customer has paid on this penalty so far, in pesos, ON TOP of paidAmount (which only ever
+  // counts penalty money). Goes up each time the customer pays online, like paidAmount; 0 for in-store / deposit payments.
+  // Written by the customer backend when an online penalty payment settles (penaltyPayment.util.js).
+  gatewayFeePaid: data.gatewayFeePaid ?? 0,
+
   status:       data.status       || "Confirmed",
   statusReason: data.statusReason || "", // required for Voided / Waived
 

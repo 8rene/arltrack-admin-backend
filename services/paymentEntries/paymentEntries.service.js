@@ -17,6 +17,7 @@ import { resolveUserName } from "../archives/resolveUserName.service.js";
 import { stripArchiveMeta } from "../archives/archiveMeta.js";
 import { makeEntriesDb } from "./paymentEntries.core.js";
 import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
+import { getDepositView } from "../payments/depositView.js";
 
 const svc = makeEntriesDb(db);
 
@@ -82,6 +83,82 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
     };
   };
 
+  // ---- ADJUSTMENTS: value that moved WITHOUT cash ------------------------------------------------------------------
+  // Nothing here is saved or added to a row: they are read from what the payment / penalties already store, so old
+  // bookings work too and the money totals (summarize) can never include them.
+  //   discount        payments.discountAmount (+ discountReason / discountBy / discountAt)
+  //   deposit_offset  penalty money taken from the held deposit = penalties.paidAmount minus the cash entries on it,
+  //                   capped by what the deposit settlement says it used (depositSettled)
+  const readOne = async (live, archive, idField, id) => {
+    const doc = await db.collection(live).doc(id).get();
+    if (doc.exists) return { id: doc.id, ...doc.data() };
+    const snap = await db.collection(archive).where(idField, "==", id).limit(1).get();
+    return snap.empty ? null : { id: snap.docs[0].id, ...stripArchiveMeta(snap.docs[0].data()) };
+  };
+  const readMany = async (live, archive, field, value, idField) => {
+    const out = new Map();
+    for (const c of [live, archive]) {                                       // live first: it wins
+      const snap = await db.collection(c).where(field, "==", value).get();
+      snap.docs.forEach((d) => { const data = c === archive ? stripArchiveMeta(d.data()) : d.data(); const k = data[idField] || d.id; if (!out.has(k)) out.set(k, { id: d.id, ...data }); });
+    }
+    return [...out.values()];
+  };
+
+  const loadAdjustments = async (filter, rows, nameOf) => {
+    if (filter?.refundRequestID) return [];
+    let payments = [];
+    let penalties = [];
+    if (filter?.paymentID) {
+      const pay = await readOne("payments", "paymentsArchives", "paymentID", filter.paymentID);
+      payments = pay ? [pay] : [];
+      penalties = await readMany("penalties", "penaltyArchives", "paymentID", filter.paymentID, "penaltyID");
+    } else if (filter?.bookingID) {
+      payments = await readMany("payments", "paymentsArchives", "bookingID", filter.bookingID, "paymentID");
+      penalties = await readMany("penalties", "penaltyArchives", "bookingID", filter.bookingID, "penaltyID");
+    } else if (filter?.penaltyID) {
+      const pen = await readOne("penalties", "penaltyArchives", "penaltyID", filter.penaltyID);
+      penalties = pen ? [pen] : [];
+      const pay = pen?.paymentID ? await readOne("payments", "paymentsArchives", "paymentID", pen.paymentID) : null;
+      payments = pay ? [pay] : [];
+    }
+    const payIDOf = (p) => p.paymentID || p.id;
+    const list = [];
+
+    for (const pay of payments) {
+      // A discount belongs to the payment, so a single-penalty view does not show it.
+      if (!filter.penaltyID && num(pay.discountAmount) > 0) {
+        list.push({
+          id: `adj_discount_${payIDOf(pay)}`, kind: "discount", label: "Discount given", amount: round2(num(pay.discountAmount)),
+          reason: pay.discountReason || null, byName: await nameOf(pay.discountBy), date: toISO(pay.discountAt),
+          paymentID: payIDOf(pay), bookingID: pay.bookingID ?? null, penaltyID: null,
+        });
+      }
+
+      const dep = getDepositView(pay);
+      let left = dep.settled ? num(dep.deducted) : 0;     // what the deposit actually paid toward penalties
+      if (left <= 0) continue;
+      const mine = penalties
+        .filter((p) => (p.paymentID || null) === payIDOf(pay))
+        .sort((a, b) => (toISO(a.createdAt) || "").localeCompare(toISO(b.createdAt) || ""));   // the deposit pays them oldest first
+      for (const pen of mine) {
+        const penID = pen.penaltyID || pen.id;
+        const cash = rows
+          .filter((r) => r.penaltyID === penID && r.direction === "in" && r.phase === "penalty" && r.status === "success")
+          .reduce((sum, r) => sum + num(r.amount), 0);
+        const fromDeposit = Math.min(left, round2(num(pen.paidAmount) - cash));
+        if (!(fromDeposit > 0)) continue;
+        left = round2(left - fromDeposit);
+        list.push({
+          id: `adj_deposit_${penID}`, kind: "deposit_offset", label: "Penalty paid from security deposit", amount: round2(fromDeposit),
+          reason: null, byName: null, date: toISO(dep.settledAt),
+          paymentID: payIDOf(pay), bookingID: pay.bookingID ?? null, penaltyID: penID,
+        });
+      }
+    }
+    if (filter?.penaltyID) return list.filter((a) => a.penaltyID === filter.penaltyID);
+    return list.sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.id.localeCompare(b.id));
+  };
+
   const listEntries = async (filter) => {
     const rows = await loadRows(filter);
     const names = new Map();
@@ -98,7 +175,10 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
         groupID: r.groupID ?? null, errorNote: r.transactionErrorNote ?? null, createdAt: toISO(r.createdAt),
       });
     }
-    return { entries, summary: summarize(entries) };
+    // Never let a problem reading the adjustments hide the real money rows.
+    let adjustments = [];
+    try { adjustments = await loadAdjustments(filter, rows, nameOf); } catch (e) { console.warn("[PAYMENT ENTRIES] adjustments skipped:", e.message); }
+    return { entries, summary: summarize(entries), adjustments };
   };
 
   return { listEntries, summarize };

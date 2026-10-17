@@ -23,14 +23,20 @@ import { ROLE_IDS } from "../../utils/roles/role.util.js";
  * updated — so a repeat of the same event (e.g. a driver tapping Remind
  * Staff again) rings the bell again without stacking a second copy.
  */
-export const createNotification = async ({ type, refID, refCollection, title, message, userID = null, extra = {}, renotify = false }) => {
-  const existing = await db.collection("notifications")
+export const createNotification = async ({ type, refID, refCollection, title, message, userID = null, extra = {}, renotify = false, dedupeKey = null }) => {
+  // dedupeKey: for events that repeat on the SAME refID but are each their own thing (e.g. several penalties on one
+  // booking, where refID is the booking). Without it the 2nd, 3rd... event would be swallowed by the first one's
+  // still-active notification. With it, only a notification carrying the same key counts as a duplicate.
+  // The key is filtered in memory, so no new Firestore index is needed.
+  let base = db.collection("notifications")
     .where("type", "==", type)
     .where("refID", "==", refID)
     .where("userID", "==", userID)
-    .where("status", "==", "active")
-    .limit(1)
-    .get();
+    .where("status", "==", "active");
+  if (!dedupeKey) base = base.limit(1);
+  const found = await base.get();
+  const matches = dedupeKey ? found.docs.filter((d) => d.data().dedupeKey === dedupeKey) : found.docs;
+  const existing = { empty: matches.length === 0, docs: matches };
 
   if (!existing.empty) {
     if (renotify) {
@@ -52,6 +58,7 @@ export const createNotification = async ({ type, refID, refCollection, title, me
     title,
     message,
     ...extra,
+    ...(dedupeKey ? { dedupeKey } : {}),
     userID,
     isRead: false,
     status: "active",

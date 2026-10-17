@@ -327,6 +327,11 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
       total:   payment.paymongoFeeTotal ?? null,
     },
 
+    // Penalties paid online ({ paymongoFee, paid, count } from the entries), or null when none was. getPaymentById() completes
+    // it with `received` (the online payment fee the customer paid, kept on the penalties). Kept apart from
+    // gatewayFee / paymongoFee above, which are deposit + balance only.
+    penaltyGateway: payment.penaltyGateway ?? null,
+
     // Every charge on this payment as one list (deposit + balance, incl. pending ones).
     paymongoTransactions: buildTransactions(payment),
 
@@ -685,15 +690,18 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
   });
   if (refund) {
-    batch.set(db.collection(ENTRY_COLLECTION).doc(`${paymentID}_discountrefund`), {
-      paymentEntryID: `${paymentID}_discountrefund`,
+    // A discount refund: phase "discount", hangs off the payment (paymentID), no refund request. Normal auto ID.
+    // (One discount per booking is enforced above, so this can only be written once.)
+    const entryRef = db.collection(ENTRY_COLLECTION).doc();
+    batch.set(entryRef, {
+      paymentEntryID: entryRef.id,
       paymentID,
       bookingID,
       userID: existing.userID || customerUserID || null,
       refundReqID: null,
       penaltyID: null,
       direction: "out",
-      phase: refund.kind,
+      phase: "discount",
       source: "online",
       method: null,
       amount: refundDue,
@@ -886,14 +894,18 @@ export const markRefundIssued = async (bookingID, issuedBy, details = {}) => {
   if (refundDue <= 0) {
     throw new Error("There is no refund due on this booking.");
   }
+  // The row below has an auto ID, so guard against recording the same hand-back twice.
+  if (data.refundIssued) {
+    throw new Error("This refund has already been marked as handed back.");
+  }
 
   const paymentID = data.paymentID || doc.id;
 
   // The cash handed back is money OUT, so it gets its own paymentEntries row -- otherwise the entry ledger
   // would never see that this money left. Same shape as a refund's in-person hand-back (<id>_manual), but it
   // hangs off the payment (paymentID only, refundReqID stays null), because no request exists for a
-  // discount spillover. Deterministic id => marking twice only rewrites the same row. It is committed in the
-  // same batch as refundIssued, so the flag and the ledger can never disagree.
+  // discount spillover; phase "discount" marks it. It is committed in the same batch as refundIssued, so the
+  // flag and the ledger can never disagree.
   const batch = db.batch();
   // Who handed it back and when are NOT stored on the payment: they are the out-row's processedBy / processedAt.
   batch.update(doc.ref, {
@@ -901,15 +913,16 @@ export const markRefundIssued = async (bookingID, issuedBy, details = {}) => {
     updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
   });
   const now = new Date();
-  batch.set(db.collection(ENTRY_COLLECTION).doc(`${paymentID}_discountrefund`), {
-    paymentEntryID: `${paymentID}_discountrefund`,
+  const handBackRef = db.collection(ENTRY_COLLECTION).doc();
+  batch.set(handBackRef, {
+    paymentEntryID: handBackRef.id,
     paymentID,
     bookingID,
     userID: data.userID || null,
     refundReqID: null,
     penaltyID: null,
     direction: "out",
-    phase: data.balanceCollected ? "balance" : "deposit",
+    phase: "discount",
     source: "in_person",
     method: method.toLowerCase().replace(/\s+/g, "_"),
     amount: refundDue,
@@ -1058,6 +1071,28 @@ export const updatePaymentStatus = async (id, status, performedBy = null) => {
   });
 };
 
+// Every penalty charged on this payment, as a light summary for the Payments modal's "Penalty Breakdown".
+// Read straight from `penalties` (matched on paymentID): amount / paidAmount / status are stored on the penalty,
+// so nothing needs hydrating. Oldest first, so the list reads in the order the charges happened.
+const getPenaltySummaries = async (paymentID) => {
+  if (!paymentID) return [];
+  const snap = await db.collection("penalties").where("paymentID", "==", paymentID).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0))
+    .map((p) => ({
+      penaltyID: p.penaltyID || p.id,
+      description: (p.lineItems || []).map((i) => i.description).filter(Boolean).join(", ") || "Penalty",
+      amount: Number(p.amount) || 0,
+      paidAmount: Number(p.paidAmount) || 0,
+      gatewayFeeRate: p.gatewayFeeRate ?? null,   // online payment fee % saved when the penalty was created
+      gatewayFeePaid: Number(p.gatewayFeePaid) || 0, // online payment fee the customer has paid on it so far (on top of paidAmount)
+      status: p.status || "Confirmed",            // Confirmed | Voided | Waived
+      statusReason: p.statusReason || "",
+      createdAt: isoOf(p.createdAt),
+    }));
+};
+
 export const getPaymentById = async (id) => {
   const doc = await db.collection("payments").doc(id).get();
   if (!doc.exists) throw new Error("Payment not found.");
@@ -1074,7 +1109,24 @@ export const getPaymentById = async (id) => {
   ]);
 
   const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
-  return withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund));
+  const [row, penalties] = await Promise.all([
+    withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund)),
+    getPenaltySummaries(payment.paymentID || payment.id),
+  ]);
+  // Gateway Breakdown, penalty side: the fee the customer paid comes from the penalties (gatewayFeePaid), what PayMongo kept
+  // from the penalty entries. null when no penalty was paid online.
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const feeReceived = r2(penalties.reduce((s, p) => s + (p.gatewayFeePaid || 0), 0));
+  const fromEntries = row.penaltyGateway || null;
+  const penaltyGateway = fromEntries || feeReceived > 0
+    ? {
+        received: feeReceived,
+        paymongoFee: fromEntries ? fromEntries.paymongoFee : null,
+        charged: r2((fromEntries ? fromEntries.paid : 0) + feeReceived),   // penalty money + the fee, i.e. what the customer paid
+        count: fromEntries ? fromEntries.count : 0,
+      }
+    : null;
+  return { ...row, penalties, penaltyGateway };
 };
 
 // Same full detail as getPaymentById() above (discounts, the deposit/balance

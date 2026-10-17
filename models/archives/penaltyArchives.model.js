@@ -35,6 +35,9 @@ export const PenaltyArchive = {
   graceMinutes: null,
   rateAtCreation: null,
 
+  gatewayFeeRate: null,    // online payment fee % saved when the penalty was created (see penalty.model.js)
+  gatewayFeePaid: 0,       // online payment fee the customer has paid on it so far, on top of paidAmount
+
   computedAmount: 0,
   amount: 0,
   overrideReason: "",

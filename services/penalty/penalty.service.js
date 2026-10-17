@@ -22,9 +22,12 @@ const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 // Helpers
 // ─────────────────────────────────────────────
 
-const notifyCustomer = (userID, bookingID, type, title, message) => {
+// dedupeKey = the penaltyID: refID is the BOOKING (so the bell still links to it), and a booking can have several
+// penalties. Without the key, only the first penalty's notification was ever created while it was still unread /
+// active; every later penalty (and every later waive / void) on that booking was silently dropped.
+const notifyCustomer = (userID, bookingID, type, title, message, dedupeKey = null) => {
   if (!userID) return Promise.resolve();
-  return createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID })
+  return createNotification({ type, refID: bookingID || null, refCollection: "bookings", title, message, userID, dedupeKey })
     .catch((err) => console.error(`[PENALTY] failed to notify customer (${type}):`, err.message));
 };
 
@@ -183,8 +186,14 @@ export const createPenalty = async ({
 
   const ref = db.collection("penalties").doc();
 
+  // Save the online payment fee % as of NOW (same System Settings value the booking uses). It only applies if the customer
+  // pays this penalty online; see gatewayFeeRate in penalty.model.js.
+  const settings = await getSystemSettings();
+  const gatewayFeeRate = Math.min(100, Math.max(0, Number(settings.gatewayFeePercent) || 0));
+
   const now = timestamp();
   const payload = createPenaltyPayload(ref.id, {
+    gatewayFeeRate,
     bookingID,
     paymentID: payment.data.paymentID || payment.ref.id,
     userID:    booking.data.userID    || null,
@@ -210,7 +219,8 @@ export const createPenalty = async ({
   await notifyCustomer(
     payload.userID, bookingID, "PenaltyConfirmed",
     "A charge was added to your booking",
-    `A ₱${finalAmount} charge was added to your recent booking — ${itemNames}. See your booking details for the breakdown.`
+    `A ₱${finalAmount} charge was added to your recent booking — ${itemNames}. See your booking details for the breakdown.`,
+    ref.id
   );
   await notifyStaffOfPenalty(bookingID, ref.id, finalAmount, itemNames);
 
@@ -298,7 +308,8 @@ export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorU
   await notifyCustomer(
     penalty.userID, penalty.bookingID, status === "Waived" ? "PenaltyWaived" : "PenaltyVoided",
     status === "Waived" ? "A charge on your booking was waived" : "A charge on your booking was removed",
-    `The ₱${penalty.amount} charge on your recent booking was ${verb} — ${itemNames}.`
+    `The ₱${penalty.amount} charge on your recent booking was ${verb} — ${itemNames}.`,
+    penaltyID
   );
   createAuditLog?.({
     action: "update", userID: actorUid,

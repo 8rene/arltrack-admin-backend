@@ -119,7 +119,7 @@ const byTime = (a, b) => whenOf(a).localeCompare(whenOf(b)) || String(a.id).loca
 const labelOf = (e) => {
   if (e.direction === "out") {
     if (e.phase === "deposit_return") return "Security deposit returned";
-    if (String(e.id).endsWith("_discountrefund")) return "Discount refund";
+    if (e.phase === "discount") return "Discount refund";
     return `Refund of ${String(PHASE_LABEL[e.phase] || "payment").toLowerCase()}`;
   }
   return `${PHASE_LABEL[e.phase] || "Payment"} payment`;
@@ -206,7 +206,7 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
         lines.push({ label: `${PHASE_LABEL[r.phase] || "Payment"} payment`, detail: null, amount: num(r.amount) });
       } else if (kind === "deposit_return") {
         lines.push({ label: "Security deposit returned", detail: null, amount: num(r.amount) });
-      } else if (String(r.id).endsWith("_discountrefund")) {
+      } else if (r.phase === "discount") {
         // cash / online money handed back because a staff discount exceeded what the customer still owed
         lines.push({ label: "Discount refund", detail: null, amount: num(r.amount) });
         note = payment?.discountReason ? `Discount reason: ${payment.discountReason}` : "Refund of the amount paid above the discounted total.";
