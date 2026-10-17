@@ -676,20 +676,39 @@ export const recordShortfallPayment = async ({ userID, amount, method, reference
 // Pending/Settled/Voided/Waived".
 // ─────────────────────────────────────────────
 export const getAllPenalties = async () => {
-  const [penaltiesSnap, bookingsSnap, carsSnap, brandSnap, modelSnap, userSnap] = await Promise.all([
-    db.collection("penalties").orderBy("createdAt", "desc").get(),
-    db.collection("bookings").get(),
-    db.collection("cars").get(),
-    db.collection("brand").get(),
-    db.collection("model").get(),
-    db.collection("user").get(),
-  ]);
+  const penaltiesSnap = await db.collection("penalties").orderBy("createdAt", "desc").get();
 
-  const bookingMap = Object.fromEntries(bookingsSnap.docs.map((d) => [d.data().bookingID || d.id, d.data()]));
-  const carMap     = Object.fromEntries(carsSnap.docs.map((d) => [d.id, d.data()]));
-  const brandMap   = Object.fromEntries(brandSnap.docs.map((d) => [d.id, d.data().brandName]));
-  const modelMap   = Object.fromEntries(modelSnap.docs.map((d) => [d.id, d.data().modelName]));
-  const userMap    = Object.fromEntries(userSnap.docs.map((d) => [d.id, d.data()]));
+  // Only read the few records the penalties point at. This used to download the whole bookings / cars / brand /
+  // model / user collections on every page load just to look up names, which is what made the page slow.
+  const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+  const byDocIds = async (collection, ids) => {                       // { docID: data }
+    const out = {};
+    for (let i = 0; i < ids.length; i += 100) {
+      const refs = ids.slice(i, i + 100).map((id) => db.collection(collection).doc(String(id)));
+      (await db.getAll(...refs)).forEach((d) => { if (d.exists) out[d.id] = d.data(); });
+    }
+    return out;
+  };
+  const penaltyDocs = penaltiesSnap.docs.map((d) => d.data());
+  const bookingIDs  = uniq(penaltyDocs.map((p) => p.bookingID));
+  const [carMap, userMap, bookingByDocId, bookingsByField] = await Promise.all([
+    byDocIds("cars", uniq(penaltyDocs.map((p) => p.carID))),
+    byDocIds("user", uniq(penaltyDocs.map((p) => p.userID))),
+    byDocIds("bookings", bookingIDs),                                  // bookings keyed by their document id
+    (async () => {                                                     // bookings keyed by a bookingID field
+      const out = {};
+      for (let i = 0; i < bookingIDs.length; i += 10) {
+        const snap = await db.collection("bookings").where("bookingID", "in", bookingIDs.slice(i, i + 10)).get();
+        snap.docs.forEach((d) => { out[d.data().bookingID || d.id] = d.data(); });
+      }
+      return out;
+    })(),
+  ]);
+  const bookingMap = { ...bookingByDocId, ...bookingsByField };
+  const [brandMap, modelMap] = await Promise.all([
+    byDocIds("brand", uniq(Object.values(carMap).map((c) => c.brandID))).then((m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, v.brandName]))),
+    byDocIds("model", uniq(Object.values(carMap).map((c) => c.modelID))).then((m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, v.modelName]))),
+  ]);
 
   const toISO = (v) => (v?.toDate ? v.toDate().toISOString() : v ?? null);
 

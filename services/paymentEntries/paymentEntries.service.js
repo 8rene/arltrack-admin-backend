@@ -16,6 +16,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import { resolveUserName } from "../archives/resolveUserName.service.js";
 import { stripArchiveMeta } from "../archives/archiveMeta.js";
 import { makeEntriesDb } from "./paymentEntries.core.js";
+import { buildRefundEntries } from "./paymentEntries.mapper.js";
 import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
 
@@ -61,6 +62,25 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
     for (const [collection, archived] of [[LIVE, false], [ARCHIVE, true]]) {     // live first: it wins
       const snap = await db.collection(collection).where(COLUMN[key], "==", filter[key]).get();
       snap.docs.forEach((d) => { if (!rows.has(d.id)) rows.set(d.id, { id: d.id, archived, ...stripArchiveMeta(d.data()) }); });
+    }
+    // A refund with no stored rows (an older request, or rows that were never written) still has its parts /
+    // manualRefund / unrefundable on the request itself. Build the rows from that, read-only, so the movements
+    // show instead of an empty list. Nothing is saved here. A Pending / Rejected request has no parts, so it
+    // correctly stays empty.
+    if (rows.size === 0 && key === "refundRequestID") {
+      for (const [collection, archived] of [["refundRequests", false], ["refundArchives", true]]) {
+        let snap = await db.collection(collection).doc(filter.refundRequestID).get();
+        let data = snap.exists ? snap.data() : null;
+        if (!data) {
+          const q = await db.collection(collection).where("refundRequestID", "==", filter.refundRequestID).limit(1).get();
+          data = q.empty ? null : q.docs[0].data();
+        }
+        if (!data) continue;
+        const req = stripArchiveMeta(data);
+        const { entries } = buildRefundEntries({ ...req, refundRequestID: req.refundRequestID || filter.refundRequestID }, filter.refundRequestID, { now: req.updatedAt || req.createdAt || new Date() });
+        entries.forEach((e) => rows.set(e.paymentEntryID, { id: e.paymentEntryID, archived, ...e }));
+        break;
+      }
     }
     return [...rows.values()];
   };
