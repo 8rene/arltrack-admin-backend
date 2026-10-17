@@ -17,7 +17,7 @@ import { resolveUserName } from "../archives/resolveUserName.service.js";
 import { stripArchiveMeta } from "../archives/archiveMeta.js";
 import { makeEntriesDb } from "./paymentEntries.core.js";
 import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
-import { getDepositView } from "../payments/depositView.js";
+import { getDepositView } from "../payments/paymentHelpers.js";
 
 const svc = makeEntriesDb(db);
 
