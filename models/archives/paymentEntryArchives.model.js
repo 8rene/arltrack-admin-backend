@@ -27,7 +27,7 @@ export const PaymentEntryArchive = {
   refundReqID: null,       // set on a refund's "out" rows only
   penaltyID: null,         // set on "penalty" phase rows only
   direction: "in",         // "in" | "out"
-  phase: "deposit",        // "deposit" | "balance" | "penalty" | "deposit_return"
+  phase: "deposit",        // "deposit" | "balance" | "penalty" | "deposit_return" | "discount"
   source: "online",        // "online" | "in_person"
   method: null,
   amount: 0,
