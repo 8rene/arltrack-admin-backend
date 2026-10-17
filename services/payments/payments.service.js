@@ -916,6 +916,33 @@ export const notifyBalanceDue = async (bookingID, notifiedBy) => {
   return { bookingID, balance, notifiedAt: new Date().toISOString(), emailed, emailNote };
 };
 
+// Every discount that sent (or still has to send) money back to the customer, with where that money stands. The
+// Refunds page lists these next to the refund requests, because both are "money going back" and both wait on PayMongo.
+// A discount that just came off the remaining balance moved no money, so it is not listed.
+export const getDiscountRefunds = async () => {
+  const snap = await db.collection("payments").where("discountAmount", ">", 0).get();
+  const docs = await hydratePayments(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  const keys = docs.map((d) => d.paymentID || d.id);
+  const entries = keys.length ? await getEntriesForPaymentIDs(keys) : new Map();
+  const items = [];
+  for (const payment of docs) {
+    const key = payment.paymentID || payment.id;
+    const refund = deriveDiscountRefund(payment, entries.get(key) || []);
+    if (!refund || refund.state === "deducted") continue;
+    const booking = payment.bookingID ? await findBookingByBookingID(payment.bookingID) : null;
+    items.push({
+      paymentID: key,
+      bookingID: payment.bookingID || null,
+      customerName: await resolveCustomerName(resolveCustomerUserID(payment.userID, booking)),
+      discountAmount: Number(payment.discountAmount) || 0,
+      discountReason: payment.discountReason || "",
+      discountAt: isoOf(payment.discountAt),
+      refund,
+    });
+  }
+  return items;
+};
+
 // ─────────────────────────────────────────────
 // Retry a discount refund that PayMongo accepted and then FAILED. The customer is still owed that money, and the
 // failed row stays on the ledger as the record of what happened; a new PayMongo refund is made and written as a

@@ -1,3 +1,4 @@
+import { getDiscountRefunds } from "../../services/payments/payments.service.js";
 import {
   getAllRefundRequests,
   approveRefundRequest,
@@ -12,6 +13,17 @@ export const listRefundRequests = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[REFUND] list error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Discounts that sent money back (or still have to), for the Refunds page's Under Process / History tabs.
+export const listDiscountRefunds = async (req, res) => {
+  try {
+    const data = await getDiscountRefunds();
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[REFUND] discount refunds list error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
