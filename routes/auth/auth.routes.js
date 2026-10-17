@@ -3,9 +3,15 @@ import { sendOTP, checkOTP } from "../../controllers/otp/otp.controller.js";
 import { sendPasswordResetOTP, resetAdminPassword } from "../../controllers/auth/passwordReset.controller.js";
 import { changePassword } from "../../controllers/auth/changePassword.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
+import { rateLimit } from "../../middlewares/rateLimit/rateLimit.middleware.js";
+
+// Per-IP caps on what anyone can call without logging in (10-minute window). Wrong OTP guesses and resend timing are
+// already limited per code / per e-mail in the OTP controllers; this stops floods and password guessing from one address.
+// In-memory, so on Vercel each instance counts on its own -- see the middleware for the limits of that.
+const authLimit = (keyPrefix, max) => rateLimit({ windowMs: 10 * 60 * 1000, max, keyPrefix });
 
 export const registerAuthRoutes = (app) => {
-  app.post("/api/auth/login", login);
+  app.post("/api/auth/login", authLimit("admin-login", 20), login);
 
   // Closes the userLogs entry created at login (logoutDateTime +
   // sessionDuration) and writes a matching audit log entry. Requires a
@@ -16,7 +22,7 @@ export const registerAuthRoutes = (app) => {
   // Sends a verification code to the CALLER's own email (from their JWT).
   // Used as a confirmation step before sensitive actions like changing a
   // user's role — see PATCH /api/users/:uid/role in user.routes.js.
-  app.post("/api/auth/send-otp", verifyToken, sendOTP);
+  app.post("/api/auth/send-otp", verifyToken, authLimit("admin-send-otp", 15), sendOTP);
 
   // Real-time "is this code actually right?" check — doesn't burn the code
   // (see peekOtp()'s comment in otp.controller.js), just gives immediate
@@ -30,8 +36,8 @@ export const registerAuthRoutes = (app) => {
   // customer-backend's /api/auth/send-otp (purpose: "reset") +
   // /api/auth/reset-password, which explicitly block staff accounts —
   // this is where those accounts are meant to reset their password instead.
-  app.post("/api/auth/forgot-password/send-otp", sendPasswordResetOTP);
-  app.post("/api/auth/forgot-password/reset",    resetAdminPassword);
+  app.post("/api/auth/forgot-password/send-otp", authLimit("admin-forgot-otp", 10), sendPasswordResetOTP);
+  app.post("/api/auth/forgot-password/reset",    authLimit("admin-forgot-reset", 10), resetAdminPassword);
 
   // Logged-in "change my own password" flow, from Account settings.
   // Reuses POST /api/auth/send-otp above (with { purpose: "change-password" }

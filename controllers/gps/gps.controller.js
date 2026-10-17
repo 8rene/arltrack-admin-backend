@@ -27,6 +27,11 @@ export const receiveLocation = async (req, res) => {
   if (!device_id || lat == null || lng == null) {
     return res.status(400).json({ status: "error", message: "device_id, lat, lng required." });
   }
+  // device_id is used as a Firestore query value and as an in-memory cache key,
+  // so it must be a plain, reasonably short string (real ids are 20-char Firestore doc ids).
+  if (typeof device_id !== "string" || device_id.length > 128) {
+    return res.status(400).json({ status: "error", message: "Invalid device_id." });
+  }
 
   const latVal = parseFloat(lat);
   const lngVal = parseFloat(lng);
@@ -64,6 +69,35 @@ export const receiveLocation = async (req, res) => {
     }
   }
 
+  // ── gpsDevice: is this a REGISTERED device, and which car is it on? ─────
+  // Checked BEFORE anything is saved, so a ping from an unknown device_id
+  // creates no gpsLocation doc, no cache entry and no live-map marker.
+  // Cached for ~60s (cleared on any device add/assign/unassign/edit/delete)
+  // so a ping doesn't re-run the same `where` query every few seconds — a
+  // registered tracker costs about one read a minute, "not found" included.
+  let dev = getCachedDevice(device_id);
+  if (!dev) {
+    try {
+      const deviceSnap = await db.collection("gpsDevice")
+        .where("gpsDeviceID", "==", device_id).limit(1).get();
+      dev = deviceSnap.empty
+        ? { docId: null, carID: null }
+        : { docId: deviceSnap.docs[0].id, carID: deviceSnap.docs[0].data().carID || null };
+      setCachedDevice(device_id, dev);
+    } catch (err) {
+      // Can't verify the device, so don't accept the ping (fail closed).
+      // 503 lets a tracker that buffers/retries resend it later.
+      console.error("[GPS] gpsDevice lookup failed:", err.message);
+      return res.status(503).json({ status: "error", message: "Temporarily unable to verify device." });
+    }
+  }
+  if (!dev.docId) {
+    // Silent drop, same style as the out-of-bounds check above: a 200 so a
+    // tracker doesn't hammer retries, nothing saved anywhere.
+    console.warn(`[GPS] Dropped ping from unregistered device_id (len=${device_id.length})`);
+    return res.status(200).json({ status: "ok", ignored: true });
+  }
+
   // A parked tracker re-sends the same fix every few seconds; skip the
   // Firestore writes for those (heartbeat + movement still go through).
   const skipWrite = shouldSkipLocationWrite(device_id, latVal, lngVal, speedVal, offlineVal);
@@ -76,38 +110,22 @@ export const receiveLocation = async (req, res) => {
     return res.status(500).json({ status: "error", message: "Failed to save location." });
   }
 
-  // ── gpsDevice: who is this device + which car is it on? ─────────────────
-  // Cached for ~60s (cleared on any device add/assign/unassign/edit/delete)
-  // so a ping doesn't re-run the same `where` query every few seconds.
-  let dev = getCachedDevice(device_id);
-  try {
-    if (!dev) {
-      const deviceSnap = await db.collection("gpsDevice")
-        .where("gpsDeviceID", "==", device_id).limit(1).get();
-      dev = deviceSnap.empty
-        ? { docId: null, carID: null }
-        : { docId: deviceSnap.docs[0].id, carID: deviceSnap.docs[0].data().carID || null };
-      setCachedDevice(device_id, dev);
+  // gpsDevice's own lastLocation/updatedAt (device is known to exist here).
+  if (!skipWrite) {
+    try {
+      await db.collection("gpsDevice").doc(dev.docId).update({
+        lastLocation: { latitude: latVal, longitude: lngVal },
+        updatedAt: admin.firestore.Timestamp.fromDate(recordedAt),
+      });
+    } catch (err) {
+      clearGpsDeviceCaches(); // doc may have been deleted/replaced — re-lookup next ping
+      console.error("[GPS] gpsDevice update failed:", err.message);
     }
-
-    if (dev.docId && !skipWrite) {
-      try {
-        await db.collection("gpsDevice").doc(dev.docId).update({
-          lastLocation: { latitude: latVal, longitude: lngVal },
-          updatedAt: admin.firestore.Timestamp.fromDate(recordedAt),
-        });
-      } catch (err) {
-        clearGpsDeviceCaches(); // doc may have been deleted/replaced — re-lookup next ping
-        console.error("[GPS] gpsDevice update failed:", err.message);
-      }
-    }
-  } catch (err) {
-    console.error("[GPS] gpsDevice lookup failed:", err.message);
   }
 
   // Trip logic (geofence / coding / Sheets log) must see EVERY ping, so it is
   // never skipped — only the redundant location-doc writes above/below are.
-  if (dev?.carID) {
+  if (dev.carID) {
     processLivePing(dev.carID, latVal, lngVal, speedVal, offlineVal, recordedAt).catch((err) =>
       console.error("[GPS] processLivePing failed (raw ping was still saved):", err.message)
     );

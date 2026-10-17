@@ -43,7 +43,11 @@ export const getCachedDevice = (gpsDeviceID) => {
   if (hit && Date.now() < hit.expires) return hit;
   return null;
 };
+const DEVICE_CACHE_MAX = 5000; // "not found" results are cached too; bound it so junk ids can't grow it forever
 export const setCachedDevice = (gpsDeviceID, { docId = null, carID = null } = {}) => {
+  if (deviceCache.size >= DEVICE_CACHE_MAX) {
+    deviceCache.delete(deviceCache.keys().next().value); // evict oldest
+  }
   deviceCache.set(gpsDeviceID, { docId, carID, expires: Date.now() + DEVICE_TTL_MS });
 };
 export const getCachedLocDocId = (gpsDeviceID) => locDocCache.get(gpsDeviceID) || null;
