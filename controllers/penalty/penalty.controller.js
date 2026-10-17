@@ -8,6 +8,8 @@ import {
   recordShortfallPayment as recordShortfallPaymentService,
   getAllPenalties,
   isBookingAssignedTo,
+  editPenalty as editPenaltyService,
+  confirmPenalty as confirmPenaltyService,
 } from "../../services/penalty/penalty.service.js";
 import { ROLES } from "../../utils/roles/role.util.js";
 
@@ -20,11 +22,12 @@ import { ROLES } from "../../utils/roles/role.util.js";
 // failures — so each wrapper checks `.error` first and only falls into
 // the catch block for unexpected exceptions.
 //
-// getDraftQueue / postDraftPenalty (edit) / postConfirmPenalty are gone
-// along with the Draft step itself — creating a penalty now confirms it
-// in the same call (see postCreatePenalty), so there's no queue to list
-// and nothing left in a state that could be edited or separately
-// confirmed.
+// Review step: a penalty a Driver creates is saved UnderReview (customer not
+// notified) instead of Confirmed. The "queue" is just the Penalties page
+// filtered to that status. A Supervisor / Admin / Owner can edit it
+// (patchEditPenalty) while it's UnderReview and confirm it
+// (postConfirmPenalty), which is when the customer is notified. Penalties
+// that a Supervisor / Admin / Owner creates themselves are confirmed at once.
 
 const actorId = (req) => req.user?.userID || req.user?.uid || null;
 
@@ -78,11 +81,36 @@ export const getBookingPenalties = async (req, res) => {
 export const postCreatePenalty = async (req, res) => {
   try {
     if (!(await driverMayUse(req, res, req.body?.bookingID))) return;
-    const result = await createPenaltyService({ ...req.body, createdBy: actorId(req) });
+    // needsReview is decided by WHO is calling, never by the body: a driver can't skip review, and nobody else is held up by it.
+    const result = await createPenaltyService({ ...req.body, createdBy: actorId(req), needsReview: req.user?.role === ROLES.DRIVER });
     if (result.error) return res.status(400).json({ success: false, message: result.error });
     return res.status(201).json({ success: true, data: result });
   } catch (error) {
     console.error("[PENALTY] create error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const patchEditPenalty = async (req, res) => {
+  try {
+    const { penaltyID } = req.params;
+    const { lineItems, amount, overrideReason } = req.body || {};
+    const result = await editPenaltyService(penaltyID, { lineItems, amount, overrideReason }, actorId(req));
+    if (result.error) return res.status(400).json({ success: false, message: result.error });
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[PENALTY] edit error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const postConfirmPenalty = async (req, res) => {
+  try {
+    const result = await confirmPenaltyService(req.params.penaltyID, actorId(req));
+    if (result.error) return res.status(400).json({ success: false, message: result.error });
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[PENALTY] confirm error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

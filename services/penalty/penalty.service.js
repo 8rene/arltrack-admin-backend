@@ -31,12 +31,10 @@ const notifyCustomer = (userID, bookingID, type, title, message, dedupeKey = nul
     .catch((err) => console.error(`[PENALTY] failed to notify customer (${type}):`, err.message));
 };
 
-// Fans out to every Owner/Admin/Supervisor. This is what replaced the old
-// Draft review step: nobody signs off on a penalty before the customer
-// sees it anymore, so this is how a supervisor finds out a charge went
-// out (e.g. one a Driver logged) in time to void/waive it if it's wrong,
-// instead of only finding out when they happen to check the Penalties
-// page.
+// Fans out to every Owner/Admin/Supervisor when a penalty is charged straight
+// away (one a Supervisor / Admin / Owner logged themselves, which has no
+// review step), so the others find out and can void/waive it if it's wrong.
+// Penalties a Driver logs go through review instead: see notifyStaffOfReview.
 const notifyStaffOfPenalty = (bookingID, penaltyID, amount, itemNames) =>
   notifyStaff({
     type: "penalty_created",
@@ -45,6 +43,17 @@ const notifyStaffOfPenalty = (bookingID, penaltyID, amount, itemNames) =>
     title: "A penalty was charged",
     message: `₱${amount} was charged on booking ${bookingID} and the customer was notified — ${itemNames}.`,
   }).catch((err) => console.error("[PENALTY] failed to notify staff:", err.message));
+
+// A Driver noted a penalty: nobody has signed off on it and the customer has NOT been told. This is the "to approve" ping
+// supervisors get; notifyStaffOfPenalty above is the "it went out" one for penalties confirmed on creation / on review.
+const notifyStaffOfReview = (bookingID, penaltyID, amount, itemNames) =>
+  notifyStaff({
+    type: "penalty_review",
+    refID: penaltyID,
+    refCollection: "penalties",
+    title: "A penalty needs review",
+    message: `A driver noted ₱${amount} on booking ${bookingID} — ${itemNames}. The customer hasn't been notified yet: review and confirm it on the Penalties page.`,
+  }).catch((err) => console.error("[PENALTY] failed to notify staff of a penalty to review:", err.message));
 
 const getBookingDoc = async (bookingID) => {
   const snap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
@@ -149,33 +158,24 @@ export const previewLateFeeForBooking = async (bookingID) => {
 };
 
 // ─────────────────────────────────────────────
-// Creation — every penalty is confirmed and the customer notified
-// immediately. There is no Draft step anymore: no supervisor review
-// queue sits in front of this. See notifyStaffOfPenalty above for what
-// replaced that review — a supervisor is told the moment it happens
-// instead of before it happens, and can void/waive it after the fact if
-// it's wrong.
+// Creation. A penalty a Supervisor / Admin / Owner logs is Confirmed and the customer notified immediately. A penalty
+// a Driver logs (needsReview) is saved as UnderReview instead: the customer is NOT notified, it counts toward nothing
+// (deposit math, settlement, receipts and the customer's balance only ever look at Confirmed), and staff get a
+// "needs review" notification. A supervisor then edits it if needed and confirms it (confirmPenalty below), which is
+// the moment the customer hears about it.
 // ─────────────────────────────────────────────
 
-// Late fees are no longer a special kind of penalty: staff and drivers type
-// every charge by hand (the late-fee preview above is only a suggestion shown
-// next to the form). That's why there's no lateMinutes/graceMinutes/rate here
-// anymore and no one-per-booking ID — a late charge can be voided and
-// charged again like any other line.
-export const createPenalty = async ({
-  bookingID, lineItems = [],
-  computedAmount: _clientComputed, amount, overrideReason = "", createdBy,
-}) => {
+// Validates a set of charges and works out the money. Shared by create and edit so both enforce the same rules.
+// Money is validated HERE, never trusted from the browser: the customer is billed from these numbers (online, with the
+// payment fee on top), so the server works out the total itself from the line items.
+const round2 = (v) => Math.round(v * 100) / 100;
+const buildCharge = ({ lineItems, amount, overrideReason = "" }) => {
   if (!Array.isArray(lineItems) || lineItems.length === 0) {
     return { error: "At least one line item is required." };
   }
   if (lineItems.some((item) => typeof item?.description !== "string" || !item.description.trim())) {
     return { error: "Every line item needs a description." };
   }
-
-  // Money is validated HERE, never trusted from the browser: the customer is billed from these numbers (online, with the
-  // payment fee on top), so the server works out the total itself from the line items.
-  const round2 = (v) => Math.round(v * 100) / 100;
   const items = [];
   for (const item of lineItems) {
     const itemAmount = Number(item.amount);
@@ -195,7 +195,29 @@ export const createPenalty = async ({
   if (roundedFinal !== computedAmount && !String(overrideReason || "").trim()) {
     return { error: "A reason is required when the amount is adjusted from the line-item total." };
   }
-  overrideReason = String(overrideReason || "").trim();
+  return { items, computedAmount, amount: roundedFinal, overrideReason: String(overrideReason || "").trim() };
+};
+
+// The online payment fee % as of NOW (same System Settings value the booking uses). It only applies if the customer
+// pays this penalty online; see gatewayFeeRate in penalty.model.js.
+const currentGatewayFeeRate = async () => {
+  const settings = await getSystemSettings();
+  return Math.min(100, Math.max(0, Number(settings.gatewayFeePercent) || 0));
+};
+
+// Late fees are no longer a special kind of penalty: staff and drivers type
+// every charge by hand (the late-fee preview above is only a suggestion shown
+// next to the form). That's why there's no lateMinutes/graceMinutes/rate here
+// anymore and no one-per-booking ID — a late charge can be voided and
+// charged again like any other line.
+export const createPenalty = async ({
+  bookingID, lineItems = [],
+  computedAmount: _clientComputed, amount, overrideReason = "", createdBy, needsReview = false,
+}) => {
+  const charge = buildCharge({ lineItems, amount, overrideReason });
+  if (charge.error) return { error: charge.error };
+  const { items, computedAmount, amount: roundedFinal } = charge;
+  overrideReason = charge.overrideReason;
 
   const booking = await getBookingDoc(bookingID);
   if (!booking) return { error: "Booking not found." };
@@ -205,21 +227,16 @@ export const createPenalty = async ({
 
   const ref = db.collection("penalties").doc();
 
-  // Save the online payment fee % as of NOW (same System Settings value the booking uses). It only applies if the customer
-  // pays this penalty online; see gatewayFeeRate in penalty.model.js.
-  const settings = await getSystemSettings();
-  const gatewayFeeRate = Math.min(100, Math.max(0, Number(settings.gatewayFeePercent) || 0));
-
   const now = timestamp();
   const payload = createPenaltyPayload(ref.id, {
-    gatewayFeeRate,
+    gatewayFeeRate: await currentGatewayFeeRate(),
     bookingID,
     paymentID: payment.data.paymentID || payment.ref.id,
     userID:    booking.data.userID    || null,
     carID:     booking.data.carID     || null,
     lineItems: items,
     computedAmount, amount: roundedFinal, overrideReason,
-    status: "Confirmed",
+    status: needsReview ? "UnderReview" : "Confirmed",
     createdBy,
     createdAt: now,
     updatedAt: now,
@@ -228,6 +245,17 @@ export const createPenalty = async ({
   await ref.set(payload);
 
   const itemNames = items.map((i) => i.description).join(", ");
+
+  if (needsReview) {
+    // Nothing goes to the customer: this is only a draft until a supervisor confirms it.
+    createAuditLog?.({
+      action: "create", userID: createdBy,
+      bookingID, paymentID: payload.paymentID,
+      description: `Noted penalty of \u20b1${roundedFinal} on booking ${bookingID} for review (customer not notified yet): ${itemNames}.`,
+    }).catch(() => {});
+    await notifyStaffOfReview(bookingID, ref.id, roundedFinal, itemNames);
+    return { penaltyID: ref.id, status: "UnderReview" };
+  }
 
   createAuditLog?.({
     action: "create", userID: createdBy,
@@ -243,7 +271,104 @@ export const createPenalty = async ({
   );
   await notifyStaffOfPenalty(bookingID, ref.id, roundedFinal, itemNames);
 
-  return { penaltyID: ref.id };
+  return { penaltyID: ref.id, status: "Confirmed" };
+};
+
+// Reads a penalty inside a transaction and hands it to `apply` only while it is still UnderReview. Used by edit and
+// confirm so two supervisors acting at once can't edit a penalty after the other one confirmed (and notified) it.
+const withUnderReview = async (penaltyID, lockedMessage, apply) => {
+  const ref = db.collection("penalties").doc(penaltyID);
+  try {
+    return await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw Object.assign(new Error("Penalty not found."), { expected: true });
+      const data = snap.data();
+      if (data.status !== "UnderReview") throw Object.assign(new Error(lockedMessage(data.status)), { expected: true });
+      return apply({ tx, ref, data });
+    });
+  } catch (err) {
+    if (err.expected) return { error: err.message };
+    throw err;
+  }
+};
+
+// Edit a penalty that is still UnderReview: change descriptions / amounts, add or remove line items, adjust the
+// total. Supervisor / Admin / Owner only (routes). Once it is confirmed the customer has been told, so it is locked.
+export const editPenalty = async (penaltyID, { lineItems, amount, overrideReason = "" } = {}, actorUid = null) => {
+  const charge = buildCharge({ lineItems, amount, overrideReason });
+  if (charge.error) return { error: charge.error };
+
+  const result = await withUnderReview(
+    penaltyID,
+    (status) => status === "Confirmed"
+      ? "This penalty was already confirmed and the customer notified, so it can't be edited anymore."
+      : `This penalty is ${status} and can't be edited.`,
+    ({ tx, ref, data }) => {
+      tx.update(ref, {
+        lineItems: charge.items,
+        computedAmount: charge.computedAmount,
+        amount: charge.amount,
+        overrideReason: charge.overrideReason,
+        editedBy: actorUid || null,
+        editedAt: timestamp(),
+        updatedAt: timestamp(),
+      });
+      return { before: data };
+    }
+  );
+  if (result.error) return result;
+
+  const itemNames = charge.items.map((i) => i.description).join(", ");
+  createAuditLog?.({
+    action: "update", userID: actorUid,
+    bookingID: result.before.bookingID, paymentID: result.before.paymentID,
+    description: `Edited penalty ${penaltyID} on booking ${result.before.bookingID} before it was confirmed: now \u20b1${charge.amount} — ${itemNames} (was \u20b1${result.before.amount}).`,
+  }).catch(() => {});
+
+  return { penaltyID };
+};
+
+// Confirm a penalty that is UnderReview: this is the moment the customer is notified, and the moment it becomes
+// locked and starts counting (deposit math, settlement, receipts, the customer's balance).
+export const confirmPenalty = async (penaltyID, actorUid = null) => {
+  // Fee % re-read now: the customer's terms are fixed when they are told, not when a driver first typed the charge.
+  const gatewayFeeRate = await currentGatewayFeeRate();
+
+  const result = await withUnderReview(
+    penaltyID,
+    (status) => status === "Confirmed"
+      ? "This penalty is already confirmed."
+      : `This penalty is ${status} and can't be confirmed.`,
+    ({ tx, ref, data }) => {
+      tx.update(ref, {
+        status: "Confirmed",
+        gatewayFeeRate,
+        confirmedBy: actorUid || null,
+        confirmedAt: timestamp(),
+        updatedAt: timestamp(),
+      });
+      return { penalty: data };
+    }
+  );
+  if (result.error) return result;
+
+  const p = result.penalty;
+  const itemNames = (p.lineItems || []).map((i) => i.description).join(", ");
+
+  createAuditLog?.({
+    action: "update", userID: actorUid,
+    bookingID: p.bookingID, paymentID: p.paymentID,
+    description: `Confirmed penalty of \u20b1${p.amount} on booking ${p.bookingID} (penalty ${penaltyID}) and notified the customer: ${itemNames}.`,
+  }).catch(() => {});
+
+  await notifyCustomer(
+    p.userID, p.bookingID, "PenaltyConfirmed",
+    "A charge was added to your booking",
+    `A ₱${p.amount} charge was added to your recent booking — ${itemNames}. See your booking details for the breakdown.`,
+    penaltyID
+  );
+
+  return { penaltyID };
 };
 
 // ─────────────────────────────────────────────
@@ -288,12 +413,12 @@ export const listUnpaidPenaltiesForUser = async (userID) => {
 };
 
 // ─────────────────────────────────────────────
-// Void / Waive — the only correction path left now that penalties are
-// confirmed on creation. Both notify the customer: with no Draft buffer
-// in front of confirmation, the customer has already seen the original
-// charge by the time anyone can undo it, so a void needs its own
-// "this was reversed" message just as much as a waive does — otherwise
-// they're left staring at a stale "you were charged ₱X" with no update.
+// Void / Waive — the only correction path once a penalty is Confirmed. Both
+// notify the customer: they have already seen the original charge by then,
+// so a void needs its own "this was reversed" message just as much as a
+// waive does — otherwise they're left staring at a stale "you were charged
+// ₱X" with no update. The exception is a penalty still UnderReview: the
+// customer never saw it, so voiding it (the only option for it) is silent.
 // ─────────────────────────────────────────────
 
 export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorUid) => {
@@ -307,6 +432,12 @@ export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorU
   if (penalty.status === "Voided" || penalty.status === "Waived") {
     return { error: `Penalty is already ${penalty.status}.` };
   }
+  // A penalty still UnderReview was never shown to the customer, so there is nothing to forgive: it can only be
+  // discarded (Voided), and discarding it tells the customer nothing.
+  const underReview = penalty.status === "UnderReview";
+  if (underReview && status === "Waived") {
+    return { error: "A penalty under review hasn't been charged yet, so it can't be waived. Void it to discard it, or confirm it first." };
+  }
 
   // A penalty already paid (partly or fully, via deposit or otherwise)
   // shouldn't be silently voided — that money needs its own reversal, not
@@ -319,21 +450,26 @@ export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorU
     status,
     statusReason,
     updatedAt: timestamp(),
+    ...(underReview ? { discardedFromReview: true } : {}),
   });
 
   const itemNames = (penalty.lineItems || []).map((i) => i.description).join(", ");
   const verb = status === "Waived" ? "waived" : "voided";
 
-  await notifyCustomer(
-    penalty.userID, penalty.bookingID, status === "Waived" ? "PenaltyWaived" : "PenaltyVoided",
-    status === "Waived" ? "A charge on your booking was waived" : "A charge on your booking was removed",
-    `The ₱${penalty.amount} charge on your recent booking was ${verb} — ${itemNames}.`,
-    penaltyID
-  );
+  if (!underReview) {
+    await notifyCustomer(
+      penalty.userID, penalty.bookingID, status === "Waived" ? "PenaltyWaived" : "PenaltyVoided",
+      status === "Waived" ? "A charge on your booking was waived" : "A charge on your booking was removed",
+      `The ₱${penalty.amount} charge on your recent booking was ${verb} — ${itemNames}.`,
+      penaltyID
+    );
+  }
   createAuditLog?.({
     action: "update", userID: actorUid,
     bookingID: penalty.bookingID, paymentID: penalty.paymentID,
-    description: `${status} penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}): ${itemNames}. Reason: ${statusReason}`,
+    description: underReview
+      ? `Discarded penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}) before it was confirmed — the customer was never notified: ${itemNames}. Reason: ${statusReason}`
+      : `${status} penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}): ${itemNames}. Reason: ${statusReason}`,
   }).catch(() => {});
 
   return { penaltyID };
@@ -409,6 +545,13 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
 
   const penaltiesSnap = await db.collection("penalties").where("bookingID", "==", bookingID).get();
   const allPenalties = penaltiesSnap.docs;
+
+  // A penalty a driver noted that no supervisor has confirmed yet isn't part of the math below, so settling now would
+  // hand the whole deposit back and leave the penalty as money the customer owes later. Make it be dealt with first.
+  const awaitingReview = allPenalties.filter((d) => d.data().status === "UnderReview").length;
+  if (awaitingReview > 0) {
+    return { error: `${awaitingReview} penalt${awaitingReview === 1 ? "y is" : "ies are"} still waiting for a supervisor's review. Confirm or discard ${awaitingReview === 1 ? "it" : "them"} on the Penalties page before settling the deposit.` };
+  }
 
   const unpaidConfirmed = allPenalties
     .map((d) => ({ ref: d.ref, data: d.data() }))
@@ -691,9 +834,10 @@ export const getAllPenalties = async () => {
   };
   const penaltyDocs = penaltiesSnap.docs.map((d) => d.data());
   const bookingIDs  = uniq(penaltyDocs.map((p) => p.bookingID));
-  const [carMap, userMap, bookingByDocId, bookingsByField] = await Promise.all([
+  const [carMap, userMap, creatorMap, bookingByDocId, bookingsByField] = await Promise.all([
     byDocIds("cars", uniq(penaltyDocs.map((p) => p.carID))),
     byDocIds("user", uniq(penaltyDocs.map((p) => p.userID))),
+    byDocIds("user", uniq(penaltyDocs.map((p) => p.createdBy))),        // who noted it (a driver, for ones under review)
     byDocIds("bookings", bookingIDs),                                  // bookings keyed by their document id
     (async () => {                                                     // bookings keyed by a bookingID field
       const out = {};
@@ -721,6 +865,7 @@ export const getAllPenalties = async () => {
   // yet), Partially Paid, or Paid (fully covered, via deposit or
   // recordShortfallPayment).
   const settlementStatusFor = (data) => {
+    if (data.status === "UnderReview") return "Under Review";   // not charged yet: nothing is owed or paid
     if (data.status === "Voided") return "Voided";
     if (data.status === "Waived") return "Waived";
     const paid = data.paidAmount || 0;
@@ -738,19 +883,23 @@ export const getAllPenalties = async () => {
     const booking = bookingMap[data.bookingID];
     const car = carMap[data.carID];
     const customer = userMap[data.userID];
+    const creator = creatorMap[data.createdBy];
 
     return {
       id: d.id,
       ...data,
       settlementStatus: settlementStatusFor(data),
       customerName: customer?.username || "—",
+      createdByName: creator?.username || creator?.name || null,
       plateNumber:  car?.plateNumber   || "—",
       brandName:    car ? brandMap[car.brandID] || "—" : "—",
       modelName:    car ? modelMap[car.modelID] || "—" : "—",
       bookingStart: booking ? toISO(booking.startDateTime) : null,
       bookingEnd:   booking ? toISO(booking.endDateTime)   : null,
       createdAt:    toISO(data.createdAt),
-      confirmedAt:  toISO(data.confirmedAt ?? data.createdAt),   // not stored on new penalties: confirmed when created
+      // Not stored on a penalty confirmed on creation (confirmed when created); a penalty under review isn't confirmed yet.
+      confirmedAt:  data.status === "UnderReview" ? null : toISO(data.confirmedAt ?? data.createdAt),
+      editedAt:     toISO(data.editedAt),
       paidAt:       toISO(data.paidAt),
       updatedAt:    toISO(data.updatedAt),
     };

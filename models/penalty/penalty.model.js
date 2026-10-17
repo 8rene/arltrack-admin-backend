@@ -6,18 +6,21 @@
 // charge). A booking can have many penalties — nothing here assumes one
 // penalty per booking.
 //
-// Lifecycle: Confirmed -> (optionally) Voided | Waived.
+// Lifecycle:
+//   Supervisor / Admin / Owner logs it:  Confirmed (customer notified at once) -> (optionally) Voided | Waived
+//   Driver logs it:  UnderReview -> Confirmed (a supervisor confirms it, customer notified then) -> (optionally) Voided | Waived
+//                                \-> Voided (a supervisor discards it; the customer is never told)
 //
-// There used to be a Draft step in front of Confirmed — staff logged a
-// charge, a supervisor reviewed it, only then did the customer hear
-// about it. That's gone: every penalty is confirmed and the customer
-// notified the moment it's created (see createPenalty in
-// penalty.service.js). A penalty is locked from the moment it exists —
-// corrections go through Voided/Waived + a new entry, never a silent
-// edit to amount/lineItems after the fact. Void/Waive is now the only
-// safety net for a mistake, which is why both notify the customer (see
-// voidOrWaivePenalty) — by the time anyone can undo a charge, the
-// customer's already seen it once.
+// UnderReview is the review step in front of Confirmed for penalties a Driver notes on a trip. While a penalty is
+// UnderReview the customer knows nothing about it and it counts toward nothing: not the deposit math, not
+// settlement, not receipts / statements, not the customer's outstanding balance (all of those only ever look at
+// status === "Confirmed"). Supervisor / Admin / Owner can edit its line items (descriptions and amounts), add or
+// remove items, and change the amount while it is UnderReview (editPenalty in penalty.service.js).
+//
+// The moment it is Confirmed the customer is notified and it is LOCKED: from then on corrections go through
+// Voided/Waived + a new entry, never a silent edit to amount/lineItems. That is also why Void/Waive of a Confirmed
+// penalty notifies the customer (see voidOrWaivePenalty) — they've already seen the charge once. Voiding an
+// UnderReview penalty does NOT notify anyone: the customer never saw it.
 //
 // PENALTY_TYPES / the single `type` + `description` fields are gone —
 // replaced by `lineItems`, an array of { description, amount } typed
@@ -30,7 +33,15 @@
 // sum of lineItems' amounts, but can be overridden (see overrideReason).
 // ─────────────────────────────────────────────────────────────
 
-export const PENALTY_STATUSES = ["Confirmed", "Voided", "Waived"];
+export const PENALTY_STATUSES = ["UnderReview", "Confirmed", "Voided", "Waived"];
+
+// Written only by the review step, never by createPenalty, so they are listed here rather than in createPenaltyPayload
+// (a new penalty must not carry empty columns). Present only on a penalty that went through UnderReview.
+//   confirmedBy / confirmedAt   who confirmed it (and so notified the customer) and when. Penalties that were
+//                               confirmed on creation don't store these: readers fall back to createdBy / createdAt.
+//   editedBy / editedAt         who last edited it while it was UnderReview, and when.
+//   discardedFromReview         true when it was voided while UnderReview, i.e. the customer was never told about it.
+export const PENALTY_REVIEW_FIELDS = ["confirmedBy", "confirmedAt", "editedBy", "editedAt", "discardedFromReview"];
 
 // Stamped by the archive restore, never by createPenalty, so it is listed here rather than in createPenaltyPayload
 // (a new penalty must not carry an empty column). Only present on a penalty restored from penaltyArchives.
@@ -93,8 +104,9 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   // payments.depositStatus / depositSettled / depositSettledAt.
   paidAmount:      data.paidAmount      ?? 0,  // may be < amount if partially covered by deposit
 
-  // confirmedBy / confirmedAt are NOT stored on a new penalty: a penalty is confirmed the moment it is created,
-  // so they were always equal to createdBy / createdAt. Readers fall back to those (older documents keep theirs).
+  // confirmedBy / confirmedAt are NOT stored on a new penalty confirmed on creation: they would always equal
+  // createdBy / createdAt, so readers fall back to those. A penalty that went through UnderReview does get them
+  // when it is confirmed (see PENALTY_REVIEW_FIELDS).
   createdBy:   data.createdBy   || null, // staff/driver uid who created it
 
   createdAt: data.createdAt || null,

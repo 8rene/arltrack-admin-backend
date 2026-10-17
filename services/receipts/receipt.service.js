@@ -334,6 +334,7 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
     const penalties = [];
     for (const p of penaltyRows.sort((a, b) => String(toISO(a.createdAt) || "").localeCompare(String(toISO(b.createdAt) || "")) || String(a.id).localeCompare(String(b.id)))) {
       const status = p.status || "Confirmed";
+      if (status === "UnderReview") continue;   // a driver's penalty no supervisor has confirmed: the customer hasn't been told, so it isn't on their paperwork
       const active = status === "Confirmed";
       const mine = penaltyPayments.filter((e) => e.penaltyID === (p.penaltyID || p.id));
       const paid = sum(mine);

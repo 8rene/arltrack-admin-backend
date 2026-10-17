@@ -3,6 +3,8 @@ import {
   getBookingPenalties,
   postCreatePenalty,
   patchVoidOrWaivePenalty,
+  patchEditPenalty,
+  postConfirmPenalty,
   postWaiveDeposit,
   postSettleBooking,
   postShortfallPayment,
@@ -12,11 +14,11 @@ import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
 // Staff (any role that can operate the front desk) can create a penalty
-// and view — creating one confirms it immediately and notifies the
-// customer, there's no Draft queue for a supervisor to review first
-// anymore (see penalty.service.js's createPenalty for what replaced that
-// review step). Only Supervisor+ can void/waive, record/waive a deposit,
-// or settle a booking.
+// and view. What happens next depends on who creates it (see
+// postCreatePenalty): Supervisor+ confirms it immediately and the customer
+// is notified; a Driver's goes UnderReview — not notified — until a
+// Supervisor+ edits/confirms it. Only Supervisor+ can edit/confirm a penalty
+// under review, void/waive, record/waive a deposit, or settle a booking.
 const staff      = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR, roles.DRIVER];
 const supervisor = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 
@@ -29,6 +31,8 @@ export const registerPenaltyRoutes = (app) => {
 
   app.post ("/api/penalties",                   verifyToken, requireRole(staff),      postCreatePenalty);
   app.patch("/api/penalties/:penaltyID/status", verifyToken, requireRole(supervisor), patchVoidOrWaivePenalty);
+  app.patch("/api/penalties/:penaltyID",        verifyToken, requireRole(supervisor), patchEditPenalty);     // only while UnderReview
+  app.post ("/api/penalties/:penaltyID/confirm", verifyToken, requireRole(supervisor), postConfirmPenalty);  // notifies the customer
 
   app.post("/api/penalties/deposit/waive",    verifyToken, requireRole(supervisor), postWaiveDeposit);
 

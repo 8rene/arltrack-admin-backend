@@ -602,10 +602,12 @@ export const driverDropoff = async (bookingDocID, driverID) => {
 };
 
 /**
- * Driver charging a penalty on their own trip. Same createPenalty staff use
- * (confirmed immediately, customer + staff notified, audit-logged) — the
- * only addition is the ownership check, so a driver can't charge a booking
- * that isn't theirs through the general POST /api/penalties route's reach.
+ * Driver noting a penalty on their own trip. Same createPenalty staff use,
+ * but saved UnderReview: the customer is NOT notified and it isn't charged
+ * until a supervisor confirms it on the Penalties page (staff are notified
+ * that it needs review). Also does the ownership check, so a driver can't
+ * note one on a booking that isn't theirs through the general
+ * POST /api/penalties route's reach.
  * bookingID here is the booking DOC id from the URL, resolved to the
  * business bookingID the penalty service keys on.
  */
@@ -619,5 +621,6 @@ export const driverCreatePenalty = async (bookingDocID, driverID, body = {}) => 
     amount: body.amount,
     overrideReason: body.overrideReason || "",
     createdBy: driverID,
+    needsReview: true,
   });
 };
