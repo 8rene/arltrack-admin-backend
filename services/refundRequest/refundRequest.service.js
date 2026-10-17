@@ -5,7 +5,7 @@ import { resolveNotification, createNotification } from "../notification/notific
 import { ROLE_IDS } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, resolvePickupAt, getDepositAmount, PAYMENT_ID_MISSING_NOTE } from "../payments/paymentBreakdown.js";
-import { PAYMENT_METHODS, findOpenRefundRequest } from "../payments/payments.service.js";
+import { PAYMENT_METHODS, findOpenRefundRequest, getDiscountRefundState } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
 import { resolveCurrentDriverID, completeActiveAssignment } from "../driverAssignments/driverAssignments.service.js";
@@ -202,11 +202,16 @@ export const getAllRefundRequests = async (status) => {
       const customerName = await resolveCustomerName(data.userID);
       const row = withRefundAliases({ ...data, refundRequestID: data.refundRequestID || doc.id, customerName });
 
-      if (data.status === "Pending" && data.paymentID) {
+      if (["Pending", "Approved"].includes(data.status) && data.paymentID) {
         try {
           const pSnap = await db.collection("payments").where("paymentID", "==", data.paymentID).limit(1).get();
           if (!pSnap.empty) {
             const payment = await hydratePaymentData(pSnap.docs[0].data(), pSnap.docs[0].id);
+            // A staff discount on this payment, and where its money stands (processing at PayMongo, failed ...), so the
+            // two ways of giving money back are visible side by side instead of in two separate screens.
+            const dr = await getDiscountRefundState(payment, pSnap.docs[0].id);
+            if (dr) row.discount = { amount: Number(payment.discountAmount) || 0, reason: payment.discountReason || "", refund: dr };
+            if (data.status !== "Pending") return row;
             const policy = policyForRequest(data, payment);
             const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0 });
             row.planPreview = {
@@ -470,6 +475,16 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     const payStatus = lower(payment.status);
     if (payStatus === "refunded") throw fail("This payment has already been refunded.", 409);
     if (!["paid", "approved"].includes(payStatus)) throw fail(`This payment is "${payment.status}" — only a paid payment can be refunded.`, 400);
+
+    // A staff discount on this payment is money going back to the customer too. While PayMongo is still processing it
+    // (or after it failed) the customer's real balance is unsettled, so approving now could leave them short.
+    const discountRefund = await getDiscountRefundState(payment, paymentSnap.docs[0].id);
+    if (discountRefund && discountRefund.state === "processing") {
+      throw fail(`A ${peso(discountRefund.amount)} discount refund is still processing at PayMongo for this booking. Wait for it to finish, then approve this request.`, 409);
+    }
+    if (discountRefund && discountRefund.state === "failed") {
+      throw fail(`The ${peso(discountRefund.amount)} discount refund for this booking failed at PayMongo. Retry it from the Payments page first, then approve this request.`, 409);
+    }
 
     // ── 48-hour policy: the tier comes from when the customer ASKED, not now ──
     if (waiveForfeit && !String(waiveReason || "").trim()) throw fail("A reason is required to waive the deposit forfeit.", 400);

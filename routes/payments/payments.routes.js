@@ -1,4 +1,4 @@
-import { listPayments, getPayment, patchPaymentStatus, collectBalance, notifyBalance, discountPayment, refundIssued } from "../../controllers/payments/payments.controller.js";
+import { listPayments, getPayment, patchPaymentStatus, collectBalance, notifyBalance, discountPayment, refundIssued, retryDiscountRefundPayment } from "../../controllers/payments/payments.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -27,6 +27,9 @@ export const registerPaymentsRoutes = (app) => {
   // One discount per booking, no edits and no re-sending (there is no correction route any more).
   // On a partial payment it comes off the remaining balance; on a full one PayMongo refunds it.
   app.patch("/api/payments/booking/:bookingID/discount", verifyToken, requireRole(allowed), discountPayment);
+
+  // The discount's PayMongo refund failed after PayMongo accepted it: send it again (the failed row stays as history).
+  app.patch("/api/payments/booking/:bookingID/discount-refund/retry", verifyToken, requireRole(allowed), retryDiscountRefundPayment);
 
   // Only for a refund that couldn't go through PayMongo (money received in store): records the
   // in-store hand-back with its mode and reference number.

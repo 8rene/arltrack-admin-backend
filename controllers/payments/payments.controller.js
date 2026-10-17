@@ -6,6 +6,7 @@ import {
   applyDiscount,
   notifyBalanceDue,
   markRefundIssued,
+  retryDiscountRefund,
 } from "../../services/payments/payments.service.js";
 
 // The acting staff member as a uid -- what paymentEntries.processedBy stores (same convention as the refund and
@@ -77,6 +78,18 @@ export const refundIssued = async (req, res) => {
     return res.status(200).json({ success: true, message: "Refund marked as returned." });
   } catch (error) {
     console.error("[PAYMENTS] refund-issued error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Retry a discount refund that PayMongo accepted and then failed.
+export const retryDiscountRefundPayment = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const data = await retryDiscountRefund(bookingID, actorUid(req) || "staff");
+    return res.status(200).json({ success: true, data, message: "Refund sent to PayMongo again." });
+  } catch (error) {
+    console.warn("[PAYMENTS] discount-refund retry rejected:", error.message);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

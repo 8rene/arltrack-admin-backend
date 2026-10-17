@@ -265,8 +265,53 @@ const buildTransactions = (payment) => {
   return list;
 };
 
+// ─────────────────────────────────────────────
+// Where a discount's money stands. A discount is ONE thing for staff, but the money behind it moves in one of
+// three ways, and PayMongo takes time (up to ~24h) for the online one, so "refundIssued" alone is not enough:
+//
+//   null            no discount on this payment
+//   deducted        it came off the remaining balance; no money moved
+//   processing      PayMongo accepted the refund and has not confirmed it yet      (out-row "pending")
+//   refunded        PayMongo confirmed it (or staff handed it back in store)       (out-row "success")
+//   failed          PayMongo refused it after accepting it -- the customer is still owed the money  (out-row "failed")
+//   awaiting_handback  money was received in store, so staff must hand it back in store
+//
+// Read from the payment's "out" rows (phase "discount"); the newest row wins, so a retry supersedes a failed one.
+// ─────────────────────────────────────────────
+export const deriveDiscountRefund = (payment, entries = []) => {
+  const discountAmount = Number(payment && payment.discountAmount) || 0;
+  if (!(discountAmount > 0)) return null;
+  const rows = (entries || [])
+    .filter((e) => e && e.direction === "out" && e.phase === "discount")
+    .sort((a, b) => {
+      const t = (x) => { const d = x.createdAt; const v = d && d.toDate ? d.toDate() : d ? new Date(d) : null; return v && !isNaN(v) ? v.getTime() : 0; };
+      return t(b) - t(a);
+    });
+  const latest = rows[0] || null;
+  const { refundDue } = computeAmounts({ ...payment, discountAmount, refundIssued: false });   // spillover only; 0 = fit in the balance
+  const base = { amount: refundDue, via: null, referenceNumber: null, errorNote: null, at: null };
+  if (latest) {
+    const st = String(latest.status || "").toLowerCase();
+    const at = latest.settledAt || latest.processedAt || latest.createdAt || null;
+    const common = { amount: Number(latest.amount) || refundDue, via: latest.source === "online" ? "paymongo" : "in_store", referenceNumber: latest.referenceNumber || null, errorNote: latest.transactionErrorNote || null, at };
+    if (st === "success") return { ...base, ...common, state: "refunded" };
+    if (st === "failed")  return { ...base, ...common, state: "failed" };
+    return { ...base, ...common, state: "processing" };
+  }
+  if (refundDue <= 0) return { ...base, state: "deducted" };
+  return { ...base, state: payment.refundIssued ? "refunded" : "awaiting_handback", via: "in_store" };
+};
+
+// Same thing, looked up from the database.
+export const getDiscountRefundState = async (payment, docID) => {
+  if (!(Number(payment && payment.discountAmount) > 0)) return null;
+  const key = payment.paymentID || docID;
+  const rows = (await getEntriesForPaymentIDs([key])).get(key) || [];
+  return deriveDiscountRefund(payment, rows);
+};
+
 // One place that shapes a payment for the admin UI (used by list + detail).
-const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund) => {
+const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund, discountRefund = null) => {
   const { amountPaid, balance, payType, refundDue } = computeAmounts(payment);
   const bookingStatus = (booking.status || "").toLowerCase();
 
@@ -295,6 +340,8 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     discountReason: payment.discountReason || "",
     refundDue: refundDue,
     refundIssued: !!payment.refundIssued,
+    // Where the discount's money stands (see deriveDiscountRefund): null | deducted | processing | refunded | failed | awaiting_handback
+    discountRefund,
     methodOfPayment: payment.methodOfPayment || "—",
     paymentMethod: payment.paymentMethod || "—",
     paymongoPaymentID: payment.paymongoPaymentID || null,
@@ -870,6 +917,61 @@ export const notifyBalanceDue = async (bookingID, notifiedBy) => {
 };
 
 // ─────────────────────────────────────────────
+// Retry a discount refund that PayMongo accepted and then FAILED. The customer is still owed that money, and the
+// failed row stays on the ledger as the record of what happened; a new PayMongo refund is made and written as a
+// new "pending" row (the newest row wins -- see deriveDiscountRefund). Nothing is retried while one is in flight
+// or after it succeeded, so the same money can never be refunded twice.
+// ─────────────────────────────────────────────
+export const retryDiscountRefund = async (bookingID, retriedBy) => {
+  if (!bookingID) throw new Error("bookingID is required.");
+  const snap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  if (snap.empty) throw new Error("No payment record found for this booking.");
+  const doc = snap.docs[0];
+  const payment = await hydratePaymentData(doc.data(), doc.id);
+
+  const state = await getDiscountRefundState(payment, doc.id);
+  if (!state || state.state !== "failed") {
+    throw new Error(
+      state && state.state === "processing" ? "This discount's refund is still processing at PayMongo — wait for it to finish."
+      : state && state.state === "refunded"  ? "This discount has already been refunded."
+      : "There is no failed discount refund to retry on this booking."
+    );
+  }
+  if (String(payment.status || "").toLowerCase() === "refunded") throw new Error("This payment has already been refunded.");
+
+  const amount = state.amount;
+  const plan = planDiscountRefund(payment, amount);
+  if (plan.error) throw new Error(plan.error);
+  if (!plan.paymongo) throw new Error("This discount was paid in store, so it can't be retried through PayMongo. Hand it back in store instead.");
+
+  const paymentID = payment.paymentID || doc.id;
+  const refundID = await createPaymongoRefund({
+    paymongoPaymentID: plan.paymongo.paymongoPaymentID,
+    amount,
+    reason: `Discount for booking ${bookingID} (retry)`,
+  });
+
+  const now = new Date();
+  const entryRef = db.collection(ENTRY_COLLECTION).doc();
+  await entryRef.set({
+    paymentEntryID: entryRef.id, paymentID, bookingID,
+    userID: payment.userID || null, refundReqID: null, penaltyID: null,
+    direction: "out", phase: "discount", source: "online", method: null,
+    amount, status: "pending", referenceNumber: refundID,
+    sessionID: null, transactionFee: null,
+    processedBy: retriedBy || null, processedAt: now, settledAt: null,
+    groupID: null, transactionErrorNote: null, createdAt: now, updatedAt: now,
+  });
+
+  auditSafe({
+    action: "update",
+    description: `Discount refund of ₱${amount.toLocaleString()} retried through PayMongo for booking ${bookingID} (new ref ${refundID}); the earlier attempt had failed.`,
+    userID: retriedBy || null, bookingID, paymentID,
+  });
+  return { bookingID, amount, refundID };
+};
+
+// ─────────────────────────────────────────────
 // A refund that could NOT go back through PayMongo (the money was received in store) is handed
 // back in store. A Supervisor / Admin / Owner records it here with how it was returned and, for
 // anything but cash, the reference number. Drivers no longer do this.
@@ -1012,11 +1114,16 @@ export const getAllPayments = async () => {
   const openRefundByPayment = {};
   openRefundSnap.docs.forEach((d) => { openRefundByPayment[d.data().paymentID] = { id: d.id, ...d.data() }; });
 
+  // One lookup for every discounted payment, so the list can show "refund processing" without a query per row.
+  const discounted = docs.filter((d) => Number(d.discountAmount) > 0).map((d) => d.paymentID || d.id);
+  const entriesByPayment = discounted.length ? await getEntriesForPaymentIDs(discounted) : new Map();
+
   return withStaffNames(docs.map((payment) => {
     const booking = bookingMap[payment.bookingID] || {};
     const vehicleName = vehicleMap[booking.carID] || "—";
     const customerName = nameMap[booking.userID] || "—";
-    return buildPaymentRow(payment, booking, customerName, vehicleName, openRefundByPayment[payment.paymentID || payment.id] || null);
+    const key = payment.paymentID || payment.id;
+    return buildPaymentRow(payment, booking, customerName, vehicleName, openRefundByPayment[key] || null, deriveDiscountRefund(payment, entriesByPayment.get(key) || []));
   }));
 };
 
@@ -1109,8 +1216,9 @@ export const getPaymentById = async (id) => {
   ]);
 
   const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
+  const discountRefund = await getDiscountRefundState(payment, payment.id);
   const [row, penalties] = await Promise.all([
-    withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund)),
+    withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund, discountRefund)),
     getPenaltySummaries(payment.paymentID || payment.id),
   ]);
   // Gateway Breakdown, penalty side: the fee the customer paid comes from the penalties (gatewayFeePaid), what PayMongo kept
@@ -1150,5 +1258,6 @@ export const getPaymentDetailsByBookingID = async (bookingID) => {
   ]);
 
   const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
-  return withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund));
+  const discountRefund = await getDiscountRefundState(payment, payment.id);
+  return withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund, discountRefund));
 };
