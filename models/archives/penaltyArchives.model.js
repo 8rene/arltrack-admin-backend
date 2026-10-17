@@ -30,11 +30,6 @@ export const PenaltyArchive = {
 
   lineItems: [],           // [{ description, amount }]
 
-  // late fee only -- null on every other penalty
-  lateMinutes: null,
-  graceMinutes: null,
-  rateAtCreation: null,
-
   gatewayFeeRate: null,    // online payment fee % saved when the penalty was created (see penalty.model.js)
   gatewayFeePaid: 0,       // online payment fee the customer has paid on it so far, on top of paidAmount
 

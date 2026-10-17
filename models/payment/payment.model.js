@@ -75,9 +75,11 @@ export const Payment = {
                                 // The result (Refunded / Settled / OwedByCustomer) is derived, not stored: OwedByCustomer
                                 // is "nothing returned and a Confirmed penalty is still unpaid", so it clears when paid.
   depositSettledAt: null,       // when the deposit stopped being Held (settled, waived, forfeited or refunded)
-  // The deposit going back has no paymentEntries row: depositReturned IS the amount. How it was returned (method,
-  // reference), who did it and when are on the DepositReturn transaction log written by settleBooking() in
-  // penalty.service.js (log id <paymentID>_deposit_settled). Who waived it is in the audit log.
+  // The deposit going back IS a paymentEntries row: phase "deposit_return", direction "out", source "in_person", written
+  // by the admin's settleBooking() (penalty.service.js) in the same transaction as depositReturned, and only when
+  // something was returned. That row holds how it was returned (method, reference), who did it and when; depositReturned
+  // here is the amount. A DepositReturn transaction log (id <paymentID>_deposit_settled) is written as well. Who waived a
+  // deposit is in the audit log.
 
   createdAt: null,
   updatedAt: null,

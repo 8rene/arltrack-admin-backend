@@ -164,25 +164,44 @@ export const previewLateFeeForBooking = async (bookingID) => {
 // charged again like any other line.
 export const createPenalty = async ({
   bookingID, lineItems = [],
-  computedAmount = 0, amount, overrideReason = "", createdBy,
+  computedAmount: _clientComputed, amount, overrideReason = "", createdBy,
 }) => {
   if (!Array.isArray(lineItems) || lineItems.length === 0) {
     return { error: "At least one line item is required." };
   }
-  if (lineItems.some((item) => !item?.description?.trim())) {
+  if (lineItems.some((item) => typeof item?.description !== "string" || !item.description.trim())) {
     return { error: "Every line item needs a description." };
   }
+
+  // Money is validated HERE, never trusted from the browser: the customer is billed from these numbers (online, with the
+  // payment fee on top), so the server works out the total itself from the line items.
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const items = [];
+  for (const item of lineItems) {
+    const itemAmount = Number(item.amount);
+    if (!Number.isFinite(itemAmount) || itemAmount <= 0) {
+      return { error: `Every line item needs an amount greater than \u20b10 ("${item.description.trim()}").` };
+    }
+    items.push({ ...item, description: item.description.trim(), amount: round2(itemAmount) });
+  }
+  // computedAmount is the sum of the line items as the SERVER adds them; whatever the client sent is ignored.
+  const computedAmount = round2(items.reduce((sum, item) => sum + item.amount, 0));
+
+  const finalAmount = amount === undefined || amount === null || amount === "" ? computedAmount : Number(amount);
+  if (!Number.isFinite(finalAmount) || finalAmount <= 0) {
+    return { error: "The penalty amount must be a number greater than \u20b10." };
+  }
+  const roundedFinal = round2(finalAmount);
+  if (roundedFinal !== computedAmount && !String(overrideReason || "").trim()) {
+    return { error: "A reason is required when the amount is adjusted from the line-item total." };
+  }
+  overrideReason = String(overrideReason || "").trim();
 
   const booking = await getBookingDoc(bookingID);
   if (!booking) return { error: "Booking not found." };
 
   const payment = await getPaymentByBookingID(bookingID);
   if (!payment) return { error: "No payment record found for this booking." };
-
-  const finalAmount = amount ?? computedAmount;
-  if (finalAmount !== computedAmount && !overrideReason.trim()) {
-    return { error: "A reason is required when the amount is adjusted from the computed value." };
-  }
 
   const ref = db.collection("penalties").doc();
 
@@ -198,8 +217,8 @@ export const createPenalty = async ({
     paymentID: payment.data.paymentID || payment.ref.id,
     userID:    booking.data.userID    || null,
     carID:     booking.data.carID     || null,
-    lineItems,
-    computedAmount, amount: finalAmount, overrideReason,
+    lineItems: items,
+    computedAmount, amount: roundedFinal, overrideReason,
     status: "Confirmed",
     createdBy,
     createdAt: now,
@@ -208,21 +227,21 @@ export const createPenalty = async ({
 
   await ref.set(payload);
 
-  const itemNames = lineItems.map((i) => i.description).join(", ");
+  const itemNames = items.map((i) => i.description).join(", ");
 
   createAuditLog?.({
     action: "create", userID: createdBy,
     bookingID, paymentID: payload.paymentID,
-    description: `Charged penalty of \u20b1${finalAmount} on booking ${bookingID}: ${itemNames}.`,
+    description: `Charged penalty of \u20b1${roundedFinal} on booking ${bookingID}: ${itemNames}.`,
   }).catch(() => {});
 
   await notifyCustomer(
     payload.userID, bookingID, "PenaltyConfirmed",
     "A charge was added to your booking",
-    `A ₱${finalAmount} charge was added to your recent booking — ${itemNames}. See your booking details for the breakdown.`,
+    `A ₱${roundedFinal} charge was added to your recent booking — ${itemNames}. See your booking details for the breakdown.`,
     ref.id
   );
-  await notifyStaffOfPenalty(bookingID, ref.id, finalAmount, itemNames);
+  await notifyStaffOfPenalty(bookingID, ref.id, roundedFinal, itemNames);
 
   return { penaltyID: ref.id };
 };

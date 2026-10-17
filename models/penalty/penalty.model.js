@@ -21,7 +21,7 @@
 //
 // PENALTY_TYPES / the single `type` + `description` fields are gone —
 // replaced by `lineItems`, an array of { description, amount } typed
-// freely at draft time (e.g. [{ description: "Cleaning", amount: 300 },
+// freely when the penalty is charged (e.g. [{ description: "Cleaning", amount: 300 },
 // { description: "Missing floor mat", amount: 200 }]). This is what the
 // "manual input instead of a carPartID/inspectionID/maintenanceID FK"
 // change landed as: a plain snapshot of what was true when the penalty
@@ -70,16 +70,8 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
 
   lineItems: Array.isArray(data.lineItems) ? data.lineItems : [], // [{ description, amount }]
 
-  // Late-fee specific — null for every other kind of penalty. This is
-  // also how the code now tells a late-fee draft apart from any other
-  // kind (see buildPenaltyID in penalty.service.js) now that there's no
-  // `type` field to check against "Late".
-  lateMinutes:    data.lateMinutes    ?? null,
-  graceMinutes:   data.graceMinutes   ?? null, // system-settings snapshot at creation time
-  rateAtCreation: data.rateAtCreation ?? null, // ₱/hour, system-settings snapshot
-
   computedAmount: data.computedAmount ?? 0, // auto-calculated value, before any manual override
-  amount:         data.amount         ?? 0, // amount actually charged (editable while Draft)
+  amount:         data.amount         ?? 0, // amount actually charged (locked once created)
   overrideReason: data.overrideReason || "", // required once amount !== computedAmount
 
   // The online payment (gateway) fee % in System Settings when this penalty was created, saved like payments.gatewayFeeRate
