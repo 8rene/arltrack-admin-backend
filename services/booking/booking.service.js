@@ -10,7 +10,7 @@ import { computeAmounts, derivePaymentStage } from "../../services/payments/paym
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
-import { planOnlineDepositReturn, sendOnlineDepositReturn, onlineDepositReturnOption } from "../../services/depositReturn/depositReturn.service.js";
+import { planOnlineDepositReturn, sendOnlineDepositReturn, onlineDepositReturnOption, getDepositReturnForBooking } from "../../services/depositReturn/depositReturn.service.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 import { getHolidaysBetween } from "../gps/coding.service.js";
@@ -511,8 +511,10 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
   const booking = bookingDoc.data();
   const bID = booking.bookingID || docID;
 
-  if (booking.status?.toLowerCase() !== "ongoing") {
-    throw new Error(`Cannot settle the deposit: booking status is "${booking.status}", not "ongoing".`);
+  // A deposit can be returned while the trip is ongoing, or afterwards once the booking is completed
+  // (completing no longer waits for the deposit -- see the note in updateBooking).
+  if (!["ongoing", "completed"].includes(String(booking.status || "").toLowerCase())) {
+    throw new Error(`Cannot settle the deposit: booking status is "${booking.status}", not "ongoing" or "completed".`);
   }
   const session = await getSessionByBookingID(bID);
   if (!session?.data?.droppedOffTime) {
@@ -743,22 +745,8 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   }
 
-  // ── Deposit gate: if a security deposit is being held, it must already
-  // have been settled (penalties deducted, remainder handed back) — that
-  // happens at drop-off via settleDeposit(), while the customer/driver are
-  // still together, NOT here. This gate deliberately does not block on
-  // money still owed: a penalty found during inspection after the deposit
-  // was returned just stays an unpaid penalty (Mark Paid / customer pays
-  // online) instead of leaving the car stuck "ongoing". ──
-  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    const pos = await getDepositPosition(bookingID || docID);
-    if (pos.deposit?.status === "Held" && !pos.alreadySettled) {
-      throw new Error(
-        "Cannot mark complete: the security deposit hasn't been settled yet. " +
-        "Settle it first (deduct any penalties and confirm the deposit handed back)."
-      );
-    }
-  }
+  // No deposit gate here: a booking can be completed while its security deposit is still held. The deposit is
+  // returned afterwards from Payments (settleDeposit accepts ongoing and completed bookings).
 
   // Stamp the actual return moment, once, at the exact instant Return is
   // clicked (ongoing -> completed). This is deliberately a server
@@ -1070,6 +1058,7 @@ export const getReturnChecklist = async (docID) => {
   // leave them as money owed later, so the server refuses (see settleBooking) and the screen says why up front.
   const underReviewCount = (pos.penalties || []).filter((p) => p.status === "UnderReview").length;
   const isOngoing = String(booking.status || "").toLowerCase() === "ongoing";
+  const isCompleted = String(booking.status || "").toLowerCase() === "completed";
   const settlement = pos.deposit?.settlement || null;
   // Can the deposit go back through PayMongo? Only while it is still to be returned, and only for GCash / Maya.
   const onlineOption = holdsDeposit && pos.amountToReturn > 0
@@ -1082,15 +1071,6 @@ export const getReturnChecklist = async (docID) => {
       label: "Vehicle dropped off",
       complete: droppedOff,
       detail: droppedOff ? null : "Nobody has marked the vehicle physically dropped off yet.",
-    },
-    {
-      key: "depositSettled",
-      label: "Security deposit settled",
-      // Nothing to settle when no deposit is held (none recorded / waived).
-      complete: !holdsDeposit,
-      detail: holdsDeposit
-        ? (droppedOff ? "Deduct any penalties and confirm the deposit handed back." : "Mark the vehicle dropped off first, then settle the deposit.")
-        : null,
     },
     {
       key: "inspection",
@@ -1111,7 +1091,7 @@ export const getReturnChecklist = async (docID) => {
   return {
     bookingID: bID,
     canReturn: items.every((i) => i.complete),
-    canSettle: isOngoing && droppedOff && holdsDeposit && underReviewCount === 0,
+    canSettle: (isOngoing || isCompleted) && droppedOff && holdsDeposit && underReviewCount === 0,
     bookingStatus: booking.status || null,
     underReviewCount,
     onlineReturn: onlineOption,   // { available, channel? , reason? }
@@ -1130,6 +1110,7 @@ export const getReturnChecklist = async (docID) => {
     stillOwed: pos.unpaidTotal > pos.depositAvailable ? pos.unpaidTotal - pos.depositAvailable : 0,
     outstandingAfterDeposit: Math.max(0, pos.unpaidTotal - pos.depositAvailable),
     penalties: pos.penalties,
+    depositReturn: await getDepositReturnForBooking(bID),   // how/whether the deposit went back: in store, or PayMongo (processing / failed / refunded)
   };
 };
 

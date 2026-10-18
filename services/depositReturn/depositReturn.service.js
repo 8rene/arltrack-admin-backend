@@ -128,9 +128,10 @@ export const sendOnlineDepositReturn = async ({ bookingID, paymentID, entryID, a
 };
 
 // ─────────────────────────────────────────────
-// Reading: the deposit returns that went (or are going) through PayMongo, for the Refunds page.
-// An in-store-only deposit return is not listed: it is finished the moment it is saved and was never "waiting".
-// Newest row per payment wins, so a retry or a hand-back supersedes the failed row.
+// Reading: every deposit return, for the Refunds page -- through PayMongo (pending / failed / refunded) AND in store.
+// An in-store return is finished the moment it is saved ("refunded", via "in_store"), so it only ever shows up in the
+// page's History, never under Under Process. Newest row per payment wins, so a retry or a hand-back supersedes the
+// failed row.
 // ─────────────────────────────────────────────
 const stateOfRow = (row) => {
   const st = lower(row.status);
@@ -152,7 +153,6 @@ export const getDepositReturns = async () => {
 
   const items = [];
   for (const [paymentID, rows] of byPayment) {
-    if (!rows.some((r) => r.source === "online")) continue;   // never went near PayMongo
     rows.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
     const latest = rows[0];
     const at = latest.settledAt || latest.processedAt || latest.createdAt || null;
@@ -190,6 +190,33 @@ export const getDepositReturns = async () => {
     });
   }
   return items;
+};
+
+/**
+ * The newest deposit return of ONE booking, however it went back (in store or through PayMongo), for the Car Tracking
+ * customer window. Read-only; returns null when nothing has been returned yet or the lookup fails.
+ *   { via: "paymongo" | "in_store", state: "refunded" | "processing" | "failed", amount, method, referenceNumber, errorNote, at }
+ */
+export const getDepositReturnForBooking = async (bookingID) => {
+  try {
+    if (!bookingID) return null;
+    const snap = await db.collection(ENTRY_COLLECTION).where("bookingID", "==", bookingID).where("phase", "==", "deposit_return").get();
+    const rows = snap.docs.map((d) => d.data()).filter((r) => r.direction === "out");
+    if (!rows.length) return null;
+    rows.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+    const r = rows[0];
+    return {
+      via: r.source === "online" ? "paymongo" : "in_store",
+      state: stateOfRow(r),
+      amount: num(r.amount),
+      method: r.method || null,
+      referenceNumber: r.referenceNumber || null,
+      errorNote: r.transactionErrorNote || null,
+      at: isoOf(r.settledAt || r.processedAt || r.createdAt),
+    };
+  } catch {
+    return null;
+  }
 };
 
 // Read INSIDE the claim transaction: every deposit_return row of this payment must be a failed one before another is
