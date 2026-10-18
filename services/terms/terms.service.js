@@ -1,5 +1,6 @@
 import admin from "firebase-admin";
 import { db } from "../../config/firebaseConnection/firebase.js";
+import { notifyAllUsers } from "../notification/notification.service.js";
 
 const COLLECTION = "termsVersions";
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
@@ -148,5 +149,27 @@ export const createTermsVersion = async (payload, actor) => {
   });
 
   const saved = await newRef.get();
-  return shape(newRef.id, saved.data());
+  const out = shape(newRef.id, saved.data());
+
+  // Tell every user the Terms changed (bell notification). Awaited on purpose: on a
+  // serverless host (Vercel) work started after the response is sent can be killed
+  // before it finishes. A failure here must NOT undo or fail the save — the new
+  // version is already stored — so it's caught and reported via `notified` instead.
+  try {
+    const note = changeNote ? ` What changed: ${changeNote}` : "";
+    out.notified = await notifyAllUsers({
+      type: "terms_updated",
+      refID: newRef.id,
+      refCollection: "terms",
+      title: "Terms & Conditions Updated",
+      message: `Our Terms & Conditions have been updated to version ${Number(version).toFixed(2)}.${note}`,
+      extra: { version },
+    });
+  } catch (err) {
+    console.error("[TERMS] Saved the new version but failed to notify users:", err.message);
+    out.notified = 0;
+    out.notifyError = true;
+  }
+
+  return out;
 };

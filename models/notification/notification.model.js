@@ -21,7 +21,12 @@ export const Notification = {
   //   "cancellation_request" | "new_user" | "geofence_alert" |
   //   "coding_alert" | "pickup_overdue" | "return_overdue" | "refund_due" |
   //   "refund_request" | "license_expiring" | "license_expired" |
-  //   "inspection_pickup_needed" | "inspection_return_needed"
+  //   "inspection_pickup_needed" | "inspection_return_needed" |
+  //   "terms_updated"
+  //   (terms_updated: sent to EVERY account in `user` whenever a new Terms &
+  //   Conditions version is published — refCollection "terms", refID is the
+  //   new termsVersionID, `version` is stored alongside; see notifyAllUsers()
+  //   in services/notification/notification.service.js)
   //   (the last two: a driver hit "Remind Staff" — extra fields carID,
   //   phase and bookingKey are stored alongside, see
   //   services/inspectionReminders/inspectionReminders.service.js)

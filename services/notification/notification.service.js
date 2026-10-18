@@ -111,6 +111,62 @@ export const notifyOwners = async ({ type, refID, refCollection, title, message,
 };
 
 /**
+ * Fans a notification out to EVERY account in the `user` collection (customers
+ * and all staff roles) — one doc per person, each with their own userID, so
+ * isRead / dismiss stays personal to them, same as every other fan-out above.
+ *
+ * Unlike notifyStaff/notifyOwners this does NOT go through createNotification():
+ * that runs a dedup query per person, which would be one extra read per user on
+ * a collection that can be large. It isn't needed here — callers pass a refID
+ * that is unique to the event (e.g. the new termsVersionID), so the same event
+ * is only ever fanned out once.
+ *
+ * Users are read in pages of 400 (ids only — .select() with no fields skips the
+ * document bodies) and written in one batch per page (Firestore caps a batch at
+ * 500 writes). Resolves to how many users were notified.
+ */
+export const notifyAllUsers = async ({ type, refID, refCollection, title, message, extra = {} }) => {
+  const PAGE = 400;
+  let last = null;
+  let count = 0;
+
+  for (;;) {
+    let q = db.collection("user")
+      .select()
+      .orderBy(admin.firestore.FieldPath.documentId())
+      .limit(PAGE);
+    if (last) q = q.startAfter(last);
+
+    const snap = await q.get();
+    if (snap.empty) break;
+
+    const batch = db.batch();
+    snap.docs.forEach((d) => {
+      batch.set(db.collection("notifications").doc(), {
+        type,
+        refID,
+        refCollection,
+        title,
+        message,
+        ...extra,
+        userID: d.id,
+        isRead: false,
+        status: "active",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        resolvedAt: null,
+      });
+    });
+    await batch.commit();
+
+    count += snap.size;
+    if (snap.size < PAGE) break;
+    last = snap.docs[snap.docs.length - 1];
+  }
+
+  return count;
+};
+
+/**
  * Marks every ACTIVE notification for this type+refID as resolved —
  * intentionally has no userID filter, so it resolves every fan-out copy
  * of the same event at once (e.g. every Owner/Admin/Supervisor's own
