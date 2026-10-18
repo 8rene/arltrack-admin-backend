@@ -393,6 +393,7 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
   ].filter(Boolean);
   createAuditLog({
     action: "update",
+    bookingID: booking.bookingID || bookingDocID, // links the entry (and an override reason) to the booking
     description: `Driver ${driverName} assigned to booking ${booking.bookingID || bookingDocID}` +
       `${force && overrides.length ? ` (override — ${overrides.join(", ")})` : ""}.`,
     userID: editedBy,
@@ -482,6 +483,7 @@ export const unassignDriver = async (bookingDocID, editedBy = null) => {
   }
   createAuditLog({
     action: "update",
+    bookingID: booking.bookingID || bookingDocID,
     description: `Driver ${driverName} unassigned from booking ${booking.bookingID || bookingDocID}.`,
     userID: editedBy,
   }).catch((err) => console.error("[AUDIT] driver unassign log failed:", err.message));
