@@ -154,6 +154,37 @@ export const previewLateFeeForBooking = async (bookingID) => {
     bookingID, lateMinutes, billableHours, graceMinutes, ratePerHour, computedAmount,
     scheduledEndAt: iso(booking.data.endDateTime),
     actualReturnAt: iso(actualReturnAt),
+    deposit: await describeDepositForPenalty(bookingID),
+  };
+};
+
+// Where the security deposit stands for this booking, so a penalty form can tell staff how a new penalty gets paid:
+//   returned = false  the deposit is still held: a confirmed penalty is deducted from it when the deposit is settled
+//                     (availableForNew = what is left after the penalties already waiting on it)
+//   returned = true   the deposit is already settled / refunded / forfeited / waived, or there never was one:
+//                     nothing to deduct from, the customer is asked to pay the penalty online (or in store)
+// Penalties UnderReview don't count: they aren't charged until confirmed.
+const describeDepositForPenalty = async (bookingID) => {
+  const payment = await getPaymentByBookingID(bookingID);
+  const dep = payment ? getDepositView(payment.data) : null;
+  if (!dep || !(Number(dep.amount) > 0)) {
+    return { exists: false, returned: true, status: dep?.status || null, amount: 0, availableForNew: 0, reason: "none" };
+  }
+  const held = dep.status === "Held" && !dep.settlement;
+  if (!held) {
+    return {
+      exists: true, returned: true, status: dep.status, amount: dep.amount,
+      returnedAmount: Number(dep.returnedAmount) || 0, deducted: Number(dep.deducted) || 0, availableForNew: 0,
+      reason: dep.status === "Settled" ? "settled" : String(dep.status || "closed").toLowerCase(),
+    };
+  }
+  const penalties = await listPenaltiesForBooking(bookingID);
+  const unpaid = penalties
+    .filter((p) => p.status === "Confirmed")
+    .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
+  return {
+    exists: true, returned: false, status: dep.status, amount: dep.amount,
+    alreadyClaimed: unpaid, availableForNew: Math.max(0, dep.amount - unpaid), reason: "held",
   };
 };
 
