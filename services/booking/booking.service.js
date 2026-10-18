@@ -496,7 +496,7 @@ const resolveBookingDocID = async (idOrBookingID) => {
 };
 
 /**
- * Settle the security deposit at drop-off: deducts every confirmed unpaid
+ * Settle the security deposit once the booking is completed: deducts every confirmed unpaid
  * penalty from the held deposit (oldest first) and records the handback of
  * whatever is left, in one transaction (see settleBooking). Callable by the
  * driver (own trip) or a supervisor once the vehicle is dropped off — the
@@ -511,10 +511,11 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
   const booking = bookingDoc.data();
   const bID = booking.bookingID || docID;
 
-  // A deposit can be returned while the trip is ongoing, or afterwards once the booking is completed
-  // (completing no longer waits for the deposit -- see the note in updateBooking).
-  if (!["ongoing", "completed"].includes(String(booking.status || "").toLowerCase())) {
-    throw new Error(`Cannot settle the deposit: booking status is "${booking.status}", not "ongoing" or "completed".`);
+  // The deposit is returned only AFTER the booking is completed (Car Tracking step 3: drop-off, inspection and the GPS
+  // trail are all done by then, so the penalties are final). Completing no longer waits for the deposit -- see the note
+  // in updateBooking.
+  if (String(booking.status || "").toLowerCase() !== "completed") {
+    throw new Error(`Cannot settle the deposit yet: booking status is "${booking.status}". Complete the booking first, then return the deposit.`);
   }
   const session = await getSessionByBookingID(bID);
   if (!session?.data?.droppedOffTime) {
@@ -1057,7 +1058,6 @@ export const getReturnChecklist = async (docID) => {
   // Penalties a driver noted that no supervisor has confirmed yet: settling now would return the whole deposit and
   // leave them as money owed later, so the server refuses (see settleBooking) and the screen says why up front.
   const underReviewCount = (pos.penalties || []).filter((p) => p.status === "UnderReview").length;
-  const isOngoing = String(booking.status || "").toLowerCase() === "ongoing";
   const isCompleted = String(booking.status || "").toLowerCase() === "completed";
   const settlement = pos.deposit?.settlement || null;
   // Can the deposit go back through PayMongo? Only while it is still to be returned, and only for GCash / Maya.
@@ -1091,7 +1091,7 @@ export const getReturnChecklist = async (docID) => {
   return {
     bookingID: bID,
     canReturn: items.every((i) => i.complete),
-    canSettle: (isOngoing || isCompleted) && droppedOff && holdsDeposit && underReviewCount === 0,
+    canSettle: isCompleted && droppedOff && holdsDeposit && underReviewCount === 0,
     bookingStatus: booking.status || null,
     underReviewCount,
     onlineReturn: onlineOption,   // { available, channel? , reason? }
