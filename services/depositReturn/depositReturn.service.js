@@ -192,6 +192,16 @@ export const getDepositReturns = async () => {
   return items;
 };
 
+// Read INSIDE the claim transaction: every deposit_return row of this payment must be a failed one before another is
+// written. A pending or successful row means the money is already out (or on its way), so a second click, a retry racing a
+// hand-back, or two staff at once all stop here. The query is part of the transaction, so a row written by the other
+// request in the meantime makes this one fail instead of both succeeding.
+const assertNothingAlreadyReturned = async (tx, paymentID) => {
+  const q = await tx.get(db.collection(ENTRY_COLLECTION).where("paymentID", "==", paymentID).where("phase", "==", "deposit_return"));
+  const live = q.docs.filter((d) => d.data().direction === "out" && lower(d.data().status) !== "failed");
+  if (live.length) throw new Error("This deposit has already been returned, or a return is still in progress. Refresh and look again.");
+};
+
 /** The newest deposit_return row of a booking's payment, or null. */
 const latestReturnRow = async (paymentID) => {
   const snap = await db.collection(ENTRY_COLLECTION).where("paymentID", "==", paymentID).where("phase", "==", "deposit_return").get();
@@ -228,12 +238,7 @@ export const retryDepositReturn = async (bookingID, retriedBy) => {
   // Claim: the new pending row, and only if the newest row is still the failed one.
   const entryRef = db.collection(ENTRY_COLLECTION).doc();
   await db.runTransaction(async (tx) => {
-    const cur = await tx.get(latest.ref);
-    if (lower(cur.data().status) !== "failed") throw new Error("This deposit return changed while you were retrying. Refresh and look again.");
-    const newer = await tx.get(db.collection(ENTRY_COLLECTION).where("paymentID", "==", paymentID).where("phase", "==", "deposit_return"));
-    if (newer.docs.some((d) => d.id !== latest.id && toMillis(d.data().createdAt) > toMillis(latest.createdAt))) {
-      throw new Error("A newer attempt already exists for this deposit return. Refresh and look again.");
-    }
+    await assertNothingAlreadyReturned(tx, paymentID);
     const now = new Date();
     tx.set(entryRef, {
       paymentEntryID: entryRef.id, paymentID, bookingID, userID: payment.userID || null,
@@ -270,8 +275,7 @@ export const handBackDepositReturn = async (bookingID, { method, referenceNumber
   const entryRef = db.collection(ENTRY_COLLECTION).doc();
   const amount = num(latest.amount);
   await db.runTransaction(async (tx) => {
-    const cur = await tx.get(latest.ref);
-    if (lower(cur.data().status) !== "failed") throw new Error("This deposit return changed while you were recording it. Refresh and look again.");
+    await assertNothingAlreadyReturned(tx, paymentID);
     const now = new Date();
     tx.set(entryRef, {
       paymentEntryID: entryRef.id, paymentID, bookingID, userID: payment.userID || null,
