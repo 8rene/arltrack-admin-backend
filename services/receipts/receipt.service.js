@@ -129,6 +129,18 @@ const lineOf = (e) => ({
   method: e.method || null, source: e.source || null, referenceNumber: e.referenceNumber || null,
 });
 
+// The online payment (gateway) fee the customer paid on top of ONE online penalty payment row. Not stored on the row (a
+// row's amount is penalty money only): it is the fee on that amount at the penalty's saved gatewayFeeRate, or the current
+// System Settings % for a penalty from before the rate was saved -- the same figure the checkout charged. Same as the
+// customer backend's penaltyFeeOf (utils/receipt/receipt.util.js), so both sides show the same total.
+const feePct = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? Math.min(n, 100) : 0; };
+const penaltyFeeOf = (row, penaltyDoc, settings) => {
+  if (!row || row.direction !== "in" || row.phase !== "penalty" || row.source !== "online" || row.status !== "success") return 0;
+  const saved = penaltyDoc ? penaltyDoc.gatewayFeeRate : undefined;
+  const rate = saved !== undefined && saved !== null && saved !== "" ? saved : settings?.gatewayFeePercent;
+  return Math.round(Math.max(0, round2(num(row.amount))) * feePct(rate) / 100);
+};
+
 // ───────────────────────── one-money-movement receipt ─────────────────────────
 export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSettings = async () => ({}), markCopies = true }) => {
   const { docById, firstWhere, rowsWhere, vehicleName, emailOf } = makeStore(db);
@@ -202,6 +214,10 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
           remaining: total == null ? null : Math.max(0, round2(total - paidBefore - coveredByDeposit - num(r.amount))),
         });
         lines.push({ label: rows.length > 1 ? `Penalty payment ${idx + 1}` : "Penalty payment", detail: r.penaltyID || null, amount: num(r.amount) });
+        // Paid online: the customer was also charged the online payment fee, so the receipt shows it as its own line
+        // (a P105 payment must total P105, not P100).
+        const fee = penaltyFeeOf(r, p, await getSettings().catch(() => ({})));
+        if (fee > 0) lines.push({ label: "Online payment fee", detail: r.penaltyID || null, amount: fee, isFee: true });
       } else if (kind === "payment") {
         lines.push({ label: `${PHASE_LABEL[r.phase] || "Payment"} payment`, detail: null, amount: num(r.amount) });
       } else if (kind === "deposit_return") {
@@ -301,6 +317,11 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
     if (!booking && !payment && entries.length === 0 && penaltyRows.length === 0) throw httpError(404, "Booking not found.");
     entries.sort(byTime);
 
+    // For the online payment fee on penalty payments (see penaltyFeeOf).
+    const feeSettings = await getSettings().catch(() => ({}));
+    const penaltyDocOf = (id) => penaltyRows.find((p) => (p.penaltyID || p.id) === id) || null;
+    const feeOfRow = (e) => penaltyFeeOf(e, penaltyDocOf(e.penaltyID), feeSettings);
+
     const done = (e) => e.status === "success";
     const bookingPayments = entries.filter((e) => e.direction === "in" && done(e) && (e.phase === "deposit" || e.phase === "balance"));
     const penaltyPayments = entries.filter((e) => e.direction === "in" && done(e) && e.phase === "penalty");
@@ -352,7 +373,7 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
         items: items.length ? items : [{ description: "Penalty charge", amount }],
         amount, paid, coveredByDeposit: covered,
         outstanding: active ? Math.max(0, round2(amount - paid - covered)) : 0,
-        payments: mine.map(lineOf),
+        payments: mine.map((e) => ({ ...lineOf(e), fee: feeOfRow(e) })),   // fee = online payment fee on top of that payment (0 if none)
       });
     }
     const live = penalties.filter((p) => p.active);
@@ -380,6 +401,9 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
       refunded: refundTotal,
       depositReturned: returnedAmount,
       netReceived: round2(paidIn - refundTotal - returnedAmount),
+      // Online payment fees the customer paid on top of penalty payments. Not part of paidIn / stillOwed (those are
+      // penalty money); shown so the statement adds up to what the customer was really charged.
+      onlineFees: round2(penaltyPayments.reduce((s, e) => s + feeOfRow(e), 0)),
     };
 
     // ---- money flow: every successful movement, one row per receipt (penalties paid together fold into one)
@@ -390,6 +414,7 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
       if (groupKey && byGroup.has(groupKey)) {
         const m = byGroup.get(groupKey);
         m.amount = round2(m.amount + num(e.amount));
+        m.fee = round2(num(m.fee) + feeOfRow(e));
         m.count += 1;
         continue;
       }
@@ -398,6 +423,7 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
       const m = {
         entryID: e.id, receiptNo: receiptNumberFor(e, kind, when), kind, title: KIND_TITLES[kind],
         label: labelOf(e), direction: e.direction, date: when, amount: num(e.amount), count: 1,
+        fee: feeOfRow(e),   // online payment fee on top of `amount` (penalty payments paid online only; 0 otherwise)
         method: e.method || null, source: e.source || null, referenceNumber: e.referenceNumber || null,
       };
       movements.push(m);
