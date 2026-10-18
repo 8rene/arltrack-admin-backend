@@ -1,4 +1,4 @@
-import { getAllAuditLogs, archiveAuditLog, createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
+import { getAllAuditLogs, getAuditLogsByUser, archiveAuditLog, createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 
 export const listAuditLogs = async (req, res) => {
   try {
@@ -7,6 +7,18 @@ export const listAuditLogs = async (req, res) => {
   } catch (error) {
     console.error("[AUDIT LOGS] list error:", error);
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/audit-logs/by-user/:uid?limit=100 — a single person's own entries (the Activity tab).
+export const listAuditLogsByUser = async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const data = await getAuditLogsByUser(req.params.uid, limit);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[AUDIT LOGS] by-user error:", error);
+    return res.status(400).json({ success: false, message: error.message });
   }
 };
 

@@ -56,6 +56,24 @@ export const getAllAuditLogs = async () => {
   });
 };
 
+// One staff member's own entries, newest first (Users > Supervisor > Activity tab). Filters on userID only and
+// sorts here, so it needs no composite (userID + createdAt) index.
+export const getAuditLogsByUser = async (uid, limit = 100) => {
+  if (!uid) throw new Error("uid is required.");
+
+  const snapshot = await db.collection("auditLogs").where("userID", "==", uid).get();
+  const ms = (v) => (v?.toMillis ? v.toMillis() : v ? new Date(v).getTime() || 0 : 0);
+
+  return snapshot.docs
+    .map((doc) => ({ id: doc.id, ...doc.data() }))
+    .sort((a, b) => ms(b.createdAt) - ms(a.createdAt))
+    .slice(0, limit)
+    .map((log) => ({
+      ...log,
+      createdAt: log.createdAt?.toDate ? log.createdAt.toDate().toISOString() : log.createdAt ?? null,
+    }));
+};
+
 export const archiveAuditLog = async (id) => {
   const logRef = db.collection("auditLogs").doc(id);
   const logDoc = await logRef.get();

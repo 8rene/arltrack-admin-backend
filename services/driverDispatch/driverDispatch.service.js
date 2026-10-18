@@ -692,3 +692,90 @@ export const driverCreatePenalty = async (bookingDocID, driverID, body = {}) => 
     needsReview: true,
   });
 };
+
+// ─────────────────────────────────────────────
+// ACTIVITY for ONE driver — Users > Driver > Activity tab. Staff-facing and read-only.
+//   current: the driver's upcoming / ongoing trips
+//   history: completed trips that have this driver on them, newest first
+// Built straight from the driver's driverAssignments rows. getDriverBookings() is not used here: it
+// keeps only bookings whose CURRENT assignment is "assigned", so it would drop every finished trip
+// (its row flips to "completed"). A booking that was archived since is looked up in bookingArchives,
+// so a finished trip does not vanish from the history when staff archive it.
+// ─────────────────────────────────────────────
+const lookupArchivedBookings = async (keys) => {
+  const byKey = new Map();
+  const add = (doc) => {
+    const data = doc.data();
+    const key = data.bookingID || data.originalId || doc.id;
+    if (!byKey.has(key)) byKey.set(key, { ...data, id: data.originalId || doc.id, archived: true });
+  };
+  for (let i = 0; i < keys.length; i += 30) {
+    const part = keys.slice(i, i + 30);
+    const snap = await db.collection("bookingArchives").where("bookingID", "in", part).get();
+    snap.forEach(add);
+  }
+  // Very old bookings have no bookingID field and were keyed by their doc id.
+  const stillMissing = keys.filter((k) => !byKey.has(k));
+  for (let i = 0; i < stillMissing.length; i += 30) {
+    const snap = await db.collection("bookingArchives").where("originalId", "in", stillMissing.slice(i, i + 30)).get();
+    snap.forEach(add);
+  }
+  return byKey;
+};
+
+export const getDriverActivity = async (driverID) => {
+  if (!driverID) throw new Error("driverID is required.");
+
+  const driverDoc = await db.collection("user").doc(driverID).get();
+  if (!driverDoc.exists) throw new Error("Driver not found.");
+  const driverRoleID = await resolveRoleID(ROLES.DRIVER);
+  if (driverDoc.data().roleID !== driverRoleID) throw new Error("This user is not a Driver.");
+
+  const assignments = await getAssignmentsForDriver(driverID, [ASSIGNMENT_STATUS.ASSIGNED, ASSIGNMENT_STATUS.COMPLETED]);
+  const rowByKey = new Map(assignments.map((a) => [a.bookingID, a]));
+  const keys = [...rowByKey.keys()].filter(Boolean);
+  if (!keys.length) return { current: [], history: [] };
+
+  const trips = new Map(); // booking key -> { ...booking, archived }
+  (await getBookingsByKeys(keys)).forEach((b) => trips.set(bookingKeyOf(b.id, b), { ...b, archived: false }));
+  const missing = keys.filter((k) => !trips.has(k));
+  if (missing.length) (await lookupArchivedBookings(missing)).forEach((b, k) => trips.set(k, b));
+
+  const current = [];
+  const history = [];
+  trips.forEach((b, key) => {
+    const status = String(b.status || "").toLowerCase();
+    const row = rowByKey.get(key);
+    if (!b.archived && DISPATCHABLE_STATUSES.includes(status) && row?.status === ASSIGNMENT_STATUS.ASSIGNED) current.push(b);
+    else if (status === "completed") history.push(b);
+  });
+
+  const all = [...current, ...history];
+  const carIDs  = [...new Set(all.map((b) => b.carID).filter(Boolean))];
+  const userIDs = [...new Set(all.map((b) => b.userID).filter(Boolean))];
+  const [vehicleEntries, userEntries] = await Promise.all([
+    Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
+    Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
+  ]);
+  const vehicleMap = Object.fromEntries(vehicleEntries);
+  const userMap    = Object.fromEntries(userEntries);
+
+  const shape = (b) => ({
+    id:            b.id,
+    bookingID:     b.bookingID || b.id,
+    status:        b.status,
+    startDateTime: toJSDate(b.startDateTime),
+    endDateTime:   toJSDate(b.endDateTime),
+    completedAt:   toJSDate(b.completedAt),
+    location:      b.location || "—",
+    vehicleName:   vehicleMap[b.carID] || "—",
+    customerName:  (b.archived && b.customerName) || userMap[b.userID]?.name || "—",
+    archived:      !!b.archived, // archived trips have no live booking to open
+  });
+  const time = (d) => d?.getTime() ?? 0;
+
+  return {
+    current: current.map(shape).sort((a, b) => time(a.startDateTime) - time(b.startDateTime)),
+    history: history.map(shape).sort((a, b) => time(b.completedAt || b.endDateTime || b.startDateTime) - time(a.completedAt || a.endDateTime || a.startDateTime)),
+  };
+};

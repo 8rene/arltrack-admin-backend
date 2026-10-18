@@ -1,5 +1,6 @@
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
+import { getActivity } from "../../controllers/userActivity/userActivity.controller.js";
 import { deleteUser, getUserByUid, getUserDetails, getUsersByRole, updateUserRole, verifyUserDocument, updateUserStatus, ensureMyReferralCode, getMyReferralInfo } from "../../controllers/user/user.controller.js";
 
 // Visible to: Admin only (user management)
@@ -43,6 +44,7 @@ export const registerUserRoutes = (app) => {
   app.delete("/api/users/:uid",          verifyToken, requireRole(deleteAllowed), deleteUser);
   app.get("/api/users/by-uid/:uid",      verifyToken, requireRole(viewAllowed), getUserByUid);
   app.get("/api/users/details/:uid",     verifyToken, requireRole(viewAllowed), getUserDetails);
+  app.get("/api/users/:uid/activity",    verifyToken, requireRole(viewAllowed), getActivity);
   app.patch("/api/users/:uid/role",      verifyToken, requireRole(roleAllowed), updateUserRole);
   app.patch("/api/users/:uid/verify",    verifyToken, requireRole(editAllowed), verifyUserDocument);
   app.patch("/api/users/:uid/status",    verifyToken, requireRole(editAllowed), updateUserStatus);

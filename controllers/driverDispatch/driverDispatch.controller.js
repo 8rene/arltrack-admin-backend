@@ -1,7 +1,7 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver, getDriverAvailabilityForBooking,
   getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverRemindInspection,
-  driverCreatePenalty,
+  driverCreatePenalty, getDriverActivity,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
 export const getBoard = async (req, res) => {
@@ -51,6 +51,18 @@ export const getAvailability = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[DRIVER DISPATCH] availability error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/driver-dispatch/drivers/:driverID/activity
+// One driver's current trips + completed-trip history (Users > Driver > Activity tab).
+export const getActivityForDriver = async (req, res) => {
+  try {
+    const data = await getDriverActivity(req.params.driverID);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] activity error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

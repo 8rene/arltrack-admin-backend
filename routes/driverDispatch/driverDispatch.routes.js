@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, myPickup, myDropoff, myRemindInspection, myCreatePenalty } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, getActivityForDriver, myPickup, myDropoff, myRemindInspection, myCreatePenalty } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -16,6 +16,7 @@ const driverOnly = [roles.DRIVER];
 export const registerDriverDispatchRoutes = (app) => {
   app.get ("/api/driver-dispatch/board",    verifyToken, requireRole(allowed), getBoard);
   app.get ("/api/driver-dispatch/availability", verifyToken, requireRole(allowed), getAvailability);
+  app.get ("/api/driver-dispatch/drivers/:driverID/activity", verifyToken, requireRole(allowed), getActivityForDriver);
   app.post("/api/driver-dispatch/assign",   verifyToken, requireRole(allowed), assign);
   app.post("/api/driver-dispatch/unassign", verifyToken, requireRole(allowed), unassign);
 
