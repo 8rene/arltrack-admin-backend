@@ -1075,6 +1075,8 @@ export const getReturnChecklist = async (docID) => {
     depositStatus: pos.depositStatus,
     depositHeld: pos.deposit?.amount ?? null,
     depositSettled: !!settlement,
+    // Pesos of the deposit used for penalties: what is already deducted + what settling would still take (capped at the deposit).
+    depositDeducted: settlement ? (pos.deposit.deducted || 0) : Math.min(pos.deposit?.amount || 0, (pos.applied || 0) + pos.unpaidTotal),
     // Before settlement: deposit minus penalties (negative = customer owes).
     // After settlement: what was actually returned (depositReturned) / is still owed (the unpaid penalties, live).
     penaltyTotal: settlement ? pos.confirmedTotal : pos.unpaidTotal + (pos.applied || 0),

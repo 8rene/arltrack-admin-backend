@@ -151,7 +151,7 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
     // A deposit offset moves no money, so it has no entry. penalties.paidAmount counts it, though: whatever paidAmount
     // holds beyond the real payments was covered by the security deposit. The deposit can only cover as much as was
     // actually used (payments.depositSettled), so that pool is handed out penalty by penalty, oldest first.
-    let depositPool = num(payment?.depositSettled) + num(payment?.depositApplied);   // + used before settlement (depositApplied is cleared when it settles)
+    let depositPool = num(payment?.depositSettled);   // grows with each penalty taken from the held deposit
     const penalties = [];
     for (const p of penaltyRows.sort((a, b) => String(toISO(a.createdAt) || "").localeCompare(String(toISO(b.createdAt) || "")) || String(a.id).localeCompare(String(b.id)))) {
       const status = p.status || "Confirmed";
@@ -187,7 +187,7 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
     const heldDeposit = num(payment?.securityDeposit);
     const returnedAmount = depositReturns.length ? sum(depositReturns) : num(payment?.depositReturned);
     const deposit = heldDeposit > 0
-      ? { held: heldDeposit, status: payment?.depositStatus || null, usedForPenalties: num(payment?.depositSettled) + num(payment?.depositApplied), returned: returnedAmount }
+      ? { held: heldDeposit, status: payment?.depositStatus || null, usedForPenalties: num(payment?.depositSettled), returned: returnedAmount }
       : null;
     const refundTotal = sum(refunds);
 

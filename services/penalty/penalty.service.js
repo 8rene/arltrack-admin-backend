@@ -416,8 +416,8 @@ export const confirmPenalty = async (penaltyID, actorUid = null) => {
 
 // ─────────────────────────────────────────────
 // Deducting a confirmed penalty from the held deposit, right when it is confirmed.
-// Raises the penalty's paidAmount (so it reads Paid / Partially Paid, not Pending) and records the pesos used on
-// payments.depositApplied. settleBooking() later counts depositApplied as already used, so nothing is taken twice.
+// Raises the penalty's paidAmount (so it reads Paid / Partially Paid, not Pending) and adds the pesos used to
+// payments.depositSettled. settleBooking() later counts that as already used, so nothing is taken twice.
 // Whatever the deposit can't cover stays on the penalty as unpaid.
 // ─────────────────────────────────────────────
 export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
@@ -444,7 +444,7 @@ export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
     tx.update(penRef, { paidAmount: newPaid, updatedAt: timestamp() });
     tx.update(payRef, {
       securityDeposit: dep.amount,
-      depositApplied: round2((dep.applied || 0) + use),
+      depositSettled: round2((dep.applied || 0) + use),   // running total of the deposit used for penalties
       updatedAt: timestamp(),
     });
     return { applied: use, newPaid, bookingID: pen.bookingID, paymentID: first.data().paymentID, userID: pen.userID };
@@ -711,7 +711,6 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       depositSettled: deposit.amount - remainingDeposit,   // used from the deposit; any shortfall stays on the penalties
       depositReturned: Math.max(0, net),
       depositSettledAt: timestamp(),
-      depositApplied: admin.firestore.FieldValue.delete(),   // folded into depositSettled above
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
     });
 
