@@ -1,4 +1,5 @@
 import { getDiscountRefunds } from "../../services/payments/payments.service.js";
+import { getDepositReturns } from "../../services/depositReturn/depositReturn.service.js";
 import {
   getAllRefundRequests,
   approveRefundRequest,
@@ -24,6 +25,17 @@ export const listDiscountRefunds = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[REFUND] discount refunds list error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Deposit returns that went through PayMongo (or still wait on it), for the same Under Process / History tabs.
+export const listDepositReturns = async (req, res) => {
+  try {
+    const data = await getDepositReturns();
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[REFUND] deposit returns list error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

@@ -634,7 +634,10 @@ export const waiveDeposit = async ({ paymentID, reason, by }) => {
 // line-by-line, not silently absorbed). Runs in a transaction so a
 // double-submit can't pay out the same deposit twice.
 // ─────────────────────────────────────────────
-export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnReferenceNumber = "" }) => {
+// onlineReturn: true -> the money is going back through PayMongo. The deposit is settled and the return row is saved as
+// "pending" (no reference yet) in this same transaction: that is the claim. The caller then makes the PayMongo refund
+// for exactly `net` and attaches its id to the row (see settleDeposit), so a retry can never refund twice.
+export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnReferenceNumber = "", onlineReturn = false }) => {
   const booking = await getBookingDoc(bookingID);
   if (!booking) return { error: "Booking not found." };
   const payment = await getPaymentByBookingID(bookingID);
@@ -670,6 +673,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       throw new Error("This booking's deposit has already been settled.");
     }
 
+    let returnEntryID = null;                      // the deposit_return row written below, when money goes back
     const alreadyApplied = deposit.applied || 0;   // already used for penalties when they were confirmed
     let remainingDeposit = deposit.amount - alreadyApplied;
     let confirmedPenaltyTotal = 0;
@@ -728,31 +732,33 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
         penaltyID: null,
         direction: "out",
         phase: "deposit_return",
-        source: "in_person",
-        method: ENTRY_METHODS.includes(methodKey) ? methodKey : null,
+        source: onlineReturn ? "online" : "in_person",
+        method: onlineReturn ? null : (ENTRY_METHODS.includes(methodKey) ? methodKey : null),
         amount: net,
-        status: "success",
-        referenceNumber: String(returnReferenceNumber || "").trim() || null,
+        status: onlineReturn ? "pending" : "success",   // online: PayMongo confirms afterwards (webhook)
+        referenceNumber: onlineReturn ? null : (String(returnReferenceNumber || "").trim() || null),
         sessionID: null,
         transactionFee: null,
         processedBy: actorUid || null,
         processedAt: now,
-        settledAt: now,
+        settledAt: onlineReturn ? null : now,
         groupID: null,
         transactionErrorNote: null,
         createdAt: now,
         updatedAt: now,
       });
+      returnEntryID = entryRef.id;
     }
 
     const outstandingAfterDeposit = Math.max(0, -net); // > 0 only when net is negative
-    return { confirmedPenaltyTotal: confirmedPenaltyTotal + alreadyApplied, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, userID: payment.userID };
+    return { confirmedPenaltyTotal: confirmedPenaltyTotal + alreadyApplied, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, userID: payment.userID, returnEntryID };
   });
 
   // Logged once the transaction has actually committed — same
   // "log the final state" convention as everywhere else in this app.
   // 1) The money handed back, if any.
-  if (result.net > 0) {
+  // An online return is logged by the PayMongo webhook once PayMongo confirms it (same logID), not before.
+  if (result.net > 0 && !onlineReturn) {
     await createTransactionLog({
       bookingID, paymentID, userID: result.userID,
       type: "DepositReturn", amount: result.net, status: "Success",
@@ -785,6 +791,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     net: result.net,
     settlementStatus: result.settlementStatus,
     outstandingAfterDeposit: result.outstandingAfterDeposit,
+    returnEntryID: result.returnEntryID,
   };
 };
 

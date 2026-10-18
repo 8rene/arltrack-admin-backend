@@ -1,3 +1,4 @@
+import { retryDepositReturn, handBackDepositReturn } from "../../services/depositReturn/depositReturn.service.js";
 import { getAllBookings, updateBooking, markBookingDroppedOff, settleDeposit, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
 import { deleteHandler, previewDeleteHandler } from "./bookingDelete.controller.js";
 import { adminCancelBooking, getAdminBookingRefundPreview, markBookingNoShow } from "../../services/refundRequest/refundRequest.service.js";
@@ -64,11 +65,32 @@ export const markDroppedOff = async (req, res) => {
 export const settleDepositHandler = async (req, res) => {
   try {
     const { id } = req.params;
-    const { method, referenceNumber } = req.body || {};
-    const result = await settleDeposit(id, { method, referenceNumber }, req.user?.email || req.user?.uid || null);
+    const { method, referenceNumber, online } = req.body || {};
+    const result = await settleDeposit(id, { method, referenceNumber, online }, req.user?.email || req.user?.uid || null);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] settleDeposit error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// ── Online deposit return that PayMongo refused: retry it, or record that it was handed back in store ──
+export const retryDepositReturnHandler = async (req, res) => {
+  try {
+    const data = await retryDepositReturn(req.params.id, req.user?.email || req.user?.uid || null);
+    return res.status(200).json({ success: true, message: "Deposit return sent to PayMongo again.", data });
+  } catch (error) {
+    console.error("[BOOKINGS] retryDepositReturn error:", error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+export const handBackDepositReturnHandler = async (req, res) => {
+  try {
+    const { method, referenceNumber } = req.body || {};
+    const data = await handBackDepositReturn(req.params.id, { method, referenceNumber }, req.user?.email || req.user?.uid || null);
+    return res.status(200).json({ success: true, message: "Deposit hand-back recorded.", data });
+  } catch (error) {
+    console.error("[BOOKINGS] handBackDepositReturn error:", error);
     return res.status(400).json({ success: false, message: error.message });
   }
 };

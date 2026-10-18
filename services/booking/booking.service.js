@@ -10,6 +10,7 @@ import { computeAmounts, derivePaymentStage } from "../../services/payments/paym
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
+import { planOnlineDepositReturn, sendOnlineDepositReturn, onlineDepositReturnOption } from "../../services/depositReturn/depositReturn.service.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 import { getHolidaysBetween } from "../gps/coding.service.js";
@@ -503,7 +504,7 @@ const resolveBookingDocID = async (idOrBookingID) => {
  * deposit without waiting for the after-trip inspection. A penalty raised
  * after this stays a normal unpaid penalty.
  */
-export const settleDeposit = async (docID, { method, referenceNumber = "" } = {}, performedBy = null) => {
+export const settleDeposit = async (docID, { method, referenceNumber = "", online = false } = {}, performedBy = null) => {
   docID = await resolveBookingDocID(docID);
   const bookingDoc = await db.collection("bookings").doc(docID).get();
   if (!bookingDoc.exists) throw new Error("Booking not found.");
@@ -523,24 +524,52 @@ export const settleDeposit = async (docID, { method, referenceNumber = "" } = {}
     throw new Error(`There is no held security deposit to settle (deposit status: ${pos.depositStatus}).`);
   }
   if (pos.alreadySettled) throw new Error("This booking's deposit has already been settled.");
-  if (pos.amountToReturn > 0 && !method) {
+  const goOnline = online === true || online === "true";
+  if (goOnline) {
+    if (!(pos.amountToReturn > 0)) throw new Error("There is nothing to return to the customer, so there is nothing to refund online.");
+  } else if (pos.amountToReturn > 0 && !method) {
     throw new Error("Choose how the deposit is being returned to the customer.");
   }
 
+  // Online: check up front that PayMongo can take this refund. Nothing is saved if it can't.
+  let onlinePlan = null;
+  let customerUserID = null;
+  if (goOnline) {
+    const payDoc = await db.collection("payments").where("bookingID", "==", bID).limit(1).get();
+    if (payDoc.empty) throw new Error("This booking has no payment record.");
+    const payment = await hydratePaymentData(payDoc.docs[0].data(), payDoc.docs[0].id);
+    onlinePlan = planOnlineDepositReturn(payment, pos.amountToReturn);
+    if (!onlinePlan.ok) throw new Error(onlinePlan.reason);
+    customerUserID = payment.userID || booking.userID || null;
+  }
+
+  // Settles the deposit and saves the return row in one transaction. Online, that row is "pending" -- the claim that
+  // makes a second click or a retry fail here, before any money is sent.
   const res = await settleBooking({
     bookingID: bID, actorUid: performedBy,
-    returnMethod: method || null, returnReferenceNumber: referenceNumber,
+    returnMethod: goOnline ? null : (method || null), returnReferenceNumber: referenceNumber,
+    onlineReturn: goOnline,
   });
   if (res?.error) throw new Error(res.error);
+
+  // Only now is PayMongo called (never inside the transaction). sendOnlineDepositReturn never throws: the deposit is
+  // already settled, so a refusal is reported back and the return waits for a retry or an in-store hand-back.
+  let onlineResult = null;
+  if (goOnline && res.net > 0 && res.returnEntryID) {
+    onlineResult = await sendOnlineDepositReturn({
+      bookingID: bID, paymentID: res.paymentID, entryID: res.returnEntryID, amount: res.net,
+      paymongoPaymentID: onlinePlan.paymongoPaymentID, performedBy, customerUserID: customerUserID || res.userID || null,
+    });
+  }
 
   createAuditLog({
     action: "update", userID: performedBy, bookingID: bID,
     description: res.net > 0
-      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} returned via ${method}.`
+      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} ${goOnline ? `being returned online through PayMongo (${onlineResult?.state === "failed" ? "PayMongo refused it — needs follow-up" : "waiting for PayMongo"})` : `returned via ${method}`}.`
       : `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ${res.outstandingAfterDeposit > 0 ? `₱${res.outstandingAfterDeposit} still owed by the customer` : "nothing to return"}.`,
   }).catch((err) => console.error("[AuditLog] Deposit settle log failed:", err.message));
 
-  return res;
+  return onlineResult ? { ...res, online: onlineResult } : res;
 };
 
 export const updateBooking = async (docID, updates, performedBy = null) => {
@@ -1042,6 +1071,10 @@ export const getReturnChecklist = async (docID) => {
   const underReviewCount = (pos.penalties || []).filter((p) => p.status === "UnderReview").length;
   const isOngoing = String(booking.status || "").toLowerCase() === "ongoing";
   const settlement = pos.deposit?.settlement || null;
+  // Can the deposit go back through PayMongo? Only while it is still to be returned, and only for GCash / Maya.
+  const onlineOption = holdsDeposit && pos.amountToReturn > 0
+    ? await onlineDepositReturnOption(bID, pos.amountToReturn)
+    : { available: false, reason: null };
 
   const items = [
     {
@@ -1081,6 +1114,7 @@ export const getReturnChecklist = async (docID) => {
     canSettle: isOngoing && droppedOff && holdsDeposit && underReviewCount === 0,
     bookingStatus: booking.status || null,
     underReviewCount,
+    onlineReturn: onlineOption,   // { available, channel? , reason? }
     items,
     driverID: await resolveCurrentDriverID(booking, docID),
     depositStatus: pos.depositStatus,

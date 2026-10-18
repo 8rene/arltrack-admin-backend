@@ -1,4 +1,4 @@
-import { listBookings, editBooking, deleteBooking, deleteBookingPreview, markDroppedOff, settleDepositHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
+import { listBookings, editBooking, deleteBooking, deleteBookingPreview, markDroppedOff, settleDepositHandler, retryDepositReturnHandler, handBackDepositReturnHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -14,6 +14,9 @@ export const registerBookingRoutes = (app) => {
   app.patch("/api/bookings/:id", verifyToken, requireRole(allowed), editBooking);
   app.patch("/api/bookings/:id/dropoff", verifyToken, requireRole(allowed), markDroppedOff);
   app.patch("/api/bookings/:id/settle-deposit", verifyToken, requireRole(allowed), settleDepositHandler);
+  // An online deposit return PayMongo refused: retry it, or record the in-store hand-back instead.
+  app.patch("/api/bookings/:id/deposit-return/retry", verifyToken, requireRole(allowed), retryDepositReturnHandler);
+  app.patch("/api/bookings/:id/deposit-return/handback", verifyToken, requireRole(allowed), handBackDepositReturnHandler);
   app.get("/api/bookings/:id/return-checklist", verifyToken, requireRole(allowed), returnChecklist);
   app.patch("/api/bookings/:id/cancellation/approve", verifyToken, requireRole(allowed), approveCancellation);
   app.patch("/api/bookings/:id/cancellation/reject",  verifyToken, requireRole(allowed), rejectCancellation);

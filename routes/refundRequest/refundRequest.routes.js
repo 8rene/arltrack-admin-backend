@@ -1,4 +1,4 @@
-import { listRefundRequests, listDiscountRefunds, approveRefund, rejectRefund, manualRefundIssued } from "../../controllers/refundRequest/refundRequest.controller.js";
+import { listRefundRequests, listDiscountRefunds, listDepositReturns, approveRefund, rejectRefund, manualRefundIssued } from "../../controllers/refundRequest/refundRequest.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -9,6 +9,8 @@ export const registerRefundRequestRoutes = (app) => {
   app.get("/api/refund-requests",              verifyToken, requireRole(allowed), listRefundRequests);
   // Discount refunds (money a staff discount sent back), shown next to the requests on the Refunds page.
   app.get("/api/refund-requests/discount-refunds", verifyToken, requireRole(allowed), listDiscountRefunds);
+  // Security-deposit returns sent through PayMongo (pending / failed / refunded), same tabs.
+  app.get("/api/refund-requests/deposit-returns", verifyToken, requireRole(allowed), listDepositReturns);
   app.patch("/api/refund-requests/:id/approve", verifyToken, requireRole(allowed), approveRefund);
   app.patch("/api/refund-requests/:id/reject",  verifyToken, requireRole(allowed), rejectRefund);
   // Staff confirm the in-person part of a refund (the balance PayMongo can't return) was handed back.
