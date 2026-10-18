@@ -36,6 +36,9 @@ export const bookingKeyOf = (docID, data = {}) => data.bookingID || docID;
 
 const shape = (doc) => ({ id: doc.id, ref: doc.ref, ...doc.data() });
 
+// Runs a query (or doc ref) either on its own or as part of a Firestore transaction `t`.
+const exec = (t, q) => (t ? t.get(q) : q.get());
+
 // ---------------------------------------------
 // Legacy bookings.driverID
 // ---------------------------------------------
@@ -102,12 +105,12 @@ export const getActiveAssignmentsMap = async (bookingKeys) => {
 export const getAssignmentsForDriver = async (
   driverID,
   statuses = [ASSIGNMENT_STATUS.ASSIGNED, ASSIGNMENT_STATUS.COMPLETED],
+  t = null, // optional Firestore transaction: the read then joins it
 ) => {
   if (!driverID) return [];
-  const snap = await db.collection(COL)
+  const snap = await exec(t, db.collection(COL)
     .where("driverID", "==", driverID)
-    .where("status", "in", statuses)
-    .get();
+    .where("status", "in", statuses));
   return snap.docs.map(shape);
 };
 
@@ -116,17 +119,17 @@ export const getAssignmentsForDriver = async (
  * the business bookingID field; very old bookings without that field are
  * stored under their doc ID, so anything not found by field is tried as a doc ID.
  */
-export const getBookingsByKeys = async (bookingKeys) => {
+export const getBookingsByKeys = async (bookingKeys, t = null) => {
   const keys = [...new Set((bookingKeys || []).filter(Boolean))];
   if (!keys.length) return [];
   const found = new Map(); // key -> { id, ...data }
   const snaps = await Promise.all(
-    chunk(keys).map((c) => db.collection("bookings").where("bookingID", "in", c).get())
+    chunk(keys).map((c) => exec(t, db.collection("bookings").where("bookingID", "in", c)))
   );
   snaps.forEach((snap) => snap.forEach((d) => found.set(d.data().bookingID, { id: d.id, ...d.data() })));
   const missing = keys.filter((k) => !found.has(k));
   await Promise.all(missing.map(async (k) => {
-    const d = await db.collection("bookings").doc(k).get();
+    const d = await exec(t, db.collection("bookings").doc(k));
     if (d.exists) found.set(k, { id: d.id, ...d.data() });
   }));
   return [...found.values()];
@@ -193,13 +196,22 @@ const pickPrimary = (docs) => {
  *
  * Optional bookingRef + bookingPatch are applied in the same transaction
  * (used to drop the legacy driver fields off the booking doc).
+ *
+ * Optional `guard` is an async (t) => void run INSIDE the transaction, after the assignment rows are
+ * read and before anything is written. It may read more through `t` and throw to refuse the
+ * assignment (the driver-schedule check lives there, so check and write are one atomic step).
+ * Optional `lockRef` (a per-driver doc) is written in the same transaction; the guard reads it, so two
+ * admins assigning the SAME driver at once are serialised and the second one re-runs its check.
+ * The callback may be retried by Firestore, so the guard must not have side effects.
  */
-export const createAssignment = async ({ bookingKey, driverID, assignedBy, bookingRef = null, bookingPatch = null }) => {
+export const createAssignment = async ({ bookingKey, driverID, assignedBy, bookingRef = null, bookingPatch = null, guard = null, lockRef = null }) => {
   const rowsQuery = db.collection(COL).where("bookingID", "==", bookingKey);
 
   return db.runTransaction(async (t) => {
     const docs = (await t.get(rowsQuery)).docs;
     const primary = pickPrimary(docs);
+
+    if (guard) await guard(t); // all reads finish here; writes start below
 
     let result;
     if (primary && primary.data().status === ASSIGNMENT_STATUS.ASSIGNED && primary.data().driverID === driverID) {
@@ -229,6 +241,7 @@ export const createAssignment = async ({ bookingKey, driverID, assignedBy, booki
         t.update(d.ref, { status: ASSIGNMENT_STATUS.UNASSIGNED });
       }
     });
+    if (lockRef) t.set(lockRef, { driverID, lastBookingID: bookingKey, updatedAt: serverNow() }, { merge: true });
     if (bookingRef && bookingPatch) t.update(bookingRef, bookingPatch);
     return result;
   });

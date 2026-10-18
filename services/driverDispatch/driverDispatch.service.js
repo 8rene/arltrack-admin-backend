@@ -14,6 +14,10 @@ import {
   getAssignmentsForDriver, getBookingsByKeys, createAssignment, endActiveAssignment,
   legacyDriverFieldsPatch,
 } from "../driverAssignments/driverAssignments.service.js";
+import {
+  OVERRIDE_REASON_MIN_LENGTH, effectiveEnd, evaluateDriverSchedule, getDriverBufferMinutes,
+  getDriverLiveBookings, driverLockRef, describeConflict,
+} from "./driverConflict.service.js";
 
 // ─────────────────────────────────────────────
 // Helpers (deliberately self-contained rather than importing from
@@ -29,9 +33,6 @@ const toJSDate = (val) => {
   const d = new Date(val);
   return isNaN(d) ? null : d;
 };
-
-const fmtDate = (d) =>
-  d.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 
 const resolveVehicleName = async (carID) => {
   if (!carID) return "—";
@@ -224,6 +225,7 @@ export const getDispatchBoard = async () => {
       driverID:  d.id,
       name:      driverNames.get(d.id) || [data.firstName, data.lastName].filter(Boolean).join(" ").trim() || data.username || data.email || "—",
       phone:     data.phone || "—",
+      profileImage: data.profileImage || null, // avatar URL (Firebase Storage); the UI falls back to an icon
       status:    data.status || "Active", // matches Users.jsx directory convention
       license: {
         status:   lic.status, // "expired" | "expiring" | "ok" | "none"
@@ -264,32 +266,41 @@ const getDriverBookings = async (driverID, statuses) => {
   return rows.filter((b) => b.driverID === driverID);
 };
 
-const findDriverConflict = async (driverID, startDateTime, endDateTime, excludeBookingDocID) => {
-  const driverBookings = await getDriverBookings(driverID, DISPATCHABLE_STATUSES);
-
-  const start = toJSDate(startDateTime);
-  const end   = toJSDate(endDateTime);
-  if (!start || !end) return null;
-
-  for (const b of driverBookings) {
-    if (b.id === excludeBookingDocID) continue;
-    const bStart = toJSDate(b.startDateTime);
-    const bEnd   = toJSDate(b.endDateTime);
-    if (!bStart || !bEnd) continue;
-    if (start < bEnd && end > bStart) {
-      return { id: b.id, bookingID: b.bookingID || b.id, startDateTime: bStart, endDateTime: bEnd };
-    }
-  }
-  return null;
+// One driver's schedule against one booking: free, "tight" (gap shorter than the buffer) or "overlap".
+// The rules live in driverConflict.service.js; this only picks the window to test. A late ongoing trip
+// is busy until now, so a booking that is itself running late is tested with that later end.
+// Pass a Firestore transaction `t` to make the reads part of it.
+const findDriverConflicts = async (driverID, booking, bookingDocID, bufferMinutes, t = null) => {
+  const start = toJSDate(booking.startDateTime);
+  if (!start) return { worst: null, all: [] };
+  const end = effectiveEnd(booking) || start;
+  const others = await getDriverLiveBookings(driverID, t);
+  return evaluateDriverSchedule(others, {
+    start, end, bufferMs: bufferMinutes * 60 * 1000, excludeDocID: bookingDocID,
+  });
 };
+
+const conflictSummary = (c, bufferMinutes) => c && ({
+  id: c.id, bookingID: c.bookingID, type: c.type,
+  startDateTime: c.startDateTime, endDateTime: c.endDateTime, gapMinutes: c.gapMinutes,
+  message: describeConflict(c, bufferMinutes),
+});
 
 // ─────────────────────────────────────────────
 // ASSIGN a driver to a chauffeur booking.
-// Throws (with conflict: true) on a schedule overlap unless force=true —
-// the frontend is expected to show that as a warning and let the caller
-// re-submit with force to override, rather than silently blocking.
+//
+// What the caller can run into (all reported together, so one "Assign Anyway" is an informed decision):
+//   * expired license            warning  -> force=true overrides
+//   * "tight" gap (shorter than  warning  -> force=true overrides
+//     the buffer, incl. trips
+//     that only touch)
+//   * real overlap               needs force=true AND an overrideReason (min OVERRIDE_REASON_MIN_LENGTH
+//                                chars), which is written to the audit log
+// Every one of these throws with conflict: true (HTTP 409 in the controller). The check and the write are
+// ONE transaction (createAssignment's guard) that also reads/writes the driver's lock doc, so two admins
+// assigning the same driver at once cannot both pass.
 // ─────────────────────────────────────────────
-export const assignDriver = async (bookingDocID, driverID, assignedBy, force = false, editedBy = null) => {
+export const assignDriver = async (bookingDocID, driverID, assignedBy, force = false, editedBy = null, overrideReason = "") => {
   if (!bookingDocID) throw new Error("bookingDocID is required.");
   if (!driverID) throw new Error("driverID is required.");
 
@@ -310,31 +321,47 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
   const driverRoleID = await resolveRoleID(ROLES.DRIVER);
   if (driverDoc.data().roleID !== driverRoleID) throw new Error("Selected user is not a Driver.");
 
-  // Warnings the caller can override with force=true — never a hard block:
-  //   • the driver's license is already expired
-  //   • the driver already has an overlapping trip
-  // Reported together so one "Assign Anyway" click is an informed decision
-  // about everything, not just the first thing that was found.
+  const reason = String(overrideReason || "").trim();
   const licenseExpiry  = (await resolveLicenseExpiries([driverID])).get(driverID) || null;
   const licenseExpired = licenseStatusOf(licenseExpiry).status === "expired";
-  const conflict = await findDriverConflict(driverID, booking.startDateTime, booking.endDateTime, bookingDocID);
+  const bufferMinutes  = await getDriverBufferMinutes();
 
-  if ((licenseExpired || conflict) && !force) {
+  const refuse = (message, { worst, overlap }) => {
+    const err = new Error(message);
+    err.conflict = true; // the frontend turns this into a warning + "Assign Anyway"
+    err.conflictBooking = worst ? { id: worst.id, bookingID: worst.bookingID, startDateTime: worst.startDateTime, endDateTime: worst.endDateTime } : null;
+    err.conflictType = worst?.type || null; // "overlap" | "tight" | null
+    err.requiresReason = !!overlap;         // true: resend with force + overrideReason
+    err.licenseExpired = licenseExpired;
+    err.bufferMinutes = bufferMinutes;
+    return err;
+  };
+
+  // Set by the guard on every run (Firestore may retry the transaction), used afterwards for the audit log.
+  let found = { worst: null, all: [] };
+
+  // Runs INSIDE the assignment transaction: reading the lock doc first serialises assignments to this driver.
+  const guard = async (t) => {
+    await t.get(driverLockRef(driverID));
+    found = await findDriverConflicts(driverID, booking, bookingDocID, bufferMinutes, t);
+
+    const { worst, all } = found;
+    const overlap = all.find((c) => c.type === "overlap") || null;
+    if (!licenseExpired && !all.length) return;
+
     const parts = [];
     if (licenseExpired) parts.push(`This driver's license expired on ${fmtDay(licenseExpiry)}.`);
-    if (conflict) {
-      parts.push(
-        `This driver is already assigned to booking ${conflict.bookingID} ` +
-        `from ${fmtDate(conflict.startDateTime)} to ${fmtDate(conflict.endDateTime)}, ` +
-        `which overlaps this trip.`
-      );
+    if (worst) {
+      parts.push(describeConflict(worst, bufferMinutes));
+      if (all.length > 1) parts.push(`(${all.length - 1} more trip${all.length - 1 === 1 ? "" : "s"} also clash.)`);
     }
-    const err = new Error(parts.join(" "));
-    err.conflict = true; // the frontend already turns this into a warning + "Assign Anyway"
-    err.conflictBooking = conflict || null;
-    err.licenseExpired = licenseExpired;
-    throw err;
-  }
+
+    if (!force) throw refuse(parts.join(" "), { worst, overlap });
+    if (overlap && reason.length < OVERRIDE_REASON_MIN_LENGTH) {
+      parts.push(`Assigning over a real overlap needs a reason (at least ${OVERRIDE_REASON_MIN_LENGTH} characters).`);
+      throw refuse(parts.join(" "), { worst, overlap });
+    }
+  };
 
   // The booking's ONE assignment row is updated in place (a different driver replaces the previous one).
   // The three old fields on the booking are dropped in the SAME transaction, so the
@@ -342,12 +369,10 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
   await createAssignment({
     bookingKey: bookingKeyOf(bookingDocID, booking), driverID, assignedBy,
     bookingRef, bookingPatch: legacyDriverFieldsPatch(),
+    guard, lockRef: driverLockRef(driverID),
   });
 
-  // Personal notification to the driver themselves — didn't exist before
-  // this; assignDriver() used to only update the booking doc with no
-  // notification at all, so a driver had no way to find out except
-  // checking their trip list manually.
+  // Personal notification to the driver themselves.
   createNotification({
     type: "driver_assigned",
     refID: bookingDocID,
@@ -359,16 +384,57 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
 
   const driverInfo = await resolveUserInfo(driverID);
   const driverName = driverInfo.name !== "—" ? driverInfo.name : driverID;
+  const overlapped = found.all.some((c) => c.type === "overlap");
+  const tightOnly  = !overlapped && found.all.length > 0;
+  const overrides = [
+    licenseExpired && "expired license",
+    overlapped && `overlapping trip - reason: ${reason}`,
+    tightOnly && "tight gap between trips",
+  ].filter(Boolean);
   createAuditLog({
     action: "update",
     description: `Driver ${driverName} assigned to booking ${booking.bookingID || bookingDocID}` +
-      `${force && (licenseExpired || conflict)
-        ? ` (override — ${[licenseExpired && "expired license", conflict && "scheduling conflict"].filter(Boolean).join(", ")})`
-        : ""}.`,
+      `${force && overrides.length ? ` (override — ${overrides.join(", ")})` : ""}.`,
     userID: editedBy,
   }).catch((err) => console.error("[AUDIT] driver assign log failed:", err.message));
 
   return { id: bookingDocID, driverID };
+};
+
+// ─────────────────────────────────────────────
+// AVAILABILITY for one booking: every Driver as "free" | "tight" | "busy" for THAT booking's window, so the
+// picker can show it before an admin clicks. "busy" = a real overlap, "tight" = a gap shorter than the buffer.
+// Read-only; assignDriver still re-checks inside its transaction.
+// ─────────────────────────────────────────────
+export const getDriverAvailabilityForBooking = async (bookingDocID) => {
+  if (!bookingDocID) throw new Error("bookingID is required.");
+
+  const bookingDoc = await db.collection("bookings").doc(bookingDocID).get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+
+  const driverRoleID = await resolveRoleID(ROLES.DRIVER);
+  if (!driverRoleID) throw new Error("Could not resolve the Driver role ID.");
+
+  const [driverSnap, bufferMinutes] = await Promise.all([
+    db.collection("user").where("roleID", "==", driverRoleID).get(),
+    getDriverBufferMinutes(),
+  ]);
+  const licenseMap = await resolveLicenseExpiries(driverSnap.docs.map((d) => d.id));
+
+  const drivers = await Promise.all(driverSnap.docs.map(async (d) => {
+    const { worst, all } = await findDriverConflicts(d.id, booking, bookingDocID, bufferMinutes);
+    const status = all.some((c) => c.type === "overlap") ? "busy" : all.length ? "tight" : "free";
+    return {
+      driverID: d.id,
+      status,
+      conflict: conflictSummary(worst, bufferMinutes),
+      conflictCount: all.length,
+      licenseExpired: licenseStatusOf(licenseMap.get(d.id) || null).status === "expired",
+    };
+  }));
+
+  return { bookingID: booking.bookingID || bookingDocID, bufferMinutes, drivers };
 };
 
 // ─────────────────────────────────────────────

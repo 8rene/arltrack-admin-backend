@@ -68,6 +68,10 @@ export const PricingSettings = {
   lateFeeRatePerHour: 100,
   lateFeeGraceMinutes: 30,
 
+  // Minimum gap (minutes) between two trips for one driver. Used by the admin dispatch check and by the
+  // customer backend's chauffeur-availability check, so both agree. 0 = trips may touch.
+  driverBufferMinutes: 120,
+
   systemSettingsID: null,  // mirrors this doc's own Firestore ID
   createdAt: null,         // Firestore server timestamp
   updatedBy: null,         // { userID, name } of the staff member who saved this snapshot

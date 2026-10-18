@@ -16,6 +16,7 @@ import { getHolidaysBetween } from "../gps/coding.service.js";
 import {
   bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
 } from "../../services/driverAssignments/driverAssignments.service.js";
+import { assertAssignedDriverFreeForNewDates } from "../driverDispatch/driverConflict.service.js";
 import {
   REQUEST_STATUS, getPendingRequest, getAllPendingRequests, getRequestsByBookingKeys, resolveRequest, recordDirectCancellation,
 } from "../../services/cancellationRequests/cancellationRequests.service.js";
@@ -563,6 +564,16 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
       filtered[k] = k === "status" ? updates[k].toLowerCase() : updates[k];
     }
   });
+
+  // ── Changing the dates of a booking that already has a driver must not give that driver a real
+  // overlap. (A tight gap is allowed, same as everywhere else it is only a warning.) A booking
+  // that is being cancelled/completed in the same edit is skipped. ──
+  if ((filtered.startDateTime !== undefined || filtered.endDateTime !== undefined)
+      && !["cancelled", "completed", "stolen"].includes(filtered.status)) {
+    await assertAssignedDriverFreeForNewDates({
+      docID, bookingData, newStart: filtered.startDateTime, newEnd: filtered.endDateTime,
+    });
+  }
 
   // ── Stolen only makes sense for a trip that is out on the road: the booking must be
   // ongoing and the car not yet marked dropped off (a dropped-off car is back). The Car

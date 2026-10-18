@@ -1,5 +1,5 @@
 import {
-  getDispatchBoard, assignDriver, unassignDriver,
+  getDispatchBoard, assignDriver, unassignDriver, getDriverAvailabilityForBooking,
   getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverRemindInspection,
   driverCreatePenalty,
 } from "../../services/driverDispatch/driverDispatch.service.js";
@@ -16,10 +16,11 @@ export const getBoard = async (req, res) => {
 
 export const assign = async (req, res) => {
   try {
-    const { bookingID, driverID, force } = req.body;
+    // overrideReason: required (with force) when the driver's trips truly overlap; stored in the audit log.
+    const { bookingID, driverID, force, overrideReason } = req.body;
     const assignedBy = req.user?.username || req.user?.uid || "admin";
     const editedBy = req.user?.uid || req.user?.userID || null;
-    const result = await assignDriver(bookingID, driverID, assignedBy, !!force, editedBy);
+    const result = await assignDriver(bookingID, driverID, assignedBy, !!force, editedBy, overrideReason);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     // Conflicts (double-booking, expired license, etc.) are an expected
@@ -34,7 +35,23 @@ export const assign = async (req, res) => {
       message: error.message,
       conflict: !!error.conflict,
       conflictBooking: error.conflictBooking || null,
+      conflictType: error.conflictType || null,         // "overlap" | "tight" | null
+      requiresReason: !!error.requiresReason,           // true: resend with force + overrideReason
+      licenseExpired: !!error.licenseExpired,
+      bufferMinutes: error.bufferMinutes ?? null,
     });
+  }
+};
+
+// GET /api/driver-dispatch/availability?bookingID=<doc id>
+// Every driver as free / tight / busy for THAT booking, so the picker can show it before an admin clicks.
+export const getAvailability = async (req, res) => {
+  try {
+    const data = await getDriverAvailabilityForBooking(req.query.bookingID);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] availability error:", error);
+    return res.status(400).json({ success: false, message: error.message });
   }
 };
 
@@ -123,4 +140,3 @@ export const myCreatePenalty = async (req, res) => {
     return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };
-

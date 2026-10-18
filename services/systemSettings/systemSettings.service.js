@@ -38,6 +38,11 @@ const DEFAULTS = {
   securityDepositAmount: 1000, // ₱, refundable deposit collected at pickup
   lateFeeRatePerHour: 100,     // ₱ per billable hour late, after grace
   lateFeeGraceMinutes: 30,     // subtracted before rounding up to the next hour
+
+  // Minimum gap between two trips for ONE driver. Dispatch treats a smaller gap as "tight" (a warning)
+  // and the customer backend pads chauffeur bookings with it when checking if a driver is still free,
+  // so both sides read this one value. 0 = trips may touch.
+  driverBufferMinutes: 120,
 };
 
 // Percentage fields: must be a number between 0 and 100.
@@ -51,6 +56,7 @@ const NUMERIC_FIELDS = [
   "securityDepositAmount",
   "lateFeeRatePerHour",
   "lateFeeGraceMinutes",
+  "driverBufferMinutes",
 ];
 
 // ─────────────────────────────────────────────
