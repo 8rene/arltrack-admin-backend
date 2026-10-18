@@ -184,7 +184,7 @@ const describeDepositForPenalty = async (bookingID) => {
     .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
   return {
     exists: true, returned: false, status: dep.status, amount: dep.amount,
-    alreadyClaimed: unpaid, availableForNew: Math.max(0, dep.amount - unpaid), reason: "held",
+    alreadyClaimed: unpaid + (dep.applied || 0), availableForNew: Math.max(0, dep.amount - (dep.applied || 0) - unpaid), reason: "held",
   };
 };
 
@@ -243,7 +243,7 @@ const currentGatewayFeeRate = async () => {
 // charged again like any other line.
 export const createPenalty = async ({
   bookingID, lineItems = [],
-  computedAmount: _clientComputed, amount, overrideReason = "", createdBy, needsReview = false,
+  computedAmount: _clientComputed, amount, overrideReason = "", createdBy, needsReview = false, deductFromDeposit = true,
 }) => {
   const charge = buildCharge({ lineItems, amount, overrideReason });
   if (charge.error) return { error: charge.error };
@@ -294,6 +294,13 @@ export const createPenalty = async ({
     description: `Charged penalty of \u20b1${roundedFinal} on booking ${bookingID}: ${itemNames}.`,
   }).catch(() => {});
 
+  // The held deposit pays it right now: paidAmount goes up, so it reads Paid (or Partially Paid) instead of Pending.
+  let deducted = 0;
+  if (deductFromDeposit !== false) {
+    try { deducted = (await applyPenaltyToDeposit(ref.id, createdBy)).applied || 0; }
+    catch (err) { console.error("[PENALTY] deposit deduction failed:", err.message); }
+  }
+
   await notifyCustomer(
     payload.userID, bookingID, "PenaltyConfirmed",
     "A charge was added to your booking",
@@ -302,7 +309,7 @@ export const createPenalty = async ({
   );
   await notifyStaffOfPenalty(bookingID, ref.id, roundedFinal, itemNames);
 
-  return { penaltyID: ref.id, status: "Confirmed" };
+  return { penaltyID: ref.id, status: "Confirmed", deductedFromDeposit: deducted };
 };
 
 // Reads a penalty inside a transaction and hands it to `apply` only while it is still UnderReview. Used by edit and
@@ -399,7 +406,64 @@ export const confirmPenalty = async (penaltyID, actorUid = null) => {
     penaltyID
   );
 
-  return { penaltyID };
+  // Same as a penalty confirmed on creation: the held deposit pays it now.
+  let deducted = 0;
+  try { deducted = (await applyPenaltyToDeposit(penaltyID, actorUid)).applied || 0; }
+  catch (err) { console.error("[PENALTY] deposit deduction failed:", err.message); }
+
+  return { penaltyID, deductedFromDeposit: deducted };
+};
+
+// ─────────────────────────────────────────────
+// Deducting a confirmed penalty from the held deposit, right when it is confirmed.
+// Raises the penalty's paidAmount (so it reads Paid / Partially Paid, not Pending) and records the pesos used on
+// payments.depositApplied. settleBooking() later counts depositApplied as already used, so nothing is taken twice.
+// Whatever the deposit can't cover stays on the penalty as unpaid.
+// ─────────────────────────────────────────────
+export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
+  const penRef = db.collection("penalties").doc(penaltyID);
+  const first = await penRef.get();
+  if (!first.exists || !first.data().paymentID) return { applied: 0 };
+  const payRef = db.collection("payments").doc(first.data().paymentID);
+
+  const out = await db.runTransaction(async (tx) => {
+    const [penSnap, paySnap] = await Promise.all([tx.get(penRef), tx.get(payRef)]);
+    if (!penSnap.exists || !paySnap.exists) return { applied: 0 };
+    const pen = penSnap.data();
+    const pay = paySnap.data();
+    if (pen.status !== "Confirmed") return { applied: 0 };
+    const dep = getDepositView(pay);
+    if (!dep || dep.status !== "Held" || dep.settlement) return { applied: 0 };   // nothing held to take from
+
+    const owed = Math.max(0, (pen.amount || 0) - (pen.paidAmount || 0));
+    const free = Math.max(0, dep.amount - (dep.applied || 0));
+    const use = round2(Math.min(owed, free));
+    if (!(use > 0)) return { applied: 0 };
+
+    const newPaid = round2((pen.paidAmount || 0) + use);
+    tx.update(penRef, { paidAmount: newPaid, updatedAt: timestamp() });
+    tx.update(payRef, {
+      securityDeposit: dep.amount,
+      depositApplied: round2((dep.applied || 0) + use),
+      updatedAt: timestamp(),
+    });
+    return { applied: use, newPaid, bookingID: pen.bookingID, paymentID: first.data().paymentID, userID: pen.userID };
+  });
+
+  if (out.applied > 0) {
+    await createTransactionLog({
+      bookingID: out.bookingID, paymentID: out.paymentID, userID: out.userID, penaltyID,
+      type: "Payment", amount: out.applied, status: "Success",
+      paymentMethod: "Deposit", performedBy: actorUid,
+      description: "Penalty paid from the held security deposit.",
+      logID: `${out.paymentID}_deposit_apply_${penaltyID}_${out.newPaid}`,
+    }).catch(() => {});
+    createAuditLog?.({
+      action: "update", userID: actorUid, bookingID: out.bookingID, paymentID: out.paymentID,
+      description: `Deducted \u20b1${out.applied} from the security deposit for penalty ${penaltyID} on booking ${out.bookingID}.`,
+    }).catch(() => {});
+  }
+  return out;
 };
 
 // ─────────────────────────────────────────────
@@ -532,6 +596,9 @@ export const waiveDeposit = async ({ paymentID, reason, by }) => {
       if (!dep || dep.status !== "Held") {
         throw Object.assign(new Error(`Only a held deposit can be waived (currently: ${dep?.status || "not recorded"}).`), { expected: true });
       }
+      if (dep.applied > 0) {
+        throw Object.assign(new Error("Part of this deposit was already used to pay penalties. Settle the deposit instead of waiving it."), { expected: true });
+      }
       tx.update(payment.ref, {
         securityDeposit: dep.amount,                    // survives dropping the old nested object
         depositStatus: "Waived",
@@ -603,7 +670,8 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       throw new Error("This booking's deposit has already been settled.");
     }
 
-    let remainingDeposit = deposit.amount;
+    const alreadyApplied = deposit.applied || 0;   // already used for penalties when they were confirmed
+    let remainingDeposit = deposit.amount - alreadyApplied;
     let confirmedPenaltyTotal = 0;
     const penaltyUpdates = [];
     const coveredPenalties = [];   // [{ penaltyID, amount }] -- what the deposit paid toward each penalty
@@ -625,7 +693,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       });
     }
 
-    const net = deposit.amount - confirmedPenaltyTotal; // can be negative
+    const net = deposit.amount - alreadyApplied - confirmedPenaltyTotal; // can be negative
     const settlementStatus = net > 0 ? "Refunded" : net === 0 ? "Settled" : "OwedByCustomer";
 
     penaltyUpdates.forEach((u) => {
@@ -643,6 +711,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       depositSettled: deposit.amount - remainingDeposit,   // used from the deposit; any shortfall stays on the penalties
       depositReturned: Math.max(0, net),
       depositSettledAt: timestamp(),
+      depositApplied: admin.firestore.FieldValue.delete(),   // folded into depositSettled above
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
     });
 
@@ -678,7 +747,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     }
 
     const outstandingAfterDeposit = Math.max(0, -net); // > 0 only when net is negative
-    return { confirmedPenaltyTotal, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, userID: payment.userID };
+    return { confirmedPenaltyTotal: confirmedPenaltyTotal + alreadyApplied, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, userID: payment.userID };
   });
 
   // Logged once the transaction has actually committed — same

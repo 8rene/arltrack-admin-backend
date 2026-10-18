@@ -101,9 +101,10 @@ export const resolvePaymentInfo = async (bookingID) => {
     const settlement = deposit?.settlement || null;
     const depositSettled = !!settlement;
     const depositDeducted = deposit?.deducted || 0;
+    const appliedToPenalties = !settlement ? (deposit?.applied || 0) : 0;   // taken from the held deposit already
     const amountToReturn = settlement
       ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, deposit.returnedAmount || 0))
-      : depositAmount - confirmedPenaltyTotal;
+      : depositAmount - appliedToPenalties - confirmedPenaltyTotal;
 
     return {
       paymentMethod: data.paymentMethod || "—",
@@ -135,8 +136,9 @@ export const resolvePaymentInfo = async (bookingID) => {
       discountAmount: Number(data.discountAmount) || 0,
       refundDue,
       refundIssued: !!data.refundIssued,
-      depositAmount, depositStatus, confirmedPenaltyTotal, amountToReturn,
-      depositSettled, depositDeducted,
+      depositAmount, depositStatus, amountToReturn,
+      confirmedPenaltyTotal: confirmedPenaltyTotal + appliedToPenalties,
+      depositSettled, depositDeducted: depositDeducted || appliedToPenalties,
     };
   } catch { return EMPTY_PAYMENT_INFO; }
 };
@@ -470,9 +472,11 @@ const getDepositPosition = async (bID) => {
   const confirmedTotal = confirmed.reduce((sum, p) => sum + (p.amount || 0), 0);   // all Confirmed penalties, paid or not
   const deposit = getDepositView(paymentData, { unpaid: unpaidTotal });
   const alreadySettled = !!deposit?.settlement;
-  const depositAvailable = deposit?.status === "Held" && !alreadySettled ? (deposit.amount || 0) : 0;
+  const held = deposit?.status === "Held" && !alreadySettled;
+  const applied = held ? (deposit.applied || 0) : 0;   // already used for penalties when they were confirmed
+  const depositAvailable = held ? Math.max(0, (deposit.amount || 0) - applied) : 0;
   return {
-    penalties, deposit, unpaidTotal, confirmedTotal, alreadySettled,
+    penalties, deposit, unpaidTotal, confirmedTotal, alreadySettled, applied,
     depositStatus: deposit?.status || "—",
     depositAvailable,
     outstandingAfterDeposit: Math.max(0, unpaidTotal - depositAvailable),
@@ -1073,7 +1077,7 @@ export const getReturnChecklist = async (docID) => {
     depositSettled: !!settlement,
     // Before settlement: deposit minus penalties (negative = customer owes).
     // After settlement: what was actually returned (depositReturned) / is still owed (the unpaid penalties, live).
-    penaltyTotal: settlement ? pos.confirmedTotal : pos.unpaidTotal,
+    penaltyTotal: settlement ? pos.confirmedTotal : pos.unpaidTotal + (pos.applied || 0),
     amountToReturn: settlement ? (pos.unpaidTotal > 0 ? -pos.unpaidTotal : pos.deposit.returnedAmount) : pos.amountToReturn,
     // Still-unpaid penalty money right now (includes penalties raised after settling).
     stillOwed: pos.unpaidTotal > pos.depositAvailable ? pos.unpaidTotal - pos.depositAvailable : 0,
