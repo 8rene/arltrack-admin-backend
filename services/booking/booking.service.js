@@ -480,6 +480,15 @@ const getDepositPosition = async (bID) => {
   };
 };
 
+// The deposit actions are opened from more than one screen: Car Tracking knows the booking's document id, the Payments
+// page only knows the booking's bookingID field. Accept either, so the same endpoints serve both.
+const resolveBookingDocID = async (idOrBookingID) => {
+  const direct = await db.collection("bookings").doc(idOrBookingID).get();
+  if (direct.exists) return idOrBookingID;
+  const q = await db.collection("bookings").where("bookingID", "==", idOrBookingID).limit(1).get();
+  return q.empty ? idOrBookingID : q.docs[0].id;
+};
+
 /**
  * Settle the security deposit at drop-off: deducts every confirmed unpaid
  * penalty from the held deposit (oldest first) and records the handback of
@@ -490,6 +499,7 @@ const getDepositPosition = async (bID) => {
  * after this stays a normal unpaid penalty.
  */
 export const settleDeposit = async (docID, { method, referenceNumber = "" } = {}, performedBy = null) => {
+  docID = await resolveBookingDocID(docID);
   const bookingDoc = await db.collection("bookings").doc(docID).get();
   if (!bookingDoc.exists) throw new Error("Booking not found.");
   const booking = bookingDoc.data();
@@ -996,6 +1006,7 @@ const describeAssignedDevices = (devices) =>
 // those same checks for display purposes.
 // ─────────────────────────────────────────────
 export const getReturnChecklist = async (docID) => {
+  docID = await resolveBookingDocID(docID);
   const bookingRef = db.collection("bookings").doc(docID);
   const bookingDoc = await bookingRef.get();
   if (!bookingDoc.exists) throw new Error("Booking not found.");
@@ -1011,6 +1022,10 @@ export const getReturnChecklist = async (docID) => {
 
   const droppedOff = !!session?.data?.droppedOffTime;
   const holdsDeposit = pos.deposit?.status === "Held" && !pos.alreadySettled;
+  // Penalties a driver noted that no supervisor has confirmed yet: settling now would return the whole deposit and
+  // leave them as money owed later, so the server refuses (see settleBooking) and the screen says why up front.
+  const underReviewCount = (pos.penalties || []).filter((p) => p.status === "UnderReview").length;
+  const isOngoing = String(booking.status || "").toLowerCase() === "ongoing";
   const settlement = pos.deposit?.settlement || null;
 
   const items = [
@@ -1048,7 +1063,9 @@ export const getReturnChecklist = async (docID) => {
   return {
     bookingID: bID,
     canReturn: items.every((i) => i.complete),
-    canSettle: droppedOff && holdsDeposit,
+    canSettle: isOngoing && droppedOff && holdsDeposit && underReviewCount === 0,
+    bookingStatus: booking.status || null,
+    underReviewCount,
     items,
     driverID: await resolveCurrentDriverID(booking, docID),
     depositStatus: pos.depositStatus,

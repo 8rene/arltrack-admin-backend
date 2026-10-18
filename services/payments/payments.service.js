@@ -330,6 +330,7 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     id: payment.id,
     paymentID: payment.paymentID || payment.id,
     bookingID: payment.bookingID || "—",
+    bookingStatus: booking.status || null,   // lets the Payments screen offer "Return deposit" only while the booking is ongoing
     customerName,
     vehicleName,
     totalFee: Number(payment.amount) || 0,
