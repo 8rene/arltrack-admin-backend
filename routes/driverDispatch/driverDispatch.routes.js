@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, getActivityForDriver, myPickup, myDropoff, myRemindInspection, myCreatePenalty } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, getMyInspection, getActivityForDriver, myPickup, myDropoff, myRemindInspection, myCreatePenalty } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -22,6 +22,9 @@ export const registerDriverDispatchRoutes = (app) => {
 
   app.get  ("/api/driver-dispatch/my-trips",          verifyToken, requireRole(driverOnly), getMine);
   app.get  ("/api/driver-dispatch/my-trips/history",   verifyToken, requireRole(driverOnly), getMyHistory);
+  // Read-only before/after inspection proof for the driver's OWN booking
+  // (ownership-checked in the service). Writes stay staff-only.
+  app.get  ("/api/driver-dispatch/my-trips/:id/inspection", verifyToken, requireRole(driverOnly), getMyInspection);
   app.patch("/api/driver-dispatch/my-trips/:id/pickup",  verifyToken, requireRole(driverOnly), myPickup);
   app.patch("/api/driver-dispatch/my-trips/:id/dropoff", verifyToken, requireRole(driverOnly), myDropoff);
   app.post ("/api/driver-dispatch/my-trips/:id/penalty",          verifyToken, requireRole(driverOnly), myCreatePenalty);

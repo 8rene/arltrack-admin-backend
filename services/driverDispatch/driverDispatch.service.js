@@ -3,7 +3,7 @@ import admin from "firebase-admin";
 import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
 import { updateBooking, markBookingDroppedOff, resolvePaymentInfo as resolveBookingPaymentInfo } from "../../services/booking/booking.service.js";
 import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
-import { getPhaseChecklist } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { getPhaseChecklist, getVehicleDocsByBooking, getInventorySummaryByBooking } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
@@ -510,6 +510,68 @@ const assertOwnsBooking = async (bookingDocID, driverID) => {
     throw err;
   }
   return doc.data();
+};
+
+// ─────────────────────────────────────────────
+// Read-only inspection proof for the driver's own booking.
+//
+// Drivers still can't read or write /api/vehicle-docs (staff only) — this is
+// a separate, ownership-checked, read-only view of the same records. Only
+// what a driver needs to see is returned: exterior/part photo URLs, videos,
+// additional photos and the parts condition. No audit/edit info, no staff
+// fields, no document ids.
+// ─────────────────────────────────────────────
+const EXTERIOR_FIELDS = [
+  ["frontViewUrl", "Front view"],
+  ["sideViewUrl",  "Side view"],
+  ["backViewUrl",  "Back view"],
+];
+const humanizeFieldKey = (k) =>
+  k.replace(/Url$/, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
+const isHttpUrl = (v) => typeof v === "string" && /^https?:\/\//i.test(v);
+
+const shapeInspectionForDriver = (doc, inv) => {
+  const exterior = EXTERIOR_FIELDS
+    .filter(([k]) => isHttpUrl(doc?.[k]))
+    .map(([k, label]) => ({ key: k, label, url: doc[k] }));
+  const exteriorKeys = new Set(EXTERIOR_FIELDS.map(([k]) => k));
+  const partPhotos = Object.entries(doc || {})
+    .filter(([k, v]) => /Url$/.test(k) && !exteriorKeys.has(k) && isHttpUrl(v))
+    .map(([k, v]) => ({ key: k, label: humanizeFieldKey(k), url: v }));
+  const videos = (Array.isArray(doc?.videos) ? doc.videos : [])
+    .filter((v) => isHttpUrl(v?.url))
+    .map((v) => ({ id: v.id, url: v.url, durationSec: v.durationSec || null, sizeBytes: v.sizeBytes || null }));
+  const extraPhotos = (Array.isArray(doc?.extraPhotos) ? doc.extraPhotos : [])
+    .filter((p) => isHttpUrl(p?.url))
+    .map((p) => ({ id: p.id, url: p.url }));
+  const damageParts = (inv?.damageParts || []).map((d) => ({
+    carPartName: d.carPartName || "—",
+    status:      d.status || "—",
+  }));
+  return {
+    exterior, partPhotos, videos, extraPhotos,
+    parts: {
+      recorded:      !!inv,
+      overallStatus: inv ? (inv.overallStatus || (damageParts.length ? "has damage" : "good")) : null,
+      damageParts,
+    },
+  };
+};
+
+/** Before + after inspection proof for one of THIS driver's bookings (read-only). */
+export const getMyTripInspection = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  // Records may have been saved under the business bookingID or the doc id.
+  const keys = [...new Set([booking.bookingID, bookingDocID].filter(Boolean))];
+  const [docResults, invResults] = await Promise.all([
+    Promise.all(keys.map((k) => getVehicleDocsByBooking(k))),
+    Promise.all(keys.map((k) => getInventorySummaryByBooking(k))),
+  ]);
+  const firstOf = (list, phase) => list.map((r) => r?.[phase]).find(Boolean) || null;
+  return {
+    before: shapeInspectionForDriver(firstOf(docResults, "before"), firstOf(invResults, "before")),
+    after:  shapeInspectionForDriver(firstOf(docResults, "after"),  firstOf(invResults, "after")),
+  };
 };
 
 /** A driver's own live trips (upcoming + ongoing), same shape as getDispatchBoard's per-booking entries. */

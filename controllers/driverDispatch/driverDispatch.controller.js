@@ -1,6 +1,6 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver, getDriverAvailabilityForBooking,
-  getMyTrips, getMyTripHistory, driverPickup, driverDropoff, driverRemindInspection,
+  getMyTrips, getMyTripHistory, getMyTripInspection, driverPickup, driverDropoff, driverRemindInspection,
   driverCreatePenalty, getDriverActivity,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
@@ -102,6 +102,16 @@ export const getMyHistory = async (req, res) => {
   } catch (error) {
     console.error("[DRIVER DISPATCH] my-history error:", error);
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getMyInspection = async (req, res) => {
+  try {
+    const data = await getMyTripInspection(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.status !== 403) console.error("[DRIVER DISPATCH] my-inspection error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };
 
