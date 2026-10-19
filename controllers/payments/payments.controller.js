@@ -46,8 +46,8 @@ export const patchPaymentStatus = async (req, res) => {
   }
 };
 
-// Staff (Owner/Admin/Supervisor) applying a flat-peso discount to a
-// booking — from Payments.jsx or Car Tracking. Deliberately not exposed
+// Staff (Owner/Admin/Supervisor) giving a flat-peso discount to a
+// booking (more than one can be given: each is its own ledger row) — from Payments.jsx or Car Tracking. Deliberately not exposed
 // to drivers: they see the resulting discounted balance (via
 // resolvePaymentInfo/computeAmounts) but can't set the discount itself.
 export const discountPayment = async (req, res) => {
@@ -55,7 +55,7 @@ export const discountPayment = async (req, res) => {
     const { bookingID } = req.params;
     const { amount, reason } = req.body;
     const appliedBy = req.user?.email || req.user?.uid || "staff";
-    const result = await applyDiscount(bookingID, amount, reason, appliedBy);
+    const result = await applyDiscount(bookingID, amount, reason, appliedBy, actorUid(req));
     return res.status(200).json({ success: true, data: result, message: "Discount applied." });
   } catch (error) {
     // Every failure this function throws is an expected business-rule

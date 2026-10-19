@@ -30,6 +30,10 @@ export const evaluateGuards = ({ booking = null, payments = [], refunds = [], pe
     if (num(p.refundDue) > 0 && !p.refundIssued) {
       blockers.push({ code: "refund_due", message: `${peso(p.refundDue)} is owed back to the customer and has not been marked as handed back.`, ref: p.paymentID || p.id });
     }
+    // discount credit still held for the customer (a discount on a fully paid booking): it is owed back with the deposit
+    if (num(p.discountCredit) > 0) {
+      blockers.push({ code: "discount_credit_held", message: `${peso(p.discountCredit)} of discount credit is still held for the customer — return it with the security deposit first.`, ref: p.paymentID || p.id });
+    }
     // the security deposit is still held although the trip is over: the customer is owed it (or it must be settled)
     if (low(p.depositStatus) === "held" && bookingStatus === "completed") {
       blockers.push({ code: "deposit_held", message: `The ${peso(p.securityDeposit)} security deposit is still held — settle or return it first.`, ref: p.paymentID || p.id });

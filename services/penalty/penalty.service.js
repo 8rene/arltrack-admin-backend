@@ -14,6 +14,7 @@ import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.s
 import { ENTRY_COLLECTION, ENTRY_METHODS } from "../../models/paymentEntries/paymentEntry.model.js";
 import { buildPenaltyPaymentEntry } from "../paymentEntries/paymentEntries.mapper.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
+import { creditDrawFor, applyCreditToPenalty, applySettlement, planSettlement, getDiscountFigures, DISCOUNT_PHASES } from "../payments/discountLedger.js";
 import { hydratePenalties } from "../paymentEntries/paymentEntries.service.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
@@ -296,8 +297,9 @@ export const createPenalty = async ({
 
   // The held deposit pays it right now: paidAmount goes up, so it reads Paid (or Partially Paid) instead of Pending.
   let deducted = 0;
+  let deductedFromCredit = 0;
   if (deductFromDeposit !== false) {
-    try { deducted = (await applyPenaltyToDeposit(ref.id, createdBy)).applied || 0; }
+    try { const r = await applyPenaltyToDeposit(ref.id, createdBy); deducted = r.applied || 0; deductedFromCredit = r.fromCredit || 0; }
     catch (err) { console.error("[PENALTY] deposit deduction failed:", err.message); }
   }
 
@@ -309,7 +311,7 @@ export const createPenalty = async ({
   );
   await notifyStaffOfPenalty(bookingID, ref.id, roundedFinal, itemNames);
 
-  return { penaltyID: ref.id, status: "Confirmed", deductedFromDeposit: deducted };
+  return { penaltyID: ref.id, status: "Confirmed", deductedFromDeposit: deducted, deductedFromDiscountCredit: deductedFromCredit };
 };
 
 // Reads a penalty inside a transaction and hands it to `apply` only while it is still UnderReview. Used by edit and
@@ -408,46 +410,77 @@ export const confirmPenalty = async (penaltyID, actorUid = null) => {
 
   // Same as a penalty confirmed on creation: the held deposit pays it now.
   let deducted = 0;
-  try { deducted = (await applyPenaltyToDeposit(penaltyID, actorUid)).applied || 0; }
+  let deductedFromCredit = 0;
+  try { const r = await applyPenaltyToDeposit(penaltyID, actorUid); deducted = r.applied || 0; deductedFromCredit = r.fromCredit || 0; }
   catch (err) { console.error("[PENALTY] deposit deduction failed:", err.message); }
 
-  return { penaltyID, deductedFromDeposit: deducted };
+  return { penaltyID, deductedFromDeposit: deducted, deductedFromDiscountCredit: deductedFromCredit };
 };
 
 // ─────────────────────────────────────────────
 // Deducting a confirmed penalty from the held deposit, right when it is confirmed.
 // Raises the penalty's paidAmount (so it reads Paid / Partially Paid, not Pending) and adds the pesos used to
 // payments.depositSettled. settleBooking() later counts that as already used, so nothing is taken twice.
-// Whatever the deposit can't cover stays on the penalty as unpaid.
+// What the deposit can't cover is paid from the discount credit held for the customer (if there is any): the credit
+// moves to discountAppliedPenalty and an "internal" discount_applied_penalty row says so, in the same transaction.
+// Whatever neither can cover stays on the penalty as unpaid.
+// Returns { applied (from the deposit), fromCredit, ... }.
 // ─────────────────────────────────────────────
 export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
   const penRef = db.collection("penalties").doc(penaltyID);
   const first = await penRef.get();
-  if (!first.exists || !first.data().paymentID) return { applied: 0 };
+  if (!first.exists || !first.data().paymentID) return { applied: 0, fromCredit: 0 };
   const payRef = db.collection("payments").doc(first.data().paymentID);
 
   const out = await db.runTransaction(async (tx) => {
     const [penSnap, paySnap] = await Promise.all([tx.get(penRef), tx.get(payRef)]);
-    if (!penSnap.exists || !paySnap.exists) return { applied: 0 };
+    if (!penSnap.exists || !paySnap.exists) return { applied: 0, fromCredit: 0 };
     const pen = penSnap.data();
     const pay = paySnap.data();
-    if (pen.status !== "Confirmed") return { applied: 0 };
+    if (pen.status !== "Confirmed") return { applied: 0, fromCredit: 0 };
     const dep = getDepositView(pay);
-    if (!dep || dep.status !== "Held" || dep.settlement) return { applied: 0 };   // nothing held to take from
+    if (!dep || dep.status !== "Held" || dep.settlement) return { applied: 0, fromCredit: 0 };   // nothing held to take from
 
     const owed = Math.max(0, (pen.amount || 0) - (pen.paidAmount || 0));
     const free = Math.max(0, dep.amount - (dep.applied || 0));
     const use = round2(Math.min(owed, free));
-    if (!(use > 0)) return { applied: 0 };
+    const fromCredit = creditDrawFor(pay, round2(owed - use));   // the deposit first, then the held discount credit
+    if (!(use > 0) && !(fromCredit > 0)) return { applied: 0, fromCredit: 0 };
 
-    const newPaid = round2((pen.paidAmount || 0) + use);
+    const newPaid = round2((pen.paidAmount || 0) + use + fromCredit);
     tx.update(penRef, { paidAmount: newPaid, updatedAt: timestamp() });
-    tx.update(payRef, {
-      securityDeposit: dep.amount,
-      depositSettled: round2((dep.applied || 0) + use),   // running total of the deposit used for penalties
-      updatedAt: timestamp(),
-    });
-    return { applied: use, newPaid, bookingID: pen.bookingID, paymentID: first.data().paymentID, userID: pen.userID };
+    const payPatch = { updatedAt: timestamp() };
+    if (use > 0) {
+      payPatch.securityDeposit = dep.amount;
+      payPatch.depositSettled = round2((dep.applied || 0) + use);   // running total of the deposit used for penalties
+    }
+    let entryID = null;
+    if (fromCredit > 0) {
+      Object.assign(payPatch, applyCreditToPenalty(pay, fromCredit));
+      const entryRef = db.collection(ENTRY_COLLECTION).doc();
+      entryID = entryRef.id;
+      const now = new Date();
+      tx.set(entryRef, {
+        paymentEntryID: entryRef.id,
+        paymentID: first.data().paymentID,
+        bookingID: pen.bookingID || pay.bookingID || null,
+        userID: pay.userID || pen.userID || null,
+        refundReqID: null,
+        penaltyID,
+        direction: "internal",                       // no cash moved: held discount credit paid a penalty
+        phase: DISCOUNT_PHASES.appliedPenalty,
+        source: null, method: null,
+        amount: fromCredit,
+        status: "success",
+        referenceNumber: null, sessionID: null, transactionFee: null,
+        processedBy: actorUid || null,
+        processedAt: now, settledAt: now,
+        groupID: null, transactionErrorNote: null,
+        createdAt: now, updatedAt: now,
+      });
+    }
+    tx.update(payRef, payPatch);
+    return { applied: use, fromCredit, entryID, newPaid, bookingID: pen.bookingID, paymentID: first.data().paymentID, userID: pen.userID };
   });
 
   if (out.applied > 0) {
@@ -461,6 +494,19 @@ export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
     createAuditLog?.({
       action: "update", userID: actorUid, bookingID: out.bookingID, paymentID: out.paymentID,
       description: `Deducted \u20b1${out.applied} from the security deposit for penalty ${penaltyID} on booking ${out.bookingID}.`,
+    }).catch(() => {});
+  }
+  if (out.fromCredit > 0) {
+    await createTransactionLog({
+      bookingID: out.bookingID, paymentID: out.paymentID, userID: out.userID, penaltyID,
+      type: "Discount", amount: out.fromCredit, status: "Success",
+      performedBy: actorUid,
+      description: `Penalty paid from the discount credit held for the customer (the security deposit did not cover it).`,
+      logID: `${out.paymentID}_credit_apply_${penaltyID}_${out.newPaid}`,
+    }).catch(() => {});
+    createAuditLog?.({
+      action: "update", userID: actorUid, bookingID: out.bookingID, paymentID: out.paymentID,
+      description: `Deducted \u20b1${out.fromCredit} from the held discount credit for penalty ${penaltyID} on booking ${out.bookingID} (the security deposit was not enough).`,
     }).catch(() => {});
   }
   return out;
@@ -675,51 +721,66 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
 
     let returnEntryID = null;                      // the deposit_return row written below, when money goes back
     const alreadyApplied = deposit.applied || 0;   // already used for penalties when they were confirmed
-    let remainingDeposit = deposit.amount - alreadyApplied;
-    let confirmedPenaltyTotal = 0;
-    const penaltyUpdates = [];
+
+    // The deposit, the penalties and the discount credit held for the customer, worked out in one place (pure, tested):
+    // each penalty is paid from the deposit first, then from the credit. The ONE payout that goes back to the customer
+    // is what is left of the deposit PLUS what is left of the credit.
+    const credit = getDiscountFigures(payment).credit;
+    const plan = planSettlement({
+      depositAmount: deposit.amount,
+      alreadyApplied,
+      penalties: unpaidConfirmed.map((p) => ({ id: p.data.penaltyID || p.ref.id, owed: p.data.amount - (p.data.paidAmount || 0) })),
+      credit,
+    });
     const coveredPenalties = [];   // [{ penaltyID, amount }] -- what the deposit paid toward each penalty
+    const creditCovered = [];      // [{ penaltyID, amount }] -- what the held discount credit paid toward each penalty
+    const confirmedPenaltyTotal = plan.confirmedPenaltyTotal;
 
-    for (const p of unpaidConfirmed) {
-      const owed = p.data.amount - (p.data.paidAmount || 0);
-      confirmedPenaltyTotal += owed;
-      const fromDeposit = Math.min(remainingDeposit, owed);
-      remainingDeposit -= fromDeposit;
-      if (fromDeposit > 0) coveredPenalties.push({ penaltyID: p.data.penaltyID || p.ref.id, amount: fromDeposit });
-      const newPaidAmount = (p.data.paidAmount || 0) + fromDeposit;
-      penaltyUpdates.push({
-        ref: p.ref,
-        paidAmount: newPaidAmount,
-        // A deposit offset moves no money, so it has no entry row -- and nothing is stored about it on the penalty
-        // either: paidAmount is the only fact. "Deposit" / "DepositPartial" and the date are derived on read
-        // (hydratePenalty + the deposit settlement's settledAt).
-        stillOwed: owed - fromDeposit,
-      });
-    }
-
-    const net = deposit.amount - alreadyApplied - confirmedPenaltyTotal; // can be negative
-    const settlementStatus = net > 0 ? "Refunded" : net === 0 ? "Settled" : "OwedByCustomer";
-
-    penaltyUpdates.forEach((u) => {
-      tx.update(u.ref, {
-        paidAmount: u.paidAmount,
-        updatedAt: timestamp(),
-      });
+    unpaidConfirmed.forEach((p, i) => {
+      const part = plan.perPenalty[i];
+      const penaltyID = p.data.penaltyID || p.ref.id;
+      if (part.fromDeposit > 0) coveredPenalties.push({ penaltyID, amount: part.fromDeposit });
+      // A deposit offset moves no money, so it has no entry row -- and nothing is stored about it on the penalty
+      // either: paidAmount is the only fact. "Deposit" / "DepositPartial" and the date are derived on read
+      // (hydratePenalty + the deposit settlement's settledAt).
+      tx.update(p.ref, { paidAmount: (p.data.paidAmount || 0) + part.fromDeposit + part.fromCredit, updatedAt: timestamp() });
+      if (part.fromCredit > 0) {
+        creditCovered.push({ penaltyID, amount: part.fromCredit });
+        const creditRef = db.collection(ENTRY_COLLECTION).doc();
+        const at = new Date();
+        tx.set(creditRef, {
+          paymentEntryID: creditRef.id, paymentID, bookingID, userID: payment.userID || null,
+          refundReqID: null, penaltyID,
+          direction: "internal", phase: DISCOUNT_PHASES.appliedPenalty,   // no cash moved
+          source: null, method: null, amount: part.fromCredit, status: "success",
+          referenceNumber: null, sessionID: null, transactionFee: null,
+          processedBy: actorUid || null, processedAt: at, settledAt: at,
+          groupID: null, transactionErrorNote: null, createdAt: at, updatedAt: at,
+        });
+      }
     });
 
-    // Flat fields. depositSettled (used) + depositReturned = the deposit. The result (Refunded / Settled /
-    // OwedByCustomer) is derived by getDepositView() and not stored: the shortfall lives on the penalties.
+    const net = plan.net;   // money back (positive), exactly settled (0), or still owed (negative); includes the credit
+    const settlementStatus = net > 0 ? "Refunded" : net === 0 ? "Settled" : "OwedByCustomer";
+
+    // Flat fields. depositSettled (used) + depositReturned = the deposit. The result (Refunded / Settled / OwedByCustomer)
+    // is derived by getDepositView() and not stored: the shortfall lives on the penalties.
     tx.update(paymentRef, {
       securityDeposit: deposit.amount,
       depositStatus: "Settled",
-      depositSettled: deposit.amount - remainingDeposit,   // used from the deposit; any shortfall stays on the penalties
-      depositReturned: Math.max(0, net),
+      depositSettled: alreadyApplied + plan.depositUsed,   // used from the deposit; any shortfall stays on the penalties
+      depositReturned: plan.depositReturn,                 // the DEPOSIT's own part of the payout (the credit is on its own field)
       depositSettledAt: timestamp(),
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
+      // The held discount credit is closed out in the same transaction: what paid penalties moves to
+      // discountAppliedPenalty, what goes back moves to discountReturned, and the credit is 0.
+      ...(credit > 0 ? applySettlement(payment, plan) : {}),
     });
 
-    // The deposit going back is saved as a paymentEntries row (phase "deposit_return"), in the same transaction.
-    if (net > 0) {
+    // The payout is saved as ONE paymentEntries row (phase "deposit_return"): the deposit's leftover plus the discount
+    // credit's leftover, in the same transaction. That keeps the existing return flow (one PayMongo refund, the webhook,
+    // retry, in-store hand-back) working unchanged.
+    if (plan.payout > 0) {
       const entryRef = db.collection(ENTRY_COLLECTION).doc();
       const methodKey = String(returnMethod || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
       const now = new Date();
@@ -734,7 +795,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
         phase: "deposit_return",
         source: onlineReturn ? "online" : "in_person",
         method: onlineReturn ? null : (ENTRY_METHODS.includes(methodKey) ? methodKey : null),
-        amount: net,
+        amount: plan.payout,
         status: onlineReturn ? "pending" : "success",   // online: PayMongo confirms afterwards (webhook)
         referenceNumber: onlineReturn ? null : (String(returnReferenceNumber || "").trim() || null),
         sessionID: null,
@@ -748,10 +809,28 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
         updatedAt: now,
       });
       returnEntryID = entryRef.id;
+
+      // The part of that payout that is the discount: an "internal" row (the cash is in the row above), linked to it.
+      if (plan.creditReturn > 0) {
+        const dRef = db.collection(ENTRY_COLLECTION).doc();
+        tx.set(dRef, {
+          paymentEntryID: dRef.id, paymentID, bookingID, userID: payment.userID || null,
+          refundReqID: null, penaltyID: null,
+          direction: "internal", phase: DISCOUNT_PHASES.return,
+          source: null, method: null, amount: plan.creditReturn, status: "success",
+          referenceNumber: null, sessionID: null, transactionFee: null,
+          processedBy: actorUid || null, processedAt: now, settledAt: now,
+          groupID: entryRef.id,
+          transactionErrorNote: null, createdAt: now, updatedAt: now,
+        });
+      }
     }
 
-    const outstandingAfterDeposit = Math.max(0, -net); // > 0 only when net is negative
-    return { confirmedPenaltyTotal: confirmedPenaltyTotal + alreadyApplied, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, userID: payment.userID, returnEntryID };
+    const outstandingAfterDeposit = plan.stillOwed; // > 0 only when the deposit AND the credit could not cover the penalties
+    return {
+      confirmedPenaltyTotal: confirmedPenaltyTotal + alreadyApplied, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, creditCovered,
+      userID: payment.userID, returnEntryID, depositReturn: plan.depositReturn, creditReturn: plan.creditReturn, creditUsed: plan.creditUsed,
+    };
   });
 
   // Logged once the transaction has actually committed — same
@@ -763,7 +842,9 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       bookingID, paymentID, userID: result.userID,
       type: "DepositReturn", amount: result.net, status: "Success",
       paymentMethod: returnMethod, referenceNumber: returnReferenceNumber, performedBy: actorUid,
-      description: "Security deposit returned after settlement.",
+      description: result.creditReturn > 0
+        ? `Security deposit returned after settlement, together with ₱${result.creditReturn} of discount credit (₱${result.depositReturn} deposit + ₱${result.creditReturn} discount).`
+        : "Security deposit returned after settlement.",
       logID: `${paymentID}_deposit_settled`,
     });
   }
@@ -776,6 +857,16 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       paymentMethod: "Deposit", performedBy: actorUid,
       description: "Penalty paid from security deposit at settlement.",
       logID: `${paymentID}_deposit_penalty_${c.penaltyID}`,
+    });
+  }
+  // 3) The same for the penalties the held discount credit paid toward.
+  for (const c of result.creditCovered) {
+    await createTransactionLog({
+      bookingID, paymentID, userID: result.userID, penaltyID: c.penaltyID,
+      type: "Discount", amount: c.amount, status: "Success",
+      performedBy: actorUid,
+      description: "Penalty paid from the held discount credit at settlement (the security deposit did not cover it).",
+      logID: `${paymentID}_credit_penalty_${c.penaltyID}`,
     });
   }
 
@@ -792,6 +883,9 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     settlementStatus: result.settlementStatus,
     outstandingAfterDeposit: result.outstandingAfterDeposit,
     returnEntryID: result.returnEntryID,
+    depositReturn: result.depositReturn,   // the deposit's own part of the payout
+    creditReturn: result.creditReturn,     // the discount credit's part of the same payout
+    creditUsed: result.creditUsed,         // credit that paid penalties the deposit could not
   };
 };
 

@@ -24,11 +24,12 @@ export const registerPaymentsRoutes = (app) => {
   // Owner only (`allowed`), with the payment mode and a reference number on record.
   app.patch("/api/payments/booking/:bookingID/collect-balance", verifyToken, requireRole(allowed), collectBalance);
 
-  // One discount per booking, no edits and no re-sending (there is no correction route any more).
-  // On a partial payment it comes off the remaining balance; on a full one PayMongo refunds it.
+  // Gives a discount. No edits and no correction route: a discount that was too small is fixed by giving another.
+  // On a partial payment it comes off the remaining balance; on a fully paid one it is held and returns with the security deposit.
   app.patch("/api/payments/booking/:bookingID/discount", verifyToken, requireRole(allowed), discountPayment);
 
-  // The discount's PayMongo refund failed after PayMongo accepted it: send it again (the failed row stays as history).
+  // LEGACY discounts only (refunded on the spot before the ledger): the PayMongo refund failed, send it again. A ledger discount
+  // returns with the deposit, so its retry is the deposit return's.
   app.patch("/api/payments/booking/:bookingID/discount-refund/retry", verifyToken, requireRole(allowed), retryDiscountRefundPayment);
 
   // Only for a refund that couldn't go through PayMongo (money received in store): records the

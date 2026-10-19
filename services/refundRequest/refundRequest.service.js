@@ -210,7 +210,8 @@ export const getAllRefundRequests = async (status) => {
             // A staff discount on this payment, and where its money stands (processing at PayMongo, failed ...), so the
             // two ways of giving money back are visible side by side instead of in two separate screens.
             const dr = await getDiscountRefundState(payment, pSnap.docs[0].id);
-            if (dr) row.discount = { amount: Number(payment.discountAmount) || 0, reason: payment.discountReason || "", refund: dr };
+            // (A ledger discount is not a refund in flight: it is held and returns with the deposit, so nothing to show here.)
+            if (dr && !(dr.view && dr.view.ledger)) row.discount = { amount: Number(payment.discountAmount) || 0, reason: payment.discountReason || "", refund: dr };
             if (data.status !== "Pending") return row;
             const policy = policyForRequest(data, payment);
             const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0 });
@@ -479,10 +480,18 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // A staff discount on this payment is money going back to the customer too. While PayMongo is still processing it
     // (or after it failed) the customer's real balance is unsettled, so approving now could leave them short.
     const discountRefund = await getDiscountRefundState(payment, paymentSnap.docs[0].id);
-    if (discountRefund && discountRefund.state === "processing") {
+
+    // A discount given on a fully paid booking is HELD for the customer and returns with the security deposit. A refund
+    // request doesn't know about it yet, so approving one now would quietly leave the customer short. Stop, loudly.
+    const heldCredit = Number(payment.discountCredit) || 0;
+    if (heldCredit > 0) {
+      throw fail(`This booking holds ${peso(heldCredit)} of discount credit that belongs to the customer, and refund requests don't return it yet. Don't approve this request until the credit has been dealt with.`, 409);
+    }
+    // (Only a LEGACY discount refund can be in flight here: a held credit is never refunded on the spot.)
+    if (discountRefund && !(discountRefund.view && discountRefund.view.ledger) && discountRefund.state === "processing") {
       throw fail(`A ${peso(discountRefund.amount)} discount refund is still processing at PayMongo for this booking. Wait for it to finish, then approve this request.`, 409);
     }
-    if (discountRefund && discountRefund.state === "failed") {
+    if (discountRefund && !(discountRefund.view && discountRefund.view.ledger) && discountRefund.state === "failed") {
       throw fail(`The ${peso(discountRefund.amount)} discount refund for this booking failed at PayMongo. Retry it from the Payments page first, then approve this request.`, 409);
     }
 

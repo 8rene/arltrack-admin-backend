@@ -19,6 +19,7 @@ import { makeEntriesDb } from "./paymentEntries.core.js";
 import { buildRefundEntries } from "./paymentEntries.mapper.js";
 import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
+import { hasDiscountLedger } from "../payments/discountLedger.js";
 
 const svc = makeEntriesDb(db);
 
@@ -106,7 +107,8 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
   // ---- ADJUSTMENTS: value that moved WITHOUT cash ------------------------------------------------------------------
   // Nothing here is saved or added to a row: they are read from what the payment / penalties already store, so old
   // bookings work too and the money totals (summarize) can never include them.
-  //   discount        payments.discountAmount (+ discountReason / discountBy / discountAt)
+  //   discount        payments.discountAmount (+ discountReason / discountBy / discountAt) -- LEGACY discounts only;
+  //                   a ledger discount is in the entries as "internal" rows (no cash, so never in the money totals)
   //   deposit_offset  penalty money taken from the held deposit = penalties.paidAmount minus the cash entries on it,
   //                   capped by what the deposit settlement says it used (depositSettled)
   const readOne = async (live, archive, idField, id) => {
@@ -145,8 +147,10 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
     const list = [];
 
     for (const pay of payments) {
-      // A discount belongs to the payment, so a single-penalty view does not show it.
-      if (!filter.penaltyID && num(pay.discountAmount) > 0) {
+      // A discount belongs to the payment, so a single-penalty view does not show it. A LEDGER discount is not listed
+      // here: every one of its steps is its own "internal" row in the entries above. Only a legacy discount (given
+      // before the ledger, no rows) is read from the payment.
+      if (!filter.penaltyID && num(pay.discountAmount) > 0 && !hasDiscountLedger(pay)) {
         list.push({
           id: `adj_discount_${payIDOf(pay)}`, kind: "discount", label: "Discount given", amount: round2(num(pay.discountAmount)),
           reason: pay.discountReason || null, byName: await nameOf(pay.discountBy), date: toISO(pay.discountAt),

@@ -9,6 +9,9 @@ import { sendBalanceReminderEmail } from "../email/email.service.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolveUserNames } from "../archives/resolveUserName.service.js";
 import { getDepositView } from "./paymentHelpers.js";
+import {
+  getDiscountFigures, getDiscountView, hasLegacyDiscount, discountRoom, planNewDiscount, applyNewDiscount, DISCOUNT_PHASES,
+} from "./discountLedger.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
 // in refundRequest.service.js. No-ops quietly if there's no userID on the
@@ -275,12 +278,29 @@ const buildTransactions = (payment) => {
 //   refunded        PayMongo confirmed it (or staff handed it back in store)       (out-row "success")
 //   failed          PayMongo refused it after accepting it -- the customer is still owed the money  (out-row "failed")
 //   awaiting_handback  money was received in store, so staff must hand it back in store
+//   held            (ledger discounts only) the customer already paid it; it is held and returns with the deposit
+//   returned        (ledger discounts only) the held credit went back with the deposit
 //
 // Read from the payment's "out" rows (phase "discount"); the newest row wins, so a retry supersedes a failed one.
 // ─────────────────────────────────────────────
 export const deriveDiscountRefund = (payment, entries = []) => {
   const discountAmount = Number(payment && payment.discountAmount) || 0;
   if (!(discountAmount > 0)) return null;
+
+  // A LEDGER discount (see discountLedger.js) never refunds on the spot. Where its money stands:
+  //   deducted   it came off the balance / paid penalties: nothing is owed back
+  //   held       credit is held and goes back with the security deposit at settlement
+  //   processing | failed | returned   the payout that carried the credit (the booking's deposit_return row)
+  // `view` is the full picture for the screen (figures, history, whether the stored numbers still match the rows).
+  if (getDiscountFigures(payment).ledger) {
+    const view = getDiscountView(payment, entries);
+    const cr = view.creditReturn;
+    const base = { amount: 0, via: null, referenceNumber: null, errorNote: null, at: null, view };
+    if (cr) return { ...base, state: cr.state, amount: cr.amount, via: cr.via, referenceNumber: cr.referenceNumber, errorNote: cr.errorNote, at: cr.at };
+    if (view.credit > 0) return { ...base, state: "held", amount: view.credit };
+    return { ...base, state: "deducted" };
+  }
+
   const rows = (entries || [])
     .filter((e) => e && e.direction === "out" && e.phase === "discount")
     .sort((a, b) => {
@@ -289,7 +309,7 @@ export const deriveDiscountRefund = (payment, entries = []) => {
     });
   const latest = rows[0] || null;
   const { refundDue } = computeAmounts({ ...payment, discountAmount, refundIssued: false });   // spillover only; 0 = fit in the balance
-  const base = { amount: refundDue, via: null, referenceNumber: null, errorNote: null, at: null };
+  const base = { amount: refundDue, via: null, referenceNumber: null, errorNote: null, at: null, view: getDiscountView(payment, entries) };
   if (latest) {
     const st = String(latest.status || "").toLowerCase();
     const at = latest.settledAt || latest.processedAt || latest.createdAt || null;
@@ -341,8 +361,23 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     discountReason: payment.discountReason || "",
     refundDue: refundDue,
     refundIssued: !!payment.refundIssued,
-    // Where the discount's money stands (see deriveDiscountRefund): null | deducted | processing | refunded | failed | awaiting_handback
+    // Where the discount's money stands (see deriveDiscountRefund):
+    //   null | deducted | held | processing | returned | refunded | failed | awaiting_handback
     discountRefund,
+    // The discount in full (figures, history, status) -- see discountLedger.getDiscountView. null = no discount.
+    discount: (discountRefund && discountRefund.view) || getDiscountView(payment),
+    // How much MORE discount could be given right now, where it would go, and why not (null = it can be given).
+    ...(() => {
+      const room = discountRoom({
+        totalFee: Number(payment.amount) || 0,
+        grossPaid: computeAmounts({ ...payment, discountAmount: 0 }).amountPaid,
+        balance,
+        given: getDiscountFigures(payment).total,
+        depositStatus: dep ? dep.status : null,
+        legacy: hasLegacyDiscount(payment),
+      });
+      return { discountMax: room.max, discountKind: room.kind, discountBlocked: room.blocked };
+    })(),
     methodOfPayment: payment.methodOfPayment || "—",
     paymentMethod: payment.paymentMethod || "—",
     paymongoPaymentID: payment.paymongoPaymentID || null,
@@ -626,16 +661,22 @@ const planDiscountRefund = (payment, amount) => {
 };
 
 // ─────────────────────────────────────────────
-// Giving a discount — ONCE per booking. It can't be edited, corrected or given again.
+// Giving a discount. There is no edit and no correction, but MORE than one can be given: a discount that turned
+// out too small is fixed by giving another, never by rewriting the first. Every discount is its own ledger row.
+// The rules live in discountLedger.js; in short:
 //
-//   • Payment still partial  -> the discount is taken off the REMAINING balance (nothing moves;
-//                               it can't be more than that balance).
-//   • Payment already full   -> PayMongo refunds the discount amount to the customer. The refund is
-//                               made FIRST: if PayMongo refuses it, no discount is saved.
+//   • Payment still partial  -> the discount comes off the REMAINING balance (it can't be more than that balance).
+//                               Row: discount_applied_balance. Nothing was paid, so nothing is owed back.
+//   • Payment fully paid     -> the customer already paid it, so it is HELD for them and goes back with the
+//                               security deposit when the trip is settled. Row: discount_credit.
+//                               Nothing moves now: no PayMongo call, so a refund can't fail while staff are being
+//                               kind. Needs a held security deposit to return it with.
+//   • All discounts together can't go past what the customer paid, and none can be given once the deposit is settled.
 //
+// The payment's discount fields and the ledger row are written in ONE transaction, so they can never disagree.
 // Flat pesos only. Staff-only to call. Drivers don't handle payments, so they are not notified.
 // ─────────────────────────────────────────────
-export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
+export const applyDiscount = async (bookingID, amount, reason, appliedBy, actorID = null) => {
   if (!bookingID) throw new Error("bookingID is required.");
   const discountAmount = Number(amount);
   if (!Number.isFinite(discountAmount) || discountAmount <= 0) {
@@ -652,11 +693,6 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
   // Read through the entries: "balance collected in person" is not stored on the payment document.
   const existing = await hydratePaymentData(doc.data(), doc.id);
 
-  // One discount per booking -- no rewriting it, no sending a new one.
-  if (Number(existing.discountAmount) > 0) {
-    throw new Error("A discount has already been given for this booking. It can't be changed or given again.");
-  }
-
   const status = String(existing.status || "").toLowerCase();
   if (status === "refunded") {
     throw new Error("This payment has already been refunded — a discount can't be applied to it.");
@@ -665,18 +701,23 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     throw new Error("A discount can only be given after the customer's first payment has been received through PayMongo.");
   }
 
-  // What the discount can be at most: the remaining balance while the payment is partial, otherwise
-  // what the customer has paid (capped at the booking's total fee).
-  const before = computeAmounts({ ...existing, discountAmount: 0 });
-  const totalFee = Number(existing.amount) || 0;
-  const maxDiscount = before.balance > 0 ? before.balance : Math.min(totalFee, before.amountPaid);
-  if (discountAmount > maxDiscount) {
-    throw new Error(
-      before.balance > 0
-        ? `A discount on a partial payment can't be more than the remaining balance of ₱${before.balance.toLocaleString()}.`
-        : `The discount can't be more than ₱${maxDiscount.toLocaleString()}.`
-    );
-  }
+  // Where it goes and how much it can be: the remaining balance while the payment is partial, otherwise what the
+  // customer paid, less the discounts already given.
+  const before = computeAmounts(existing);                                       // balance already net of earlier discounts
+  const grossPaid = computeAmounts({ ...existing, discountAmount: 0 }).amountPaid;
+  const figuresBefore = getDiscountFigures(existing);
+  const dep = getDepositView(existing);
+  const plan = planNewDiscount({
+    amount: discountAmount,
+    totalFee: Number(existing.amount) || 0,
+    grossPaid,
+    balance: before.balance,
+    given: figuresBefore.total,
+    depositStatus: dep ? dep.status : null,
+    legacy: hasLegacyDiscount(existing),
+  });
+  if (!plan.ok) throw new Error(plan.error);
+  const kind = plan.kind;   // "balance" | "credit"
 
   // Need the booking doc as a fallback source for the customer's userID
   // (see resolveCustomerUserID).
@@ -700,75 +741,58 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     );
   }
 
-  // Only what spills past the balance is money going back to the customer.
-  const { refundDue } = computeAmounts({ ...existing, discountAmount, refundIssued: false });
   const paymentID = existing.paymentID || doc.id;
   const customerUserID = resolveCustomerUserID(existing.userID, booking);
-  const refundNote = reason ? `Discount for booking ${bookingID}: ${reason}` : `Discount for booking ${bookingID}`;
-
-  // The money goes back FIRST. If PayMongo refuses, nothing below is saved.
-  let refund = null; // { refundID, kind } when PayMongo accepted it
-  let inStoreRefund = false;
-  if (refundDue > 0) {
-    const plan = planDiscountRefund(existing, refundDue);
-    if (plan.error) throw new Error(plan.error);
-    if (plan.paymongo) {
-      const refundID = await createPaymongoRefund({
-        paymongoPaymentID: plan.paymongo.paymongoPaymentID,
-        amount: refundDue,
-        reason: refundNote,
-      });
-      refund = { refundID, kind: plan.paymongo.kind };
-    } else {
-      inStoreRefund = true;
-    }
-  }
-
-  // One batch: the discount and (when PayMongo took the refund) the "money out" row, so the two can
-  // never disagree.
+  const newFigures = applyNewDiscount(existing, kind, discountAmount);
   const now = new Date();
-  const batch = db.batch();
-  batch.update(doc.ref, {
-    discountAmount,
-    discountReason: reason || "",
-    discountBy:     appliedBy || "—",
-    discountAt:     admin.firestore.FieldValue.serverTimestamp(),
-    refundDue:      refund ? 0 : refundDue,
-    refundIssued:   !!refund,
-    updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
-  });
-  if (refund) {
-    // A discount refund: phase "discount", hangs off the payment (paymentID), no refund request. Normal auto ID.
-    // (One discount per booking is enforced above, so this can only be written once.)
-    const entryRef = db.collection(ENTRY_COLLECTION).doc();
-    batch.set(entryRef, {
+  const entryRef = db.collection(ENTRY_COLLECTION).doc();
+
+  // The payment's figures and the ledger row, together. The transaction re-reads the payment: if another discount
+  // (or anything else that moves the figures) landed since we read it, this one stops instead of overshooting the cap.
+  await db.runTransaction(async (tx) => {
+    const cur = await tx.get(doc.ref);
+    if (!cur.exists) throw new Error("No payment record found for this booking.");
+    const c = getDiscountFigures(cur.data());
+    if (c.total !== figuresBefore.total || c.ledger !== figuresBefore.ledger || c.credit !== figuresBefore.credit || c.appliedBalance !== figuresBefore.appliedBalance) {
+      throw new Error("This booking's discount changed a moment ago. Please refresh and try again.");
+    }
+    tx.update(doc.ref, {
+      ...newFigures,
+      discountReason: reason || "",                     // the LATEST discount's reason; each one's reason is in the activity log
+      discountBy:     appliedBy || "—",
+      discountAt:     admin.firestore.FieldValue.serverTimestamp(),
+      refundDue:      0,                                // nothing is handed back on the spot any more
+      updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+    });
+    tx.set(entryRef, {
       paymentEntryID: entryRef.id,
       paymentID,
       bookingID,
       userID: existing.userID || customerUserID || null,
       refundReqID: null,
       penaltyID: null,
-      direction: "out",
-      phase: "discount",
-      source: "online",
+      direction: "internal",                            // no cash moved
+      phase: kind === "balance" ? DISCOUNT_PHASES.appliedBalance : DISCOUNT_PHASES.credit,
+      source: null,
       method: null,
-      amount: refundDue,
-      status: "pending",              // PayMongo confirms the refund afterwards
-      referenceNumber: refund.refundID,
+      amount: discountAmount,
+      status: "success",
+      referenceNumber: null,
       sessionID: null,
       transactionFee: null,
-      processedBy: appliedBy || null,
+      processedBy: actorID || appliedBy || null,         // the staff uid, like every other row
       processedAt: now,
-      settledAt: null,
+      settledAt: now,
       groupID: null,
       transactionErrorNote: null,
       createdAt: now,
       updatedAt: now,
     });
-  }
-  await batch.commit();
+  });
 
-  const after = computeAmounts({ ...existing, discountAmount, refundIssued: !!refund });
+  const after = computeAmounts({ ...existing, ...newFigures });
+  const given = newFigures.discountAmount;
+  const nth = figuresBefore.total > 0 ? " (an additional discount)" : "";
 
   // Bell ping to Owner/Admin/Supervisor for every discount.
   await notifyStaff({
@@ -776,30 +800,16 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     refID: bookingID,
     refCollection: "bookings",
     title: "Discount Applied",
-    message: `A discount of ₱${discountAmount.toLocaleString()} was applied to booking ${bookingID}${reason ? ` (${reason})` : ""}.`,
+    message: `A discount of ₱${discountAmount.toLocaleString()} was applied to booking ${bookingID}${nth}${reason ? ` (${reason})` : ""}. ${
+      kind === "credit" ? "The booking was already fully paid, so it is held and returns with the security deposit." : `The remaining balance is now ₱${after.balance.toLocaleString()}.`}`,
   });
-
-  if (inStoreRefund) {
-    // Only money that was never on PayMongo ends up here: staff have to return it in store.
-    await notifyStaff({
-      type: "refund_due",
-      refID: bookingID,
-      refCollection: "bookings",
-      title: "Refund due to customer",
-      message: `A discount was given on booking ${bookingID} after it was paid in store — ₱${refundDue.toLocaleString()} needs to be returned to the customer in store.`,
-    });
-  } else {
-    await resolveNotification("refund_due", bookingID);
-  }
 
   // Customer-facing bell: what the discount did for THEM.
   await notifyCustomer(
     customerUserID, bookingID, "discount_applied", "Discount Applied",
-    refund
-      ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. ₱${refundDue.toLocaleString()} is being refunded to your original payment method.`
-      : inStoreRefund
-        ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. ₱${refundDue.toLocaleString()} will be returned to you in store.`
-        : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Your remaining balance is now ₱${after.balance.toLocaleString()}.`
+    kind === "credit"
+      ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Since you've already paid in full, it will be returned to you together with your security deposit after your trip.`
+      : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Your remaining balance is now ₱${after.balance.toLocaleString()}.`
   );
 
   createTransactionLog({
@@ -809,15 +819,15 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
     type: "Discount",
     amount: discountAmount,
     status: "Success",
-    description: reason
-      ? `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}: ${reason}${refund ? ` (refunded via PayMongo, ref ${refund.refundID})` : ""}`
-      : `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${refund ? ` (refunded via PayMongo, ref ${refund.refundID})` : ""}.`,
+    description: `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${reason ? `: ${reason}` : ""}${
+      kind === "credit" ? " (held, returns with the security deposit)" : " (taken off the remaining balance)"}.`,
     performedBy: appliedBy || "—",
   });
 
   auditSafe({
     action: "update",
-    description: `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${reason ? ` (${reason})` : ""}${refund ? `; ₱${refundDue.toLocaleString()} refunded through PayMongo (${refund.refundID})` : inStoreRefund ? `; ₱${refundDue.toLocaleString()} to be returned in store` : `; remaining balance is now ₱${after.balance.toLocaleString()}`}.`,
+    description: `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${nth}${reason ? ` (${reason})` : ""}${
+      kind === "credit" ? `; held for the customer, returns with the security deposit (₱${given.toLocaleString()} discounts in total)` : `; remaining balance is now ₱${after.balance.toLocaleString()}`}.`,
     userID: appliedBy || null,
     bookingID,
     paymentID,
@@ -825,8 +835,9 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy) => {
 
   return {
     id: doc.id, bookingID, discountAmount,
-    refundDue: refund ? 0 : refundDue,
-    refundedVia: refund ? "paymongo" : inStoreRefund ? "in_store" : null,
+    discountTotal: given,
+    kind,                                   // "balance" | "credit"
+    creditHeld: newFigures.discountCredit,
     balanceAfter: after.balance,
   };
 };
@@ -930,6 +941,9 @@ export const getDiscountRefunds = async () => {
     const key = payment.paymentID || payment.id;
     const refund = deriveDiscountRefund(payment, entries.get(key) || []);
     if (!refund || refund.state === "deducted") continue;
+    // This list is for discounts that were REFUNDED on the spot (legacy). A ledger discount is not a refund: its credit
+    // goes back inside the booking's deposit return, which already has its own row on the Refund Requests page.
+    if (refund.view && refund.view.ledger) continue;
     const booking = payment.bookingID ? await findBookingByBookingID(payment.bookingID) : null;
     items.push({
       paymentID: key,
@@ -957,6 +971,9 @@ export const retryDiscountRefund = async (bookingID, retriedBy) => {
   const doc = snap.docs[0];
   const payment = await hydratePaymentData(doc.data(), doc.id);
 
+  if (getDiscountFigures(payment).ledger) {
+    throw new Error("This discount goes back with the security deposit, so there is nothing to retry here. Retry the deposit return instead.");
+  }
   const state = await getDiscountRefundState(payment, doc.id);
   if (!state || state.state !== "failed") {
     throw new Error(
@@ -1262,7 +1279,14 @@ export const getPaymentById = async (id) => {
         count: fromEntries ? fromEntries.count : 0,
       }
     : null;
-  return { ...row, penalties, penaltyGateway };
+  // Who gave / used each discount: the ledger rows carry the staff uid.
+  let discount = row.discount;
+  if (discount && Array.isArray(discount.events) && discount.events.length) {
+    const ids = [...new Set(discount.events.map((e) => e.by).filter((v) => v && v !== "—" && !String(v).includes("@")))];
+    const names = ids.length ? await resolveUserNames(ids).catch(() => ({})) : {};
+    discount = { ...discount, events: discount.events.map((e) => ({ ...e, byName: names[e.by] || e.by || null })) };
+  }
+  return { ...row, discount, penalties, penaltyGateway };
 };
 
 // Same full detail as getPaymentById() above (discounts, the deposit/balance

@@ -315,7 +315,7 @@ const latestOf = (rows) =>
 
 /** The row that best represents a phase: latest successful one, else latest of any status. */
 const pickEntry = (rows, phase) => {
-  const of = rows.filter((e) => e.direction !== "out" && e.phase === phase);
+  const of = rows.filter((e) => e.direction !== "out" && e.direction !== "internal" && e.phase === phase);
   return latestOf(of.filter((e) => e.status === "success")) || latestOf(of);
 };
 
@@ -364,7 +364,8 @@ const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefund
  */
 const hydratePayment = (payment, entries, opts = {}) => {
   if (!payment) return payment;
-  const rows = (entries || []).filter((e) => e && e.direction !== "out" && e.phase !== "penalty");
+  // "internal" rows (a discount moving between buckets) are not money in: only real payments describe a payment.
+  const rows = (entries || []).filter((e) => e && e.direction !== "out" && e.direction !== "internal" && e.phase !== "penalty");
   if (!rows.length && !opts.rowsOnly) return payment;
   const out = { ...payment };
   if (opts.rowsOnly) for (const k of MOVED_PAYMENT_FIELDS) delete out[k];

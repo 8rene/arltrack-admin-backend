@@ -12,6 +12,7 @@ import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.se
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
 import { planOnlineDepositReturn, sendOnlineDepositReturn, onlineDepositReturnOption, getDepositReturnForBooking } from "../../services/depositReturn/depositReturn.service.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
+import { getDiscountFigures } from "../payments/discountLedger.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 import { getHolidaysBetween } from "../gps/coding.service.js";
 import {
@@ -104,9 +105,13 @@ export const resolvePaymentInfo = async (bookingID) => {
     const depositSettled = !!settlement;
     const depositDeducted = deposit?.deducted || 0;
     const appliedToPenalties = !settlement ? (deposit?.applied || 0) : 0;   // taken from the held deposit already
+    // Discount credit held for the customer (a discount given on a fully paid booking): it covers penalties the deposit
+    // can't, and what is left goes back WITH the deposit, so it is part of the amount to return.
+    const discountFigures = getDiscountFigures(data);
+    const heldCredit = !settlement && deposit?.status === "Held" ? discountFigures.credit : 0;
     const amountToReturn = settlement
-      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, deposit.returnedAmount || 0))
-      : depositAmount - appliedToPenalties - confirmedPenaltyTotal;
+      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, (deposit.returnedAmount || 0) + discountFigures.returned))
+      : depositAmount - appliedToPenalties - confirmedPenaltyTotal + heldCredit;
 
     return {
       paymentMethod: data.paymentMethod || "—",
@@ -139,6 +144,7 @@ export const resolvePaymentInfo = async (bookingID) => {
       refundDue,
       refundIssued: !!data.refundIssued,
       depositAmount, depositStatus, amountToReturn,
+      discountCredit: heldCredit,   // held discount credit that goes back with the deposit
       confirmedPenaltyTotal: confirmedPenaltyTotal + appliedToPenalties,
       depositSettled, depositDeducted: depositDeducted || appliedToPenalties,
     };
@@ -457,9 +463,10 @@ export const getAllBookings = async (statusFilter) => {
 // gate, settleDeposit and the Return checklist so both always agree.
 //   unpaidTotal            confirmed penalties not yet paid
 //   depositAvailable       the held deposit, only while it is unsettled
+//   creditAvailable        discount credit held for the customer (a discount given on a fully paid booking)
 //   outstandingAfterDeposit what the customer would still owe after the
-//                          deposit is applied (0 = fully covered)
-//   amountToReturn         signed: deposit minus penalties (negative = owed)
+//                          deposit AND the held credit are applied (0 = fully covered)
+//   amountToReturn         signed: deposit + held credit minus penalties (negative = owed)
 // ─────────────────────────────────────────────
 const getDepositPosition = async (bID) => {
   const [paymentSnap, penalties] = await Promise.all([
@@ -477,12 +484,20 @@ const getDepositPosition = async (bID) => {
   const held = deposit?.status === "Held" && !alreadySettled;
   const applied = held ? (deposit.applied || 0) : 0;   // already used for penalties when they were confirmed
   const depositAvailable = held ? Math.max(0, (deposit.amount || 0) - applied) : 0;
+  // Discount credit held for the customer: pays what the deposit can't cover, and the rest goes back with the deposit.
+  const figures = getDiscountFigures(paymentData);
+  const creditAvailable = held ? figures.credit : 0;
+  const creditUsed = Math.min(creditAvailable, Math.max(0, unpaidTotal - depositAvailable));
   return {
     penalties, deposit, unpaidTotal, confirmedTotal, alreadySettled, applied,
     depositStatus: deposit?.status || "—",
     depositAvailable,
-    outstandingAfterDeposit: Math.max(0, unpaidTotal - depositAvailable),
-    amountToReturn: depositAvailable - unpaidTotal,
+    creditAvailable,                                   // discount credit still held
+    creditUsed,                                        // the part of it settling would use on penalties
+    creditReturn: creditAvailable - creditUsed,        // the part of it that would go back
+    discountReturned: figures.returned,                // credit already returned (after settlement)
+    outstandingAfterDeposit: Math.max(0, unpaidTotal - depositAvailable - creditAvailable),
+    amountToReturn: depositAvailable + creditAvailable - unpaidTotal,
   };
 };
 
@@ -1105,10 +1120,15 @@ export const getReturnChecklist = async (docID) => {
     // Before settlement: deposit minus penalties (negative = customer owes).
     // After settlement: what was actually returned (depositReturned) / is still owed (the unpaid penalties, live).
     penaltyTotal: settlement ? pos.confirmedTotal : pos.unpaidTotal + (pos.applied || 0),
-    amountToReturn: settlement ? (pos.unpaidTotal > 0 ? -pos.unpaidTotal : pos.deposit.returnedAmount) : pos.amountToReturn,
+    amountToReturn: settlement ? (pos.unpaidTotal > 0 ? -pos.unpaidTotal : (pos.deposit.returnedAmount || 0) + (pos.discountReturned || 0)) : pos.amountToReturn,
+    // The discount credit held for the customer, as the part of that amount that is NOT the deposit. creditUsed would pay
+    // penalties the deposit can't; creditReturn goes back with the deposit. Both are 0 when no discount credit is held.
+    discountCredit: pos.creditAvailable,
+    discountCreditUsed: pos.creditUsed,
+    discountCreditReturn: settlement ? (pos.discountReturned || 0) : pos.creditReturn,
     // Still-unpaid penalty money right now (includes penalties raised after settling).
-    stillOwed: pos.unpaidTotal > pos.depositAvailable ? pos.unpaidTotal - pos.depositAvailable : 0,
-    outstandingAfterDeposit: Math.max(0, pos.unpaidTotal - pos.depositAvailable),
+    stillOwed: pos.outstandingAfterDeposit,
+    outstandingAfterDeposit: pos.outstandingAfterDeposit,
     penalties: pos.penalties,
     depositReturn: await getDepositReturnForBooking(bID),   // how/whether the deposit went back: in store, or PayMongo (processing / failed / refunded)
   };

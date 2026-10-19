@@ -16,6 +16,8 @@
 //                     not_applicable|not_due|pending|paid|failed|cancelled
 //   balanceCollected  true when STAFF collected the balance in person
 //   discountAmount / refundIssued   staff discount (see admin applyDiscount)
+//   discountAppliedBalance          present on a LEDGER discount (see discountLedger.js): only that part reduces
+//                                   the balance; the rest is held / used for penalties and is never refundDue
 //   depositPaymongoPaymentID / balancePaymongoPaymentID  PayMongo payment ids, one
 //                     per online charge (paymongoPaymentID = legacy "latest charge")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,7 +114,17 @@ const getPaymentBreakdown = (payment) => {
   // admin's computeAmounts so both apps always agree.
   const discountAmount = num(p.discountAmount);
   let refundDue = 0;
-  if (discountAmount > 0) {
+  if (discountAmount > 0 && p.discountAppliedBalance !== undefined && p.discountAppliedBalance !== null) {
+    // LEDGER discount (see discountLedger.js). Only the part that came off the remaining balance reduces what is
+    // owed. The rest was ALREADY PAID by the customer, so it is not rental money any more: it is held for them (and
+    // returned with the security deposit) or it paid a penalty. It leaves amountPaid exactly as the old spillover did,
+    // so refunds, receipts and the customer's totals read the same as before -- but it is never "refundDue":
+    // nothing is handed back on the spot, so no refund prompt, no in-store hand-back and no PayMongo refund.
+    const toBalance = Math.min(Math.max(0, balance), Math.max(0, num(p.discountAppliedBalance)));
+    balance -= toBalance;
+    const held = Math.max(0, discountAmount - num(p.discountAppliedBalance));
+    amountPaid = Math.max(0, amountPaid - held);
+  } else if (discountAmount > 0) {
     if (balance >= discountAmount) {
       balance -= discountAmount;
     } else {
