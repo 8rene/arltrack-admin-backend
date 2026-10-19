@@ -345,6 +345,7 @@ const entriesToLegacyTransactions = (rows) =>
 const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
   "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoChannel", "lastSettledVia",
+  "depositPaymongoChannel", "balancePaymongoChannel",   // per-phase channel (gcash | maya | qrph), derived from the rows
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
   "balanceMethod", "balanceReferenceNumber", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
   // staff collected the balance in person / handed a discount spillover back: both are facts of an entry row
@@ -380,6 +381,7 @@ const hydratePayment = (payment, entries, opts = {}) => {
       fill("depositPaymongoPaymentID", dep.referenceNumber);
       fill("depositPaymongoFee", dep.transactionFee);
       fill("paymongoChannel", LEGACY_CHANNEL[dep.method] || dep.method);
+      fill("depositPaymongoChannel", LEGACY_CHANNEL[dep.method] || dep.method);
     } else {
       fill("confirmedBy", dep.processedBy);
       fill("confirmedAt", dep.processedAt);
@@ -391,6 +393,7 @@ const hydratePayment = (payment, entries, opts = {}) => {
       fill("balancePaymongoPaymentID", bal.referenceNumber);
       fill("balancePaymongoFee", bal.transactionFee);
       fill("paymongoChannel", LEGACY_CHANNEL[bal.method] || bal.method);
+      fill("balancePaymongoChannel", LEGACY_CHANNEL[bal.method] || bal.method);
       if (bal.status === "success") fill("balancePaidAt", bal.settledAt);
     } else {
       fill("balanceMethod", BALANCE_METHOD_LABEL[bal.method] || null);

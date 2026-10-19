@@ -185,9 +185,23 @@ const depositWasOnline = (payment, ids) => {
 //   total        = amountPaid − forfeit      (what the customer actually gets back)
 //   grossPaid    = amountPaid                (everything they paid, before the forfeit)
 //   forfeit      = what is being kept
+// Channels PayMongo's refund API refuses ("Refunds are not allowed for payments with source type qrph"). Money paid
+// this way is NOT unrefundable -- it is in our hands, so it goes into the manual bucket: staff hand it back in person
+// (or by bank transfer) and mark it issued. Judged PER PHASE: a deposit paid by GCash and a balance paid by QR Ph
+// split correctly. The per-phase channel is derived from the entry rows (hydratePayment); older payments fall back
+// to the single paymongoChannel.
+const NO_API_REFUND_CHANNELS = ["qrph"];
+const channelOfPhase = (payment, phase) => {
+  const p = payment || {};
+  const own = phase === "balance" ? p.balancePaymongoChannel : p.depositPaymongoChannel;
+  return lower(own || p.paymongoChannel);
+};
+const refundableOnlyByHand = (payment, phase) => NO_API_REFUND_CHANNELS.includes(channelOfPhase(payment, phase));
+
 const computeRefundPlan = (payment, opts = {}) => {
   const b   = getPaymentBreakdown(payment);
   const ids = resolvePaymongoIDs(payment);
+  let qrphAmount = 0;   // the part handed back by staff only because the channel is QR Ph (included in manualAmount)
 
   const forfeit = Math.min(Math.max(0, num(opts.forfeit)), b.amountPaid);
 
@@ -214,7 +228,8 @@ const computeRefundPlan = (payment, opts = {}) => {
   if (depositCap > 0 && remaining > 0) {
     const amt = allot(depositCap);
     if (amt > 0) {
-      if (ids.deposit)                          parts.push({ kind: "deposit", paymongoPaymentID: ids.deposit, amount: amt });
+      if (refundableOnlyByHand(payment, "deposit")) { manualAmount += amt; qrphAmount += amt; }   // QR Ph: hand back, PayMongo refuses it
+      else if (ids.deposit)                     parts.push({ kind: "deposit", paymongoPaymentID: ids.deposit, amount: amt });
       else if (depositWasOnline(payment, ids))  unrefundable.push({ kind: "deposit", amount: amt, reason: "payment_id_missing" });
       else                                      manualAmount += amt; // taken in cash / by staff
     }
@@ -223,7 +238,8 @@ const computeRefundPlan = (payment, opts = {}) => {
   if (b.balanceOnline > 0 && remaining > 0) {
     const amt = allot(b.balanceOnline);
     if (amt > 0) {
-      if (ids.balance) parts.push({ kind: "balance", paymongoPaymentID: ids.balance, amount: amt });
+      if (refundableOnlyByHand(payment, "balance")) { manualAmount += amt; qrphAmount += amt; }   // QR Ph: hand back
+      else if (ids.balance) parts.push({ kind: "balance", paymongoPaymentID: ids.balance, amount: amt });
       else             unrefundable.push({ kind: "balance", amount: amt, reason: "payment_id_missing" });
     }
   }
@@ -236,7 +252,8 @@ const computeRefundPlan = (payment, opts = {}) => {
   // total = what can actually be returned (parts + manual). The unrefundable amount is NOT promised to the customer.
   return {
     total: b.amountPaid - forfeit - unrefundableAmount,
-    grossPaid: b.amountPaid, forfeit, parts, manualAmount,
+    grossPaid: b.amountPaid, forfeit, parts, manualAmount, qrphAmount,
+    channels: { deposit: channelOfPhase(payment, "deposit") || null, balance: channelOfPhase(payment, "balance") || null },
     unrefundable, unrefundableAmount, breakdown: b,
   };
 };

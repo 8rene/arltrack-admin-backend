@@ -44,6 +44,38 @@ const unrefundableSentence = (amount) =>
     ? ` ${peso(amount)} could not be refunded automatically because its payment record is incomplete — please contact support about it.`
     : "";
 
+// How the customer is told their money comes back. A QR Ph payment can't go through PayMongo's refund API at all, so a
+// refund that is ALL hand-back (nothing online) must not say "₱0 will be returned through PayMongo".
+const returnRouteSentence = ({ onlineAmount = 0, manualAmount = 0, qrphAmount = 0 }) => {
+  if (manualAmount > 0 && !(onlineAmount > 0)) {
+    return `${qrphAmount > 0 ? "Payments made by QR Ph can't be returned through PayMongo, so our staff" : "Our staff"} will hand the ${peso(manualAmount)} back to you in person. We'll let you know once it has been returned.`;
+  }
+  if (manualAmount > 0) {
+    return `${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`;
+  }
+  return "Please allow up to 24 hours for PayMongo to process it — we'll notify you once it has been returned.";
+};
+
+// How the customer PAID, per phase, for the refund screen: "gcash" | "maya" | "qrph" | "cash" | "bank_transfer" | null.
+// Online phases read the per-phase channel (derived from the entry rows); in-person phases read the method staff recorded.
+const methodCode = (v) => {
+  const s = lower(v).replace(/[\s_-]/g, "");
+  if (!s || s === "na" || s === "—") return null;
+  if (s === "paymaya" || s === "maya") return "maya";
+  if (s === "qrph") return "qrph";
+  if (s === "gcash") return "gcash";
+  if (s === "cash") return "cash";
+  if (s === "banktransfer" || s === "bank") return "bank_transfer";
+  return lower(v);
+};
+const paidWithOf = (payment) => {
+  const p = payment || {};
+  const dep = methodCode(p.depositPaymongoChannel || p.paymongoChannel || p.paymentMethod);
+  const balancePaid = lower(p.balanceStatus) === "paid" || !!p.balancePaymongoPaymentID || !!p.balanceMethod;
+  const bal = balancePaid ? methodCode(p.balancePaymongoChannel || p.balanceMethod) : null;
+  return { deposit: dep, balance: bal };
+};
+
 // A second admin clicking Approve while the first is still talking to PayMongo
 // would create a second set of refunds. The lock (a timestamp on the request,
 // claimed in a transaction) makes that a clean 409. It expires so a crashed
@@ -212,6 +244,7 @@ export const getAllRefundRequests = async (status) => {
             const dr = await getDiscountRefundState(payment, pSnap.docs[0].id);
             // (A ledger discount is not a refund in flight: it is held and returns with the deposit, so nothing to show here.)
             if (dr && !(dr.view && dr.view.ledger)) row.discount = { amount: Number(payment.discountAmount) || 0, reason: payment.discountReason || "", refund: dr };
+            row.paidWith = paidWithOf(payment);   // how the customer paid, per phase (the screen shows it; QR Ph is hand-back only)
             if (data.status !== "Pending") return row;
             const policy = policyForRequest(data, payment);
             const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0 });
@@ -219,6 +252,7 @@ export const getAllRefundRequests = async (status) => {
               total: plan.total,
               onlineAmount: plan.total - plan.manualAmount,
               manualAmount: plan.manualAmount,
+              qrphAmount: plan.qrphAmount,                   // the part of manualAmount that is hand-back only because it was paid by QR Ph
               unrefundableAmount: plan.unrefundableAmount,   // paid online, no PayMongo payment id on record
               bookingPaid: plan.grossPaid,
               grossPaid: plan.grossPaid,                   // old name, same value, until the web apps read bookingPaid
@@ -607,9 +641,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // old daily customer-backend cron that used to sweep up missed notifications.)
     await notifyCustomer(
       refundRequest.userID, refundRequest.bookingID, "refund_approved", "Refund Approved",
-      (manualRefund
-        ? `Your refund of ${peso(plan.total)} has been approved. ${peso(onlineAmount)} will be returned through PayMongo and ${peso(plan.manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
-        : `Your refund of ${peso(plan.total)} has been approved. Please allow up to 24 hours for PayMongo to process it — we'll notify you once it has been returned.`)
+      `Your refund of ${peso(plan.total)} has been approved. ${returnRouteSentence({ onlineAmount, manualAmount: plan.manualAmount, qrphAmount: plan.qrphAmount })}`
       + (forfeit > 0 ? ` Your ${peso(forfeit)} deposit was kept under our 48-hour cancellation policy.` : "")
       + unrefundableSentence(plan.unrefundableAmount),
       { renotify: true }
@@ -847,9 +879,7 @@ const finishStaffRefund = async (r) => {
 
     await notifyCustomer(
       userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Approved",
-      (manualAmount > 0
-        ? `Your booking was cancelled: ${reason}. A refund has been approved: ${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`
-        : `Your booking was cancelled: ${reason}. A refund of ${peso(refundTotal)} has been approved — please allow up to 24 hours for PayMongo to process it. We'll notify you once it has been returned.`)
+      `Your booking was cancelled: ${reason}. A refund of ${peso(refundTotal)} has been approved. ${returnRouteSentence({ onlineAmount, manualAmount })}`
       + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
       + unrefundableSentence(r.unrefundableAmount)
     );
