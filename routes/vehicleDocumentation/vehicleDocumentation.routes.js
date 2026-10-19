@@ -4,6 +4,8 @@ import {
   saveAfterTrip,
   saveInventoryStatusHandler,
   editHistoryPhoto,
+  videoHandlers,
+  extraPhotoHandlers,
 } from "../../controllers/vehicleDocumentation/vehicleDocumentation.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
@@ -27,4 +29,10 @@ export const registerVehicleDocsRoutes = (app) => {
   app.post("/api/vehicle-docs/after-trip",          verifyToken, requireRole(allowed), saveAfterTrip);
   app.put("/api/vehicle-docs/inventory-status",     verifyToken, requireRole(allowed), saveInventoryStatusHandler);
   app.patch("/api/vehicle-docs/history/:tripPhase/:bookingID", verifyToken, requireRole(editAllowed), editHistoryPhoto);
+
+  // Optional videos (max 3) and additional photos (max 20) — staff only, same as the rest of the inspection.
+  app.post("/api/vehicle-docs/:phase/videos",                 verifyToken, requireRole(allowed), videoHandlers.add);
+  app.delete("/api/vehicle-docs/:phase/videos/:mediaID",       verifyToken, requireRole(allowed), videoHandlers.remove);
+  app.post("/api/vehicle-docs/:phase/extra-photos",           verifyToken, requireRole(allowed), extraPhotoHandlers.add);
+  app.delete("/api/vehicle-docs/:phase/extra-photos/:mediaID", verifyToken, requireRole(allowed), extraPhotoHandlers.remove);
 };

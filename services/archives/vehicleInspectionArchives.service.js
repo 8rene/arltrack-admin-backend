@@ -147,7 +147,10 @@ export const getAllInspectionArchives = async () => {
       const car = carMap[data.carID];
       const shaped = shapeInspectionRecords(data.records);
       const damaged = (c) => shaped[c].reduce((n, r) => n + (Array.isArray(r.damageParts) ? r.damageParts.length : 0), 0);
-      const photos = (c) => shaped[c].reduce((n, r) => n + Object.keys(r).filter((k) => /Url$/.test(k) && r[k]).length, 0);
+      const arrLen = (r, k) => (Array.isArray(r[k]) ? r[k].length : 0);
+      // fixed exterior/part photos + any additional photos
+      const photos = (c) => shaped[c].reduce((n, r) => n + Object.keys(r).filter((k) => /Url$/.test(k) && r[k]).length + arrLen(r, "extraPhotos"), 0);
+      const videos = (c) => shaped[c].reduce((n, r) => n + arrLen(r, "videos"), 0);
       return {
         vehicleInspectionArchivesId: d.id,
         bookingID: data.bookingID,
@@ -160,6 +163,8 @@ export const getAllInspectionArchives = async () => {
         afterDamaged: damaged("inventoryAfterTrip"),
         beforePhotos: photos("vehicleDocumentationBeforeTrip"),
         afterPhotos: photos("vehicleDocumentationAfterTrip"),
+        beforeVideos: videos("vehicleDocumentationBeforeTrip"),
+        afterVideos: videos("vehicleDocumentationAfterTrip"),
         archivedAt: toISO(data.archivedAt),
         archivedBy: data.archivedBy || null,
         records: shaped,

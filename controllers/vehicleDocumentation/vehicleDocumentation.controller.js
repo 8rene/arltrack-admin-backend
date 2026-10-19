@@ -4,6 +4,8 @@ import {
   saveVehicleDocAfter,
   saveInventoryStatus,
   adminReplaceHistoryPhoto,
+  addInspectionMedia,
+  removeInspectionMedia,
 } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { resolveInspectionReminderIfComplete } from "../../services/inspectionReminders/inspectionReminders.service.js";
@@ -161,3 +163,48 @@ export const saveInventoryStatusHandler = async (req, res) => {
     return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };
+
+// ─────────────────────────────────────────────
+// Videos & additional photos
+//   POST   /api/vehicle-docs/:phase/videos          (phase = before | after)
+//   POST   /api/vehicle-docs/:phase/extra-photos
+//   DELETE /api/vehicle-docs/:phase/videos/:mediaID?bookingID=
+//   DELETE /api/vehicle-docs/:phase/extra-photos/:mediaID?bookingID=
+// The browser uploads the file to Storage first, then POSTs the URL here.
+// Body (POST): { bookingID, carID, url, mimeType, sizeBytes, durationSec? }
+// ─────────────────────────────────────────────
+const KIND_BY_SEGMENT = { videos: "videos", "extra-photos": "extraPhotos" };
+
+const mediaHandler = (segment) => ({
+  add: async (req, res) => {
+    try {
+      const { phase } = req.params;
+      const { bookingID, carID, url, mimeType, sizeBytes, durationSec } = req.body || {};
+      const result = await addInspectionMedia({
+        phase, kind: KIND_BY_SEGMENT[segment], bookingID, carID, url, mimeType, sizeBytes, durationSec,
+        addedBy: req.user?.uid || req.user?.userID || null,
+      });
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      console.error(`[VEHICLE_DOCS] add ${segment} error:`, error);
+      return res.status(400).json({ success: false, message: error.message });
+    }
+  },
+  remove: async (req, res) => {
+    try {
+      const { phase, mediaID } = req.params;
+      const bookingID = req.query.bookingID || req.body?.bookingID;
+      const result = await removeInspectionMedia({
+        phase, kind: KIND_BY_SEGMENT[segment], bookingID, mediaID,
+        removedBy: req.user?.uid || req.user?.userID || null,
+      });
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      console.error(`[VEHICLE_DOCS] remove ${segment} error:`, error);
+      return res.status(400).json({ success: false, message: error.message });
+    }
+  },
+});
+
+export const videoHandlers = mediaHandler("videos");
+export const extraPhotoHandlers = mediaHandler("extra-photos");

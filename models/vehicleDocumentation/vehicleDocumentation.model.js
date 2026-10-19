@@ -14,6 +14,8 @@ export const VehicleDocumentationBeforeTrip = {
   sideViewUrl:   "",                    // required
   backViewUrl:   "",                    // required
   // [dynamic part fields]              // e.g. leftMirrorUrl, rightHeadlightUrl, …
+  videos: [],                           // optional — see INSPECTION_MEDIA below
+  extraPhotos: [],                      // optional — free pictures, see INSPECTION_MEDIA below
   createdAt: null,
   updatedAt: null,
 };
@@ -29,9 +31,34 @@ export const VehicleDocumentationAfterTrip = {
   sideViewUrl:   "",                   // required
   backViewUrl:   "",                   // required
   // [dynamic part fields]             // e.g. leftMirrorUrl, rightHeadlightUrl, …
+  videos: [],                          // optional — see INSPECTION_MEDIA below
+  extraPhotos: [],                     // optional — free pictures, see INSPECTION_MEDIA below
   createdAt: null,
   updatedAt: null,
 };
+
+// ─────────────────────────────────────────────
+// Optional free-form media on both docs above.
+//
+//   videos:      [{ id, url, durationSec, sizeBytes, mimeType, uploadedBy, uploadedAt }]
+//   extraPhotos: [{ id, url, sizeBytes, mimeType, uploadedBy, uploadedAt }]
+//
+// They sit beside the fixed front/side/back fields and the per-part fields,
+// never instead of them: the three exterior photos stay required, videos and
+// extra photos are always optional. uploadedAt is an ISO string (not a
+// Firestore Timestamp) so it survives being copied into/out of the archive.
+// Files are uploaded straight to Firebase Storage by the browser; the backend
+// only ever receives the resulting URL (Vercel's request-body limit is far too
+// small for video).
+// ─────────────────────────────────────────────
+export const INSPECTION_MEDIA = {
+  videos:      { field: "videos",      max: 3,  label: "video" },
+  extraPhotos: { field: "extraPhotos", max: 20, label: "additional photo" },
+};
+// Hard limits for a single video file — also enforce these in Storage rules.
+export const MAX_VIDEO_BYTES = 250 * 1024 * 1024; // 250 MB
+export const MAX_VIDEO_SECONDS = 180;             // 3 minutes
+export const MAX_EXTRA_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
 
 // ─────────────────────────────────────────────
 // Helper: convert a part name string to its URL field key
