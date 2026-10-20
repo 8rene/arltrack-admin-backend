@@ -408,6 +408,7 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
       deposit: payment.depositPaymongoFee ?? null,
       balance: payment.balancePaymongoFee ?? null,
       total:   payment.paymongoFeeTotal ?? null,
+      keptOnRefunds: payment.paymongoFeeOnRefunds ?? null, // PayMongo fee kept on charges that were refunded (not in total)
     },
 
     // Penalties paid online ({ paymongoFee, paid, count } from the entries), or null when none was. getPaymentById() completes
