@@ -10,7 +10,7 @@ import { computeAmounts, derivePaymentStage } from "../../services/payments/paym
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
-import { planOnlineDepositReturn, sendOnlineDepositReturn, onlineDepositReturnOption, getDepositReturnForBooking } from "../../services/depositReturn/depositReturn.service.js";
+import { planOnlineDepositReturn, sendOnlineReturns, onlineDepositReturnOption, getDepositReturnForBooking } from "../../services/depositReturn/depositReturn.service.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
 import { getDiscountFigures } from "../payments/discountLedger.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
@@ -561,8 +561,9 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
     customerUserID = payment.userID || booking.userID || null;
   }
 
-  // Settles the deposit and saves the return row in one transaction. Online, that row is "pending" -- the claim that
-  // makes a second click or a retry fail here, before any money is sent.
+  // Settles the deposit and saves the payout rows in one transaction: the deposit's (deposit_return) and the discount
+  // credit's (discount_return), separate rows. Online, they are "pending" -- the claim that makes a second click or a
+  // retry fail here, before any money is sent.
   const res = await settleBooking({
     bookingID: bID, actorUid: performedBy,
     returnMethod: goOnline ? null : (method || null), returnReferenceNumber: referenceNumber,
@@ -570,12 +571,15 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
   });
   if (res?.error) throw new Error(res.error);
 
-  // Only now is PayMongo called (never inside the transaction). sendOnlineDepositReturn never throws: the deposit is
-  // already settled, so a refusal is reported back and the return waits for a retry or an in-store hand-back.
+  // Only now is PayMongo called (never inside the transaction). sendOnlineReturns never throws: the deposit is already
+  // settled, so a refusal is reported back and that return waits for a retry or an in-store hand-back. The deposit and the
+  // discount credit are two separate PayMongo refunds, each with its own outcome.
   let onlineResult = null;
-  if (goOnline && res.net > 0 && res.returnEntryID) {
-    onlineResult = await sendOnlineDepositReturn({
-      bookingID: bID, paymentID: res.paymentID, entryID: res.returnEntryID, amount: res.net,
+  if (goOnline && (res.returnEntryID || res.creditEntryID)) {
+    onlineResult = await sendOnlineReturns({
+      bookingID: bID, paymentID: res.paymentID,
+      deposit: res.returnEntryID ? { entryID: res.returnEntryID, amount: res.depositReturn } : null,
+      credit: res.creditEntryID ? { entryID: res.creditEntryID, amount: res.creditReturn } : null,
       paymongoPaymentID: onlinePlan.paymongoPaymentID, performedBy, customerUserID: customerUserID || res.userID || null,
     });
   }
@@ -583,7 +587,7 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
   createAuditLog({
     action: "update", userID: performedBy, bookingID: bID,
     description: res.net > 0
-      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} ${goOnline ? `being returned online through PayMongo (${onlineResult?.state === "failed" ? "PayMongo refused it — needs follow-up" : "waiting for PayMongo"})` : `returned via ${method}`}.`
+      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} ${res.creditReturn > 0 ? `(₱${res.depositReturn} deposit + ₱${res.creditReturn} discount credit, as separate returns) ` : ""}${goOnline ? `being returned online through PayMongo (${onlineResult?.state === "failed" ? "PayMongo refused it — needs follow-up" : onlineResult?.state === "partial" ? "one of the two was refused — needs follow-up" : "waiting for PayMongo"})` : `returned via ${method}`}.`
       : `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ${res.outstandingAfterDeposit > 0 ? `₱${res.outstandingAfterDeposit} still owed by the customer` : "nothing to return"}.`,
   }).catch((err) => console.error("[AuditLog] Deposit settle log failed:", err.message));
 

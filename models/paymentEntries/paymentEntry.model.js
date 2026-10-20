@@ -43,18 +43,21 @@
 // Deposit offsets (penalties covered by the held security deposit) are NOT entries: no money moves, they are
 // adjustments and stay on payments (depositSettled / depositStatus ...).
 //
-// Staff discounts ARE written as rows, but as direction "internal": no cash is received or released, value just moves
-// between the discount's buckets. One row per real event:
+// Staff discounts ARE written as rows. Three are direction "internal": no cash is received or released, value just moves
+// between the discount's parts. One row per real event:
 //     (auto ID)  discount_applied_balance   a discount given while the payment is still partial; it came off the
 //                                           remaining balance. Nothing is owed back.
 //     (auto ID)  discount_credit            a discount given on a FULLY PAID booking. The customer has already paid
-//                                           it, so it is held and returned with the security deposit at the end.
+//                                           it, so it is held and returned when the trip is settled.
 //     (auto ID)  discount_applied_penalty   part of the held credit that covered a penalty the deposit could not
 //                                           (penaltyID is set).
-//     (auto ID)  discount_return            the credit that went back to the customer at settlement. The CASH moves in
-//                                           the booking's deposit_return row (one payout); this row says how much of
-//                                           that payout was the discount. groupID = that deposit_return row's id.
+// The fourth is real money, direction "out":
+//     (auto ID)  discount_return            the held credit paid back to the customer at settlement. Its OWN payout,
+//                                           separate from the deposit's deposit_return row: same way of returning (in
+//                                           store -> success now; online -> pending until PayMongo confirms, with its own
+//                                           refund id), same retry and in-store hand-back, a newer row supersedes a failed one.
 // "internal" rows are never counted in paid-in / refunded-out totals: those filter on "in" and "out" only.
+// discount_return counts in refundedOut like the legacy "discount" refund did (the money did leave).
 // Legacy discounts (phase "discount", direction "out") are untouched: they were refunded on the spot.
 
 export const ENTRY_COLLECTION = "paymentEntries";

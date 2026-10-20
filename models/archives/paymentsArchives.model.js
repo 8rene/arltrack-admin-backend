@@ -42,10 +42,13 @@ export const PaymentsArchive = {
   status: "",              // "paid" | "pending" | "cancelled" | "Refunded" ...
   // paymongoSessionID is not stored: the session id is paymentEntries.sessionID (read back by hydratePayment).
   checkoutUrl: "",
-  discountAmount: 0,
-  discountReason: "",
-  discountBy: "",
+  discountAmount: 0,        // running total of every discount given
+  discountReason: "",       // legacy discounts only (a new discount's reason is in the activity log)
+  discountBy: "",           // legacy discounts only (a new discount's staff is on its paymentEntries row)
   discountAt: null,
+  discountApplied: null,    // see payment.model.js: null = legacy / none, never default to 0
+  discountCredit: null,
+  discountReturned: null,
   refundDue: 0,
   refundIssued: false,
   depositStatus: "",       // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"

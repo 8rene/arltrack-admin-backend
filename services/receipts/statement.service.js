@@ -101,6 +101,7 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
     if (e.direction === "out") {
       if (e.phase === "deposit_return") return "Security deposit returned";
       if (e.phase === "discount") return "Discount refund";
+      if (e.phase === "discount_return") return "Discount credit returned";
       return `Refund of ${String(PHASE_LABEL[e.phase] || "payment").toLowerCase()}`;
     }
     return `${PHASE_LABEL[e.phase] || "Payment"} payment`;

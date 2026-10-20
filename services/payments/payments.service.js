@@ -290,7 +290,7 @@ export const deriveDiscountRefund = (payment, entries = []) => {
   // A LEDGER discount (see discountLedger.js) never refunds on the spot. Where its money stands:
   //   deducted   it came off the balance / paid penalties: nothing is owed back
   //   held       credit is held and goes back with the security deposit at settlement
-  //   processing | failed | returned   the payout that carried the credit (the booking's deposit_return row)
+  //   processing | failed | returned   its own payout (the discount_return row): PayMongo working on it, refused it, or done
   // `view` is the full picture for the screen (figures, history, whether the stored numbers still match the rows).
   if (getDiscountFigures(payment).ledger) {
     const view = getDiscountView(payment, entries);
@@ -753,14 +753,13 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy, actorI
     const cur = await tx.get(doc.ref);
     if (!cur.exists) throw new Error("No payment record found for this booking.");
     const c = getDiscountFigures(cur.data());
-    if (c.total !== figuresBefore.total || c.ledger !== figuresBefore.ledger || c.credit !== figuresBefore.credit || c.appliedBalance !== figuresBefore.appliedBalance) {
+    if (c.total !== figuresBefore.total || c.ledger !== figuresBefore.ledger || c.credit !== figuresBefore.credit || c.applied !== figuresBefore.applied) {
       throw new Error("This booking's discount changed a moment ago. Please refresh and try again.");
     }
     tx.update(doc.ref, {
       ...newFigures,
-      discountReason: reason || "",                     // the LATEST discount's reason; each one's reason is in the activity log
-      discountBy:     appliedBy || "—",
-      discountAt:     admin.firestore.FieldValue.serverTimestamp(),
+      // Who gave it and when is on the ledger row below. The reason isn't stored: it is in the activity log.
+      discountAt:     admin.firestore.FieldValue.serverTimestamp(),   // when the LATEST discount was given
       refundDue:      0,                                // nothing is handed back on the spot any more
       updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -941,9 +940,10 @@ export const getDiscountRefunds = async () => {
     const key = payment.paymentID || payment.id;
     const refund = deriveDiscountRefund(payment, entries.get(key) || []);
     if (!refund || refund.state === "deducted") continue;
-    // This list is for discounts that were REFUNDED on the spot (legacy). A ledger discount is not a refund: its credit
-    // goes back inside the booking's deposit return, which already has its own row on the Refund Requests page.
-    if (refund.view && refund.view.ledger) continue;
+    // A ledger discount only belongs here once its credit has a payout (processing / failed / returned). While it is
+    // still held, nothing is owed yet, so there is nothing to follow up on this page.
+    const ledger = !!(refund.view && refund.view.ledger);
+    if (ledger && refund.state === "held") continue;
     const booking = payment.bookingID ? await findBookingByBookingID(payment.bookingID) : null;
     items.push({
       paymentID: key,
@@ -952,6 +952,7 @@ export const getDiscountRefunds = async () => {
       discountAmount: Number(payment.discountAmount) || 0,
       discountReason: payment.discountReason || "",
       discountAt: isoOf(payment.discountAt),
+      ledger,                                   // true: the credit goes back through the deposit-return retry, not the legacy one
       refund,
     });
   }
@@ -972,7 +973,7 @@ export const retryDiscountRefund = async (bookingID, retriedBy) => {
   const payment = await hydratePaymentData(doc.data(), doc.id);
 
   if (getDiscountFigures(payment).ledger) {
-    throw new Error("This discount goes back with the security deposit, so there is nothing to retry here. Retry the deposit return instead.");
+    throw new Error("This discount's credit goes back with the deposit return: retry it from there (PATCH /api/bookings/:id/deposit-return/retry), not here.");
   }
   const state = await getDiscountRefundState(payment, doc.id);
   if (!state || state.state !== "failed") {

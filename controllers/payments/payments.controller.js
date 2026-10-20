@@ -8,6 +8,7 @@ import {
   markRefundIssued,
   retryDiscountRefund,
 } from "../../services/payments/payments.service.js";
+import { applyCreditToUnpaidPenalties } from "../../services/penalty/penalty.service.js";
 
 // The acting staff member as a uid -- what paymentEntries.processedBy stores (same convention as the refund and
 // penalty controllers). The email is only a fallback for tokens that carry no uid.
@@ -56,7 +57,17 @@ export const discountPayment = async (req, res) => {
     const { amount, reason } = req.body;
     const appliedBy = req.user?.email || req.user?.uid || "staff";
     const result = await applyDiscount(bookingID, amount, reason, appliedBy, actorUid(req));
-    return res.status(200).json({ success: true, data: result, message: "Discount applied." });
+    // A discount on a fully paid booking is held as credit. If a penalty is still unpaid, the credit pays it right away
+    // (credit only, never the deposit). The discount is already saved, so this never fails the request.
+    let paidPenalties = null;
+    if (result.kind === "credit") {
+      const r = await applyCreditToUnpaidPenalties(bookingID, actorUid(req));
+      if (r.fromCredit > 0) {
+        paidPenalties = r;
+        result.creditHeld = Math.max(0, Math.round((result.creditHeld - r.fromCredit) * 100) / 100);
+      }
+    }
+    return res.status(200).json({ success: true, data: { ...result, creditPaidPenalties: paidPenalties ? paidPenalties.fromCredit : 0 }, message: "Discount applied." });
   } catch (error) {
     // Every failure this function throws is an expected business-rule
     // rejection (exceeds total fee, no driver assigned yet, etc.), already

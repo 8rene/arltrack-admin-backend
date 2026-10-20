@@ -422,11 +422,13 @@ export const confirmPenalty = async (penaltyID, actorUid = null) => {
 // Raises the penalty's paidAmount (so it reads Paid / Partially Paid, not Pending) and adds the pesos used to
 // payments.depositSettled. settleBooking() later counts that as already used, so nothing is taken twice.
 // What the deposit can't cover is paid from the discount credit held for the customer (if there is any): the credit
-// moves to discountAppliedPenalty and an "internal" discount_applied_penalty row says so, in the same transaction.
+// moves to discountApplied and an "internal" discount_applied_penalty row says so, in the same transaction.
 // Whatever neither can cover stays on the penalty as unpaid.
 // Returns { applied (from the deposit), fromCredit, ... }.
 // ─────────────────────────────────────────────
-export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
+//   { creditOnly: true } skips the deposit and draws from the credit alone: used when a discount is given while a penalty
+//   is unpaid, so a penalty staff chose not to take from the deposit isn't taken from it behind their back.
+export const applyPenaltyToDeposit = async (penaltyID, actorUid = null, { creditOnly = false } = {}) => {
   const penRef = db.collection("penalties").doc(penaltyID);
   const first = await penRef.get();
   if (!first.exists || !first.data().paymentID) return { applied: 0, fromCredit: 0 };
@@ -443,7 +445,7 @@ export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
 
     const owed = Math.max(0, (pen.amount || 0) - (pen.paidAmount || 0));
     const free = Math.max(0, dep.amount - (dep.applied || 0));
-    const use = round2(Math.min(owed, free));
+    const use = creditOnly ? 0 : round2(Math.min(owed, free));
     const fromCredit = creditDrawFor(pay, round2(owed - use));   // the deposit first, then the held discount credit
     if (!(use > 0) && !(fromCredit > 0)) return { applied: 0, fromCredit: 0 };
 
@@ -508,6 +510,31 @@ export const applyPenaltyToDeposit = async (penaltyID, actorUid = null) => {
       action: "update", userID: actorUid, bookingID: out.bookingID, paymentID: out.paymentID,
       description: `Deducted \u20b1${out.fromCredit} from the held discount credit for penalty ${penaltyID} on booking ${out.bookingID} (the security deposit was not enough).`,
     }).catch(() => {});
+  }
+  return out;
+};
+
+// ─────────────────────────────────────────────
+// A discount was just given on a fully paid booking while a penalty is still unpaid: the held credit pays it right away
+// (oldest penalty first, up to what each owes). Credit only -- never the deposit (see applyPenaltyToDeposit). What the
+// credit can't cover stays unpaid; what is left of the credit stays held and goes back at settlement.
+// Never throws: the discount itself is already saved, so a failure here is reported, not rolled back.
+// Returns { fromCredit, penalties: [{ penaltyID, amount }] }.
+// ─────────────────────────────────────────────
+export const applyCreditToUnpaidPenalties = async (bookingID, actorUid = null) => {
+  const out = { fromCredit: 0, penalties: [] };
+  try {
+    const snap = await db.collection("penalties").where("bookingID", "==", bookingID).get();
+    const unpaid = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((p) => p.status === "Confirmed" && (p.paidAmount || 0) < (p.amount || 0))
+      .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
+    for (const p of unpaid) {
+      const r = await applyPenaltyToDeposit(p.id, actorUid, { creditOnly: true });
+      if (r.fromCredit > 0) { out.fromCredit = round2(out.fromCredit + r.fromCredit); out.penalties.push({ penaltyID: p.id, amount: r.fromCredit }); }
+    }
+  } catch (err) {
+    console.error("[PENALTY] applying discount credit to unpaid penalties failed:", err.message);
   }
   return out;
 };
@@ -719,7 +746,7 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       throw new Error("This booking's deposit has already been settled.");
     }
 
-    let returnEntryID = null;                      // the deposit_return row written below, when money goes back
+    let returnEntryID = null;                      // the deposit_return row written below, when deposit money goes back
     const alreadyApplied = deposit.applied || 0;   // already used for penalties when they were confirmed
 
     // The deposit, the penalties and the discount credit held for the customer, worked out in one place (pure, tested):
@@ -773,16 +800,16 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
       depositSettledAt: timestamp(),
       deposit: admin.firestore.FieldValue.delete(),   // the old nested object, if this payment still has one
       // The held discount credit is closed out in the same transaction: what paid penalties moves to
-      // discountAppliedPenalty, what goes back moves to discountReturned, and the credit is 0.
+      // discountApplied, what goes back moves to discountReturned, and the credit is 0.
       ...(credit > 0 ? applySettlement(payment, plan) : {}),
     });
 
-    // The payout is saved as ONE paymentEntries row (phase "deposit_return"): the deposit's leftover plus the discount
-    // credit's leftover, in the same transaction. That keeps the existing return flow (one PayMongo refund, the webhook,
-    // retry, in-store hand-back) working unchanged.
-    if (plan.payout > 0) {
+    // Two payouts, written together with the settlement. They are separate on purpose: the deposit and the discount credit
+    // are different money, each has its own row, status and (online) PayMongo refund, and a failure of one never
+    // hides the other. Same way of returning for both: in store (done now) or through PayMongo (pending until confirmed).
+    const methodKey = String(returnMethod || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    const writePayout = (phase, amount) => {
       const entryRef = db.collection(ENTRY_COLLECTION).doc();
-      const methodKey = String(returnMethod || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
       const now = new Date();
       tx.set(entryRef, {
         paymentEntryID: entryRef.id,
@@ -792,10 +819,10 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
         refundReqID: null,
         penaltyID: null,
         direction: "out",
-        phase: "deposit_return",
+        phase,
         source: onlineReturn ? "online" : "in_person",
         method: onlineReturn ? null : (ENTRY_METHODS.includes(methodKey) ? methodKey : null),
-        amount: plan.payout,
+        amount,
         status: onlineReturn ? "pending" : "success",   // online: PayMongo confirms afterwards (webhook)
         referenceNumber: onlineReturn ? null : (String(returnReferenceNumber || "").trim() || null),
         sessionID: null,
@@ -808,44 +835,39 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
         createdAt: now,
         updatedAt: now,
       });
-      returnEntryID = entryRef.id;
-
-      // The part of that payout that is the discount: an "internal" row (the cash is in the row above), linked to it.
-      if (plan.creditReturn > 0) {
-        const dRef = db.collection(ENTRY_COLLECTION).doc();
-        tx.set(dRef, {
-          paymentEntryID: dRef.id, paymentID, bookingID, userID: payment.userID || null,
-          refundReqID: null, penaltyID: null,
-          direction: "internal", phase: DISCOUNT_PHASES.return,
-          source: null, method: null, amount: plan.creditReturn, status: "success",
-          referenceNumber: null, sessionID: null, transactionFee: null,
-          processedBy: actorUid || null, processedAt: now, settledAt: now,
-          groupID: entryRef.id,
-          transactionErrorNote: null, createdAt: now, updatedAt: now,
-        });
-      }
-    }
+      return entryRef.id;
+    };
+    let creditEntryID = null;
+    if (plan.depositReturn > 0) returnEntryID = writePayout("deposit_return", plan.depositReturn);
+    if (plan.creditReturn > 0) creditEntryID = writePayout(DISCOUNT_PHASES.return, plan.creditReturn);
 
     const outstandingAfterDeposit = plan.stillOwed; // > 0 only when the deposit AND the credit could not cover the penalties
     return {
       confirmedPenaltyTotal: confirmedPenaltyTotal + alreadyApplied, net, settlementStatus, outstandingAfterDeposit, coveredPenalties, creditCovered,
-      userID: payment.userID, returnEntryID, depositReturn: plan.depositReturn, creditReturn: plan.creditReturn, creditUsed: plan.creditUsed,
+      userID: payment.userID, returnEntryID, creditEntryID, depositReturn: plan.depositReturn, creditReturn: plan.creditReturn, creditUsed: plan.creditUsed,
     };
   });
 
   // Logged once the transaction has actually committed — same
   // "log the final state" convention as everywhere else in this app.
-  // 1) The money handed back, if any.
+  // 1) The money handed back, if any: the deposit and the discount credit are logged separately, like their rows.
   // An online return is logged by the PayMongo webhook once PayMongo confirms it (same logID), not before.
-  if (result.net > 0 && !onlineReturn) {
+  if (result.depositReturn > 0 && !onlineReturn) {
     await createTransactionLog({
       bookingID, paymentID, userID: result.userID,
-      type: "DepositReturn", amount: result.net, status: "Success",
+      type: "DepositReturn", amount: result.depositReturn, status: "Success",
       paymentMethod: returnMethod, referenceNumber: returnReferenceNumber, performedBy: actorUid,
-      description: result.creditReturn > 0
-        ? `Security deposit returned after settlement, together with ₱${result.creditReturn} of discount credit (₱${result.depositReturn} deposit + ₱${result.creditReturn} discount).`
-        : "Security deposit returned after settlement.",
+      description: "Security deposit returned after settlement.",
       logID: `${paymentID}_deposit_settled`,
+    });
+  }
+  if (result.creditReturn > 0 && !onlineReturn) {
+    await createTransactionLog({
+      bookingID, paymentID, userID: result.userID,
+      type: "Discount", amount: result.creditReturn, status: "Success",
+      paymentMethod: returnMethod, referenceNumber: returnReferenceNumber, performedBy: actorUid,
+      description: "Discount credit returned to the customer after settlement.",
+      logID: `${paymentID}_discount_returned`,
     });
   }
   // 2) One log per penalty the deposit paid toward, with that penalty's own penaltyID and the amount the deposit
@@ -882,9 +904,10 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
     net: result.net,
     settlementStatus: result.settlementStatus,
     outstandingAfterDeposit: result.outstandingAfterDeposit,
-    returnEntryID: result.returnEntryID,
-    depositReturn: result.depositReturn,   // the deposit's own part of the payout
-    creditReturn: result.creditReturn,     // the discount credit's part of the same payout
+    returnEntryID: result.returnEntryID,   // the deposit_return row (null when no deposit money goes back)
+    creditEntryID: result.creditEntryID,   // the discount_return row (null when no credit goes back)
+    depositReturn: result.depositReturn,   // the deposit's own payout
+    creditReturn: result.creditReturn,     // the discount credit's payout, separate from the deposit's
     creditUsed: result.creditUsed,         // credit that paid penalties the deposit could not
   };
 };

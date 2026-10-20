@@ -18,7 +18,7 @@ const toJSDate = (val) => {
 };
 
 const peso = (n) => `₱${Number(n || 0).toLocaleString("en-PH", { maximumFractionDigits: 2 })}`;
-const PHASE = { deposit: "deposit", balance: "balance", penalty: "penalty", deposit_return: "deposit return", discount: "discount" };
+const PHASE = { deposit: "deposit", balance: "balance", penalty: "penalty", deposit_return: "deposit return", discount: "discount", discount_return: "discount credit return" };
 
 const resolveVehicleName = async (carID) => {
   if (!carID) return "";

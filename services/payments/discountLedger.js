@@ -7,27 +7,30 @@
 // A discount is money the customer does not have to pay. When it is given there are two cases:
 //
 //   • the payment is still PARTIAL  -> it comes off the remaining balance. Nothing was paid yet, so nothing is owed
-//                                      back:                          discountAppliedBalance  += amount
+//                                      back:                                   discountApplied += amount
 //   • the payment is FULLY PAID     -> the customer has already paid it, so it is HELD for them and returned with
 //                                      the security deposit when the trip is settled:   discountCredit += amount
 //
 // The held credit then moves on in one of two ways:
-//   • a penalty the deposit cannot cover is paid from it:  discountCredit -= x, discountAppliedPenalty += x
-//   • at settlement what is left goes back to the customer: discountCredit -> 0, discountReturned += credit
+//   • a penalty is paid from it (right away if one is unpaid, otherwise at settlement): credit -= x, applied += x
+//   • at settlement what is left goes back to the customer, as its own payout: credit -> 0, returned += credit
 //
-// Fields on payments/{paymentID} (all written together, in the same batch as the ledger row they describe):
-//   discountAmount          total discount given, across every discount given on this booking (a running total)
-//   discountAppliedBalance  the part that came off the remaining balance
-//   discountAppliedPenalty  the part of the held credit that covered penalties
-//   discountCredit          the part still held for the customer (the only one that drains)
-//   discountReturned        the part that went back to the customer
-//   → discountAmount === discountAppliedBalance + discountAppliedPenalty + discountCredit + discountReturned
+// Fields on payments/{paymentID} (written together, in the same transaction as the ledger row they describe):
+//   discountAmount    total discount given, across every discount given on this booking (a running total)
+//   discountApplied   the part that was USED: it came off the balance or paid penalties (the rows tell which)
+//   discountCredit    the part still held for the customer (the only one that drains)
+//   discountReturned  the part that went back to the customer
+//   → discountAmount === discountApplied + discountCredit + discountReturned
+// Who gave a discount and when is on its ledger row (processedBy / processedAt). Its reason is not stored on the
+// payment or the row: it is in the activity log.
 //
-// A payment WITHOUT discountAppliedBalance is a "legacy" discount (given before this model, refunded on the spot):
+// A payment WITHOUT discountApplied is a "legacy" discount (given before this model, refunded on the spot):
 // it keeps its old behaviour everywhere and cannot be added to.
 //
-// Ledger rows live in paymentEntries as direction "internal" (see models/paymentEntries/paymentEntry.model.js):
-//   discount_applied_balance · discount_credit · discount_applied_penalty · discount_return
+// Ledger rows live in paymentEntries (see models/paymentEntries/paymentEntry.model.js):
+//   internal (no cash)  discount_applied_balance · discount_credit · discount_applied_penalty
+//   out (real money)    discount_return -- the credit paid back. Its OWN payout, separate from deposit_return: same
+//                       way of returning (in store, or its own PayMongo refund), its own status, retry and hand-back.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -42,8 +45,8 @@ export const DISCOUNT_PHASES = Object.freeze({
 });
 export const DISCOUNT_ROW_PHASES = Object.freeze(Object.values(DISCOUNT_PHASES));
 
-/** True once a payment carries the new fields (every new-style discount writes all four together). */
-export const hasDiscountLedger = (p) => !!p && p.discountAppliedBalance !== undefined && p.discountAppliedBalance !== null;
+/** True once a payment carries the new fields (every new-style discount writes all of them together). */
+export const hasDiscountLedger = (p) => !!p && p.discountApplied !== undefined && p.discountApplied !== null;
 
 /** True for a discount given before the ledger existed: refunded on the spot, never added to. */
 export const hasLegacyDiscount = (p) => !!p && num(p.discountAmount) > 0 && !hasDiscountLedger(p);
@@ -51,20 +54,13 @@ export const hasLegacyDiscount = (p) => !!p && num(p.discountAmount) > 0 && !has
 /** The discount's figures. Legacy / no discount: only `total` is meaningful. */
 export const getDiscountFigures = (p) => {
   const total = round2(p && p.discountAmount);
-  if (!hasDiscountLedger(p)) return { ledger: false, total, appliedBalance: 0, appliedPenalty: 0, credit: 0, returned: 0 };
-  return {
-    ledger: true,
-    total,
-    appliedBalance: round2(p.discountAppliedBalance),
-    appliedPenalty: round2(p.discountAppliedPenalty),
-    credit: round2(p.discountCredit),
-    returned: round2(p.discountReturned),
-  };
+  if (!hasDiscountLedger(p)) return { ledger: false, total, applied: 0, credit: 0, returned: 0 };
+  return { ledger: true, total, applied: round2(p.discountApplied), credit: round2(p.discountCredit), returned: round2(p.discountReturned) };
 };
 
 /** The identity every ledger discount must satisfy. */
 export const figuresBalance = (f) =>
-  !f.ledger || Math.abs(f.total - (f.appliedBalance + f.appliedPenalty + f.credit + f.returned)) < 0.005;
+  !f.ledger || Math.abs(f.total - (f.applied + f.credit + f.returned)) < 0.005;
 
 /**
  * Where the discount stands, for staff. Derived from the figures, never stored.
@@ -137,8 +133,7 @@ export const applyNewDiscount = (p, kind, amount) => {
   const a = round2(amount);
   return {
     discountAmount: round2(f.total + a),
-    discountAppliedBalance: round2(f.appliedBalance + (kind === "balance" ? a : 0)),
-    discountAppliedPenalty: f.appliedPenalty,
+    discountApplied: round2(f.applied + (kind === "balance" ? a : 0)),
     discountCredit: round2(f.credit + (kind === "credit" ? a : 0)),
     discountReturned: f.returned,
   };
@@ -155,8 +150,7 @@ export const applyCreditToPenalty = (p, amount) => {
   const a = Math.min(round2(amount), f.credit);
   return {
     discountAmount: f.total,
-    discountAppliedBalance: f.appliedBalance,
-    discountAppliedPenalty: round2(f.appliedPenalty + a),
+    discountApplied: round2(f.applied + a),
     discountCredit: round2(f.credit - a),
     discountReturned: f.returned,
   };
@@ -173,7 +167,7 @@ export const applyCreditToPenalty = (p, amount) => {
  * Each penalty is paid from the deposit first, then from the credit; whatever is left stays owed.
  *   → { perPenalty: [{ id, owed, fromDeposit, fromCredit, stillOwed }],
  *       depositUsed, creditUsed, depositNet, depositReturn, creditReturn, payout, stillOwed, net, confirmedPenaltyTotal }
- *   payout = depositReturn + creditReturn: the ONE amount that goes back to the customer.
+ *   depositReturn and creditReturn go back as TWO payouts (deposit_return and discount_return); `payout` is their sum.
  *   net    = payout − stillOwed (negative = the customer still owes money).
  */
 export const planSettlement = ({ depositAmount, alreadyApplied = 0, penalties = [], credit = 0 }) => {
@@ -210,8 +204,7 @@ export const applySettlement = (p, plan) => {
   const f = getDiscountFigures(p);
   return {
     discountAmount: f.total,
-    discountAppliedBalance: f.appliedBalance,
-    discountAppliedPenalty: round2(f.appliedPenalty + plan.creditUsed),
+    discountApplied: round2(f.applied + plan.creditUsed),
     discountCredit: 0,
     discountReturned: round2(f.returned + plan.creditReturn),
   };
@@ -227,58 +220,69 @@ const iso = (d) => {
   const v = d && d.toDate ? d.toDate() : d ? new Date(d) : null;
   return v && !isNaN(v) ? v.toISOString() : null;
 };
-const isDiscountRow = (e) => !!e && e.direction === "internal" && DISCOUNT_ROW_PHASES.includes(e.phase) && lower(e.status) === "success";
+// The ledger rows: the three no-cash "internal" ones (only when they succeeded) and the real-money discount_return payout
+// (whatever its status: it is how the credit went back, and a failed attempt is history too).
+const isLedgerRow = (e) => !!e && (
+  (e.direction === "internal" && [DISCOUNT_PHASES.credit, DISCOUNT_PHASES.appliedBalance, DISCOUNT_PHASES.appliedPenalty].includes(e.phase) && lower(e.status) === "success") ||
+  (e.direction === "out" && e.phase === DISCOUNT_PHASES.return)
+);
+const byTime = (a, b) => millis(a.createdAt || a.processedAt) - millis(b.createdAt || b.processedAt)
+  || String(a.id || a.paymentEntryID).localeCompare(String(b.id || b.paymentEntryID));
+const returnRows = (entries) => (entries || []).filter((e) => e && e.direction === "out" && e.phase === DISCOUNT_PHASES.return).sort(byTime);
 
 /** The discount's history, oldest first: one item per ledger row. */
 export const listDiscountEvents = (entries = []) =>
-  (entries || []).filter(isDiscountRow)
-    .sort((a, b) => millis(a.createdAt || a.processedAt) - millis(b.createdAt || b.processedAt) || String(a.id || a.paymentEntryID).localeCompare(String(b.id || b.paymentEntryID)))
-    .map((e) => ({
-      id: e.id || e.paymentEntryID,
-      kind: e.phase === DISCOUNT_PHASES.appliedBalance ? "balance"
-          : e.phase === DISCOUNT_PHASES.credit ? "credit"
-          : e.phase === DISCOUNT_PHASES.appliedPenalty ? "penalty" : "return",
-      phase: e.phase,
-      amount: round2(e.amount),
-      penaltyID: e.penaltyID || null,
-      by: e.processedBy || null,
-      at: iso(e.processedAt || e.createdAt),
-    }));
+  (entries || []).filter(isLedgerRow).sort(byTime).map((e) => ({
+    id: e.id || e.paymentEntryID,
+    kind: e.phase === DISCOUNT_PHASES.appliedBalance ? "balance"
+        : e.phase === DISCOUNT_PHASES.credit ? "credit"
+        : e.phase === DISCOUNT_PHASES.appliedPenalty ? "penalty" : "return",
+    phase: e.phase,
+    amount: round2(e.amount),
+    status: lower(e.status),
+    penaltyID: e.penaltyID || null,
+    by: e.processedBy || null,
+    at: iso(e.processedAt || e.createdAt),
+  }));
 
 /**
- * Where the credit's payout stands. The cash moves in the booking's deposit_return row (one payout), so its newest
- * row decides — a retry or an in-store hand-back writes a newer one that supersedes a failed one.
- *   null | { state: "processing" | "returned" | "failed", amount, via, referenceNumber, errorNote, at }
+ * Where the credit's payout stands: the newest discount_return row decides (a retry or an in-store hand-back writes a
+ * newer one that supersedes a failed one).
+ *   null | { state: "processing" | "returned" | "failed", amount, via, method, referenceNumber, errorNote, at }
  */
 export const deriveCreditReturn = (entries = []) => {
-  const rows = (entries || []).filter((e) => e && e.direction === "internal" && e.phase === DISCOUNT_PHASES.return);
+  const rows = returnRows(entries);
   if (!rows.length) return null;
-  const amount = round2(rows.reduce((s, r) => s + num(r.amount), 0));
-  const payouts = (entries || []).filter((e) => e && e.direction === "out" && e.phase === "deposit_return")
-    .sort((a, b) => millis(b.createdAt) - millis(a.createdAt));
-  const latest = payouts[0] || null;
-  if (!latest) return { state: "returned", amount, via: null, referenceNumber: null, errorNote: null, at: iso(rows[rows.length - 1].processedAt) };
+  const latest = rows[rows.length - 1];
   const st = lower(latest.status);
   return {
     state: st === "success" ? "returned" : st === "failed" ? "failed" : "processing",
-    amount,
+    amount: round2(latest.amount),
     via: latest.source === "online" ? "paymongo" : "in_store",
+    method: latest.method || null,
     referenceNumber: latest.referenceNumber || null,
     errorNote: latest.transactionErrorNote || null,
     at: iso(latest.settledAt || latest.processedAt || latest.createdAt),
   };
 };
 
-/** The figures rebuilt from the ledger rows alone — used to prove the stored fields have not drifted. */
+/**
+ * The figures rebuilt from the ledger rows alone — used to prove the stored fields have not drifted.
+ * The credit is returned ONCE, at settlement; every retry or hand-back repeats the same amount, so the newest
+ * discount_return row (whatever its status) is the amount that was returned. `appliedBalance` / `appliedPenalty` are for
+ * display: the stored field is their sum.
+ */
 export const rebuildFiguresFromEntries = (entries = []) => {
-  const rows = (entries || []).filter(isDiscountRow);
+  const rows = (entries || []).filter(isLedgerRow);
   const sum = (phase) => round2(rows.filter((r) => r.phase === phase).reduce((s, r) => s + num(r.amount), 0));
   const creditGiven = sum(DISCOUNT_PHASES.credit);
   const appliedBalance = sum(DISCOUNT_PHASES.appliedBalance);
   const appliedPenalty = sum(DISCOUNT_PHASES.appliedPenalty);
-  const returned = sum(DISCOUNT_PHASES.return);
+  const rr = returnRows(entries);
+  const returned = rr.length ? round2(rr[rr.length - 1].amount) : 0;
   return {
     total: round2(appliedBalance + creditGiven),
+    applied: round2(appliedBalance + appliedPenalty),
     appliedBalance, appliedPenalty, returned,
     credit: round2(creditGiven - appliedPenalty - returned),
   };
@@ -293,8 +297,7 @@ export const checkDiscountLedger = (p, entries = []) => {
   const r = rebuildFiguresFromEntries(entries);
   const same = (k, label) => { if (Math.abs(f[k] - r[k]) >= 0.005) problems.push(`${label} is ₱${f[k]} on the payment but ₱${r[k]} on the ledger rows.`); };
   same("total", "The total discount");
-  same("appliedBalance", "The part taken off the balance");
-  same("appliedPenalty", "The part used on penalties");
+  same("applied", "The part used (off the balance or on penalties)");
   same("credit", "The held credit");
   same("returned", "The part returned");
   return { ok: problems.length === 0, problems };
@@ -302,15 +305,19 @@ export const checkDiscountLedger = (p, entries = []) => {
 
 /**
  * Everything the screens need about a payment's discount, in one object. `entries` = the payment's paymentEntries rows.
- *   { total, appliedBalance, appliedPenalty, credit, returned, status, ledger, creditReturn, events[], consistent, problems[] }
+ *   { total, applied, appliedBalance, appliedPenalty, credit, returned, status, ledger, creditReturn, events[], consistent, problems[] }
  * null when no discount was ever given.
  */
 export const getDiscountView = (p, entries = []) => {
   const f = getDiscountFigures(p);
   if (!(f.total > 0)) return null;
   const check = checkDiscountLedger(p, entries);
+  const rebuilt = f.ledger ? rebuildFiguresFromEntries(entries) : null;
   return {
     ...f,
+    // for display: how the used part splits (the payment stores only the sum)
+    appliedBalance: rebuilt ? rebuilt.appliedBalance : 0,
+    appliedPenalty: rebuilt ? rebuilt.appliedPenalty : 0,
     status: discountStatusOf(f),
     creditReturn: f.ledger ? deriveCreditReturn(entries) : null,
     events: f.ledger ? listDiscountEvents(entries) : [],
