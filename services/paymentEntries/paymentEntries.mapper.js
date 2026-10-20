@@ -542,7 +542,7 @@ const buildRefundEntries = (r, docID, opts = {}) => {
       phase: opts.payment && opts.payment.balanceCollected ? "balance" : "deposit",
       source: "in_person", method: mm.method,
       amount: num(m.amount), status: issued ? "success" : "pending",
-      referenceNumber: null,
+      referenceNumber: nullIfSentinel(m.referenceNumber),
       processedBy: nullIfSentinel(m.issuedBy), processedAt: orNull(m.issuedAt),
       settledAt: issued ? orNull(m.issuedAt) : null,
       transactionErrorNote: null,
@@ -608,6 +608,7 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
     out.manualRefund = {
       amount: manual.amount, issued: manual.status === "success", issuedBy: manual.processedBy || null,
       issuedAt: manual.processedAt || null, method: BALANCE_METHOD_LABEL[manual.method] || null,
+      referenceNumber: manual.referenceNumber || null,
     };
   }
   const unref = rows.filter((e) => e.status === "unrefundable").sort((a, b) => seq(a) - seq(b));

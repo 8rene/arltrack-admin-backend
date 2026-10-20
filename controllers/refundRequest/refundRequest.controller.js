@@ -76,14 +76,14 @@ export const rejectRefund = async (req, res) => {
   }
 };
 
-// PATCH /api/refund-requests/:id/manual-issued   { method: "Cash" | "GCash" | "Bank Transfer" }
+// PATCH /api/refund-requests/:id/manual-issued   { method: "Cash" | "GCash" | "Bank Transfer", referenceNumber?: string }
 // Staff confirm they physically handed back the part PayMongo can't return.
 export const manualRefundIssued = async (req, res) => {
   try {
     const { id } = req.params;
-    const { method } = req.body;
+    const { method, referenceNumber } = req.body;
     const issuedBy = req.user?.userID || req.user?.uid || null;
-    const data = await markManualRefundIssued(id, issuedBy, method || "Cash");
+    const data = await markManualRefundIssued(id, issuedBy, method || "Cash", referenceNumber);
     return res.status(200).json({
       success: true,
       message: data.refundCompleted ? "Marked as handed back. The refund is now complete." : "Marked as handed back. Waiting on PayMongo to settle the remaining part(s).",

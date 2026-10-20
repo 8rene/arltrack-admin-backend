@@ -11,7 +11,7 @@ import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.j
 import { resolveCurrentDriverID, completeActiveAssignment } from "../driverAssignments/driverAssignments.service.js";
 import { recordDirectCancellation, inferCancelledBy, getRequestsByBookingKeys, getCancellationInfoForBooking, recordRefundRejection } from "../cancellationRequests/cancellationRequests.service.js";
 import { writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
-import { normalizeMethod } from "../paymentEntries/paymentEntries.mapper.js";
+import { normalizeMethod, nullIfSentinel } from "../paymentEntries/paymentEntries.mapper.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
 import { closeCreditInRefund, getDiscountFigures, DISCOUNT_PHASES } from "../payments/discountLedger.js";
 
@@ -1268,10 +1268,13 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
 // (balance collected in person, a cash deposit, …). This is what lets a request
 // reach "Refunded" when it has a manual portion.
 // ─────────────────────────────────────────────────────────────────────────────
-export const markManualRefundIssued = async (refundRequestID, issuedBy, method = "Cash") => {
+export const markManualRefundIssued = async (refundRequestID, issuedBy, method = "Cash", referenceNumber = null) => {
   if (!PAYMENT_METHODS.includes(method)) {
     throw fail(`method must be one of: ${PAYMENT_METHODS.join(", ")}.`, 400);
   }
+  // Optional: a GCash / bank reference for the hand-back. "", "N/A", "—" count as none.
+  const refNo = nullIfSentinel(referenceNumber);
+  if (refNo && refNo.length > 100) throw fail("Reference number is too long (100 characters max).", 400);
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
   const entryCol = db.collection(ENTRY_COLLECTION);
   const manualRef = entryCol.doc(`${refundRequestID}_manual`);
@@ -1297,7 +1300,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     if (manualRow.status === "success") throw fail("This has already been marked as handed back.", 409);
 
     const now = new Date();
-    const manualRefund = { amount: manualAmount, issued: true, issuedBy: issuedBy || null, issuedAt: now, method };
+    const manualRefund = { amount: manualAmount, issued: true, issuedBy: issuedBy || null, issuedAt: now, method, referenceNumber: refNo };
     // Finished only if every PayMongo part has already settled. Otherwise the
     // customer-backend webhook completes it when the last part lands.
     const finalize = rows
@@ -1309,7 +1312,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
       ...(finalize ? { status: "Refunded", refundedAt: now } : {}),
     });
     t.update(manualRef, {
-      status: "success", method: normalizeMethod(method).method,
+      status: "success", method: normalizeMethod(method).method, referenceNumber: refNo,
       processedBy: issuedBy || null, processedAt: now, settledAt: manualRow.settledAt || now, updatedAt: now,
     });
     return {
@@ -1329,6 +1332,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     amount: r.manualRefund.amount,
     status: "Refunded",
     paymentMethod: method,
+    referenceNumber: refNo,
     description: `${peso(r.manualRefund.amount)} handed back to the customer in person (the part PayMongo couldn't return) for booking ${r.bookingID}.`,
     performedBy: issuedBy || "—",
     logID: `${refundRequestID}_manual`,
@@ -1336,7 +1340,7 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
 
   auditSafe({
     action: "update",
-    description: `Refund ${refundRequestID}: ${peso(r.manualRefund.amount)} marked as handed back to the customer via ${method}.${outcome.finalize ? " Refund complete." : " Waiting on PayMongo to settle the remaining part(s)."}`,
+    description: `Refund ${refundRequestID}: ${peso(r.manualRefund.amount)} marked as handed back to the customer via ${method}${refNo ? ` (ref ${refNo})` : ""}.${outcome.finalize ? " Refund complete." : " Waiting on PayMongo to settle the remaining part(s)."}`,
     userID: issuedBy || null,
     bookingID: r.bookingID,
     paymentID: r.paymentID,
