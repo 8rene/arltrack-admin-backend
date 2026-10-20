@@ -54,20 +54,15 @@ export const patchPaymentStatus = async (req, res) => {
 export const discountPayment = async (req, res) => {
   try {
     const { bookingID } = req.params;
-    const { amount, reason } = req.body;
+    const { amount } = req.body;   // no reason is asked for: a discount is a decision, not a request
     const appliedBy = req.user?.email || req.user?.uid || "staff";
-    const result = await applyDiscount(bookingID, amount, reason, appliedBy, actorUid(req));
     // A discount on a fully paid booking is held as credit. If a penalty is still unpaid, the credit pays it right away
-    // (credit only, never the deposit). The discount is already saved, so this never fails the request.
-    let paidPenalties = null;
-    if (result.kind === "credit") {
-      const r = await applyCreditToUnpaidPenalties(bookingID, actorUid(req));
-      if (r.fromCredit > 0) {
-        paidPenalties = r;
-        result.creditHeld = Math.max(0, Math.round((result.creditHeld - r.fromCredit) * 100) / 100);
-      }
-    }
-    return res.status(200).json({ success: true, data: { ...result, creditPaidPenalties: paidPenalties ? paidPenalties.fromCredit : 0 }, message: "Discount applied." });
+    // (credit only, never the deposit). That happens inside applyDiscount, after the discount is saved and BEFORE the
+    // customer is told, so their message says what really happened. It never fails the discount.
+    const result = await applyDiscount(bookingID, amount, appliedBy, actorUid(req), {
+      afterSave: () => applyCreditToUnpaidPenalties(bookingID, actorUid(req)),
+    });
+    return res.status(200).json({ success: true, data: result, message: "Discount applied." });
   } catch (error) {
     // Every failure this function throws is an expected business-rule
     // rejection (exceeds total fee, no driver assigned yet, etc.), already

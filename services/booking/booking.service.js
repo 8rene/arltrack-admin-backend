@@ -1165,6 +1165,18 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
     throw new Error(`Cannot approve: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
   }
 
+  // Only a trip that has NOT started can be cancelled. Approving a request cancels the booking but moves no money: the held
+  // security deposit and any held discount credit would stay held for good (settlement only runs for a completed trip), and the
+  // car has already been used. A started trip is ended by completing it (the deposit and credit are then settled), so the
+  // request is rejected instead, like a refund request for a trip that has started.
+  const session = await getSessionByBookingID(booking.bookingID || docID).catch(() => null);
+  if (session && String(session.data?.status || "").toLowerCase() === "active") {   // "active" = picked up, the car is out
+    throw new Error(
+      `Cannot approve: booking ${docID} is already under way (the car has been picked up), so it can't be cancelled from here. ` +
+      "Reject the request, or let the trip be completed so the security deposit and any discount credit are settled."
+    );
+  }
+
   const now = new Date();
   // One transaction: the request is marked approved and the booking cancelled together,
   // and both are re-read inside it, so two staff approving at once (or approving a request

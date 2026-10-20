@@ -676,7 +676,10 @@ const planDiscountRefund = (payment, amount) => {
 // The payment's discount fields and the ledger row are written in ONE transaction, so they can never disagree.
 // Flat pesos only. Staff-only to call. Drivers don't handle payments, so they are not notified.
 // ─────────────────────────────────────────────
-export const applyDiscount = async (bookingID, amount, reason, appliedBy, actorID = null) => {
+// `afterSave` (optional) runs once the discount is saved and BEFORE anyone is told about it: the controller uses it to let the
+// held credit pay a penalty that is still unpaid, so the customer's message says what actually happened to their discount.
+// It returns { fromCredit } (the credit it paid toward penalties); a failure there never fails the discount.
+export const applyDiscount = async (bookingID, amount, appliedBy, actorID = null, { afterSave = null } = {}) => {
   if (!bookingID) throw new Error("bookingID is required.");
   const discountAmount = Number(amount);
   if (!Number.isFinite(discountAmount) || discountAmount <= 0) {
@@ -758,7 +761,7 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy, actorI
     }
     tx.update(doc.ref, {
       ...newFigures,
-      // Who gave it and when is on the ledger row below. The reason isn't stored: it is in the activity log.
+      // Who gave it and when is on the ledger row below (processedBy / processedAt); no reason is asked for or kept.
       discountAt:     admin.firestore.FieldValue.serverTimestamp(),   // when the LATEST discount was given
       refundDue:      0,                                // nothing is handed back on the spot any more
       updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
@@ -793,23 +796,50 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy, actorI
   const given = newFigures.discountAmount;
   const nth = figuresBefore.total > 0 ? " (an additional discount)" : "";
 
+  // A credit may pay a penalty that is still unpaid, right now. This is done BEFORE anyone is told, so the messages below
+  // describe what really happened to the discount (and can't say "returned with your deposit" about money that was just used).
+  let usedOnPenalties = 0;
+  if (kind === "credit" && typeof afterSave === "function") {
+    try { usedOnPenalties = Number((await afterSave())?.fromCredit) || 0; }
+    catch (err) { console.error("[PAYMENTS] could not apply the discount credit to an unpaid penalty:", err.message); }
+  }
+  const creditHeld = Math.max(0, Math.round((newFigures.discountCredit - usedOnPenalties) * 100) / 100);
+  let penaltyLeft = 0;
+  if (usedOnPenalties > 0) {
+    const pens = await db.collection("penalties").where("bookingID", "==", bookingID).get();
+    penaltyLeft = pens.docs
+      .map((d) => d.data())
+      .filter((p) => p.status === "Confirmed")
+      .reduce((s, p) => s + Math.max(0, (Number(p.amount) || 0) - (Number(p.paidAmount) || 0)), 0);
+    penaltyLeft = Math.round(penaltyLeft * 100) / 100;
+  }
+  const money = (n) => `₱${n.toLocaleString()}`;
+
+  // What the discount did, in words. Same wording for the staff bell, the log and the audit trail; the customer's is below.
+  const what = kind === "balance"
+    ? `the remaining balance is now ${money(after.balance)}`
+    : usedOnPenalties > 0
+      ? `${money(usedOnPenalties)} paid toward an unpaid penalty${creditHeld > 0 ? `, ${money(creditHeld)} held for the customer` : ""}`
+      : "the booking was already fully paid, so it is held for the customer and returns with the security deposit";
+
   // Bell ping to Owner/Admin/Supervisor for every discount.
   await notifyStaff({
     type: "discount_applied",
     refID: bookingID,
     refCollection: "bookings",
     title: "Discount Applied",
-    message: `A discount of ₱${discountAmount.toLocaleString()} was applied to booking ${bookingID}${nth}${reason ? ` (${reason})` : ""}. ${
-      kind === "credit" ? "The booking was already fully paid, so it is held and returns with the security deposit." : `The remaining balance is now ₱${after.balance.toLocaleString()}.`}`,
+    message: `A discount of ${money(discountAmount)} was applied to booking ${bookingID}${nth}: ${what}.`,
   });
 
-  // Customer-facing bell: what the discount did for THEM.
-  await notifyCustomer(
-    customerUserID, bookingID, "discount_applied", "Discount Applied",
-    kind === "credit"
-      ? `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Since you've already paid in full, it will be returned to you together with your security deposit after your trip.`
-      : `A discount of ₱${discountAmount.toLocaleString()} was applied to your booking ${bookingID}. Your remaining balance is now ₱${after.balance.toLocaleString()}.`
-  );
+  // Customer-facing bell: what the discount did for THEM. The held credit is only returned after the trip, and a penalty
+  // the deposit couldn't cover can use it, so the message says "less any penalties" instead of promising all of it back.
+  const customerText =
+    kind === "balance"
+      ? `A discount of ${money(discountAmount)} was applied to your booking ${bookingID}. Your remaining balance is now ${money(after.balance)}.`
+      : usedOnPenalties > 0
+        ? `A discount of ${money(discountAmount)} was applied to your booking ${bookingID}. ${money(usedOnPenalties)} of it went toward your pending penalty${penaltyLeft > 0 ? `, which is now ${money(penaltyLeft)}` : ", which is now fully covered"}.${creditHeld > 0 ? ` The remaining ${money(creditHeld)} will be returned together with your security deposit after your trip, less any penalties.` : ""}`
+        : `A discount of ${money(discountAmount)} was applied to your booking ${bookingID}. Since you've already paid in full, it will be returned to you together with your security deposit after your trip, less any penalties.`;
+  await notifyCustomer(customerUserID, bookingID, "discount_applied", "Discount Applied", customerText);
 
   createTransactionLog({
     bookingID,
@@ -818,15 +848,13 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy, actorI
     type: "Discount",
     amount: discountAmount,
     status: "Success",
-    description: `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${reason ? `: ${reason}` : ""}${
-      kind === "credit" ? " (held, returns with the security deposit)" : " (taken off the remaining balance)"}.`,
+    description: `Discount of ${money(discountAmount)} given on booking ${bookingID}: ${what}.`,
     performedBy: appliedBy || "—",
   });
 
   auditSafe({
     action: "update",
-    description: `Discount of ₱${discountAmount.toLocaleString()} given on booking ${bookingID}${nth}${reason ? ` (${reason})` : ""}${
-      kind === "credit" ? `; held for the customer, returns with the security deposit (₱${given.toLocaleString()} discounts in total)` : `; remaining balance is now ₱${after.balance.toLocaleString()}`}.`,
+    description: `Discount of ${money(discountAmount)} given on booking ${bookingID}${nth}: ${what} (${money(given)} discounts in total).`,
     userID: appliedBy || null,
     bookingID,
     paymentID,
@@ -836,7 +864,8 @@ export const applyDiscount = async (bookingID, amount, reason, appliedBy, actorI
     id: doc.id, bookingID, discountAmount,
     discountTotal: given,
     kind,                                   // "balance" | "credit"
-    creditHeld: newFigures.discountCredit,
+    creditHeld,                             // still held for the customer, after any penalty it just paid
+    creditPaidPenalties: usedOnPenalties,   // the part that paid an unpaid penalty
     balanceAfter: after.balance,
   };
 };

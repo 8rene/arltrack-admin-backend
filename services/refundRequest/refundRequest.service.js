@@ -1570,6 +1570,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
   // ── cancel only, no refund ──
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   let retained = 0;
+  let keepDeposit = null;   // set when the held deposit has to be closed as kept, once the booking is cancelled
   if (!paymentSnap.empty) {
     const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
     const paymentID = payment.paymentID || paymentSnap.docs[0].id;
@@ -1577,11 +1578,30 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
     if (open) {
       throw fail("The customer has an open refund request for this booking. Approve or reject it from the Refund Requests page first.", 409);
     }
-    if (lower(payment.status) !== "refunded") retained = computeRefundPlan(payment).total;
+    if (lower(payment.status) !== "refunded") {
+      const plan = computeRefundPlan(payment);
+      // A discount credit held for the customer is money they paid on top of what they owe, and the only way it goes back is
+      // with a settlement (a completed trip) or inside a refund. This booking will never be completed, so cancelling it without
+      // a refund would leave that money held for good. Refund-and-cancel returns it; there is no "keep it" option here.
+      if (plan.heldCredit > 0) {
+        throw fail(
+          `This booking holds ${peso(plan.heldCredit)} of discount credit that belongs to the customer, and it can only go back inside a refund. ` +
+          "Use \"Refund & cancel\" instead of cancelling without a refund.",
+          409
+        );
+      }
+      retained = plan.total;
+      keepDeposit = { ref: paymentSnap.docs[0].ref, payment };
+    }
   }
 
   const cancel = await cancelBookingForRefund(bookingID, `Cancelled by admin: ${cleanReason}`, adminUserID);
   if (!cancel.cancelled) throw fail(`Booking could not be cancelled (status is "${cancel.status || booking.status}").`, 409);
+
+  // Nothing is going back, so the held security deposit is kept: close it as forfeited. Left "Held" it would look like money
+  // still owed to the customer, and settlement only runs for a completed trip, so nothing would ever close it. Done only
+  // once the booking is really cancelled, so a failed cancel never forfeits a deposit.
+  if (keepDeposit) await markDepositAfterRefund(keepDeposit.ref, keepDeposit.payment, getDepositAmount(keepDeposit.payment));
 
   await notifyCustomer(
     booking.userID, bookingID, "booking_cancelled", "Booking Cancelled",
