@@ -616,6 +616,16 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
     }
   });
 
+  // Only a booking that has NOT started can be cancelled here ("to pay" / "upcoming"). An ongoing trip is never cancelled:
+  // the car is out, the security deposit is held, and a cancellation would leave that deposit (and any held discount
+  // credit) with no way to be returned, because settlement only runs on a completed booking.
+  if (filtered.status === "cancelled" && !["to pay", "upcoming"].includes(String(oldStatus || "").toLowerCase())) {
+    throw new Error(
+      `Cannot cancel booking ${bookingID || docID}: it is "${oldStatus}". A trip that has already started can't be cancelled -- ` +
+      "reject the request instead, or drop the car off and complete the trip, then return the deposit."
+    );
+  }
+
   // ── Changing the dates of a booking that already has a driver must not give that driver a real
   // overlap. (A tight gap is allowed, same as everywhere else it is only a warning.) A booking
   // that is being cancelled/completed in the same edit is skipped. ──
@@ -1154,6 +1164,20 @@ const findPendingCancellation = async (docID, booking) => {
   return { request, pending: !!request };
 };
 
+// A cancellation request is only honoured while the booking has NOT started ("to pay" / "upcoming"). Once the trip is
+// ongoing the car is out, the security deposit is held and the rental is in use: cancelling it would move no money and
+// leave the deposit (and any held discount credit) unreturnable, because settlement only runs on a COMPLETED booking.
+// Staff reject the request, or complete the trip (drop-off, inspection) and return the deposit as usual.
+const assertCancellableStatus = (status, label) => {
+  const s = String(status || "").toLowerCase();
+  if (!["to pay", "upcoming"].includes(s)) {
+    throw new Error(
+      `Cannot approve: booking ${label} is "${status}". A trip that has already started can't be cancelled -- ` +
+      "reject the request instead, or drop the car off and complete the trip, then return the deposit."
+    );
+  }
+};
+
 export const approveCancellationRequest = async (docID, performedBy = null) => {
   const bookingRef = db.collection("bookings").doc(docID);
   const bookingDoc = await bookingRef.get();
@@ -1164,18 +1188,7 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
   if (!pending) {
     throw new Error(`Cannot approve: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
   }
-
-  // Only a trip that has NOT started can be cancelled. Approving a request cancels the booking but moves no money: the held
-  // security deposit and any held discount credit would stay held for good (settlement only runs for a completed trip), and the
-  // car has already been used. A started trip is ended by completing it (the deposit and credit are then settled), so the
-  // request is rejected instead, like a refund request for a trip that has started.
-  const session = await getSessionByBookingID(booking.bookingID || docID).catch(() => null);
-  if (session && String(session.data?.status || "").toLowerCase() === "active") {   // "active" = picked up, the car is out
-    throw new Error(
-      `Cannot approve: booking ${docID} is already under way (the car has been picked up), so it can't be cancelled from here. ` +
-      "Reject the request, or let the trip be completed so the security deposit and any discount credit are settled."
-    );
-  }
+  assertCancellableStatus(booking.status, booking.bookingID || docID);
 
   const now = new Date();
   // One transaction: the request is marked approved and the booking cancelled together,
@@ -1192,13 +1205,13 @@ export const approveCancellationRequest = async (docID, performedBy = null) => {
     if (["cancelled", "completed", "stolen"].includes(current)) {
       throw new Error(`Cannot approve: booking ${docID} is already ${current}.`);
     }
+    assertCancellableStatus(current, booking.bookingID || docID);   // re-checked inside the transaction: the trip may have started since
     resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, t);
     t.update(bookingRef, { status: "cancelled", updatedAt: now });
   });
 
   // Mirror onto the session doc, same as the customer's own instant-cancel
-  // path already does for "upcoming" bookings -- this one is "ongoing", so
-  // there's a real active session to close out here.
+  // path already does for "upcoming" bookings.
   try {
     const bID = booking.bookingID || docID;
     const session = await getSessionByBookingID(bID);

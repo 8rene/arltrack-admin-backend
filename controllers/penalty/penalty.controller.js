@@ -4,13 +4,13 @@ import {
   createPenalty as createPenaltyService,
   voidOrWaivePenalty as voidOrWaivePenaltyService,
   waiveDeposit as waiveDepositService,
-  settleBooking as settleBookingService,
   recordShortfallPayment as recordShortfallPaymentService,
   getAllPenalties,
   isBookingAssignedTo,
   editPenalty as editPenaltyService,
   confirmPenalty as confirmPenaltyService,
 } from "../../services/penalty/penalty.service.js";
+import { settleDeposit as settleDepositService } from "../../services/booking/booking.service.js";
 import { ROLES } from "../../utils/roles/role.util.js";
 
 // Reconstructed — this file was found overwritten with a stray copy of
@@ -142,12 +142,24 @@ export const postWaiveDeposit = async (req, res) => {
 export const postSettleBooking = async (req, res) => {
   try {
     const { bookingID } = req.params;
-    const result = await settleBookingService({ ...req.body, bookingID, actorUid: actorId(req) });
-    if (result.error) return res.status(400).json({ success: false, message: result.error });
+    // Goes through settleDeposit (the same path as PATCH /api/bookings/:id/settle-deposit), NOT settleBooking directly:
+    // settleDeposit checks the booking is completed and dropped off, and for an online return it makes the PayMongo
+    // refunds. Calling settleBooking from here would save "pending" payout rows that nothing ever sends to PayMongo.
+    // The old body names (returnMethod / returnReferenceNumber / onlineReturn) are still accepted.
+    const b = req.body || {};
+    const result = await settleDepositService(
+      bookingID,
+      {
+        method: b.method ?? b.returnMethod,
+        referenceNumber: b.referenceNumber ?? b.returnReferenceNumber ?? "",
+        online: b.online ?? b.onlineReturn ?? false,
+      },
+      actorId(req)
+    );
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[PENALTY] settle booking error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(400).json({ success: false, message: error.message });
   }
 };
 

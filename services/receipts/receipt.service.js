@@ -227,6 +227,9 @@ export const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSett
         // cash / online money handed back because a staff discount exceeded what the customer still owed
         lines.push({ label: "Discount refund", detail: null, amount: num(r.amount) });
         note = payment?.discountReason ? `Discount reason: ${payment.discountReason}` : "Refund of the amount paid above the discounted total.";
+      } else if (r.phase === "discount_return") {
+        // the held discount credit going back with the deposit (its own payout, separate from the deposit return)
+        lines.push({ label: "Discount credit returned", detail: null, amount: num(r.amount) });
       } else {
         lines.push({ label: `Refund of ${String(PHASE_LABEL[r.phase] || "payment").toLowerCase()}`, detail: null, amount: num(r.amount) });
       }

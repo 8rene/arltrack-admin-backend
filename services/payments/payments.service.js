@@ -982,7 +982,9 @@ export const getDiscountRefunds = async () => {
       discountReason: payment.discountReason || "",
       discountAt: isoOf(payment.discountAt),
       ledger,                                   // true: the credit goes back through the deposit-return retry, not the legacy one
-      refund,
+      // The Refunds page uses one vocabulary for a finished payout: "refunded". A ledger credit that went back says
+      // "returned" in the ledger (and on the Payments page), so it is renamed here only, for this feed.
+      refund: refund.state === "returned" ? { ...refund, state: "refunded" } : refund,
     });
   }
   return items;

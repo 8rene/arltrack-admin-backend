@@ -672,6 +672,11 @@ export const waiveDeposit = async ({ paymentID, reason, by }) => {
       if (dep.applied > 0) {
         throw Object.assign(new Error("Part of this deposit was already used to pay penalties. Settle the deposit instead of waiving it."), { expected: true });
       }
+      // A held discount credit goes back to the customer WITH the deposit, at settlement. Settlement only runs on a Held
+      // deposit, so waiving would leave that credit owed with no way to return it.
+      if (getDiscountFigures(current).credit > 0) {
+        throw Object.assign(new Error("This booking has a discount credit held for the customer, which is returned together with the deposit. Settle the deposit instead of waiving it."), { expected: true });
+      }
       tx.update(payment.ref, {
         securityDeposit: dep.amount,                    // survives dropping the old nested object
         depositStatus: "Waived",
@@ -1128,4 +1133,3 @@ export const getAllPenalties = async () => {
     };
   });
 };
-

@@ -310,10 +310,10 @@ export const retryDepositReturn = async (bookingID, retriedBy) => {
   const { payment, paymentID } = await loadPayment(bookingID);
   const targets = await failedPayouts(paymentID, "retry");
 
-  // Both payouts come out of the same first PayMongo payment, so what is checked is everything that was returned.
-  let everything = 0;
-  for (const phase of PAYOUT_PHASES) { const l = await latestReturnRow(paymentID, phase); if (l) everything += num(l.amount); }
-  const plan = planOnlineDepositReturn(payment, everything);
+  // Only what is being retried is checked against the first PayMongo payment: a payout that already succeeded is not
+  // refunded again, so it must not count toward the limit (it could block a valid retry of the other payout).
+  const retrying = targets.reduce((n, t) => n + num(t.amount), 0);
+  const plan = planOnlineDepositReturn(payment, retrying);
   if (!plan.ok) throw new Error(plan.reason);
 
   // Claim: the new pending rows, and only if every payout's newest row is still the failed one.
