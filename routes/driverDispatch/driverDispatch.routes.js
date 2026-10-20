@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, getMyInspection, getActivityForDriver, myPickup, myDropoff, myRemindInspection, myCreatePenalty } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, getMyInspection, getActivityForDriver, myPickup, myDropoff, myRemindInspection, myCreatePenalty, myOnMyWay, myRemindBalance } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -34,4 +34,7 @@ export const registerDriverDispatchRoutes = (app) => {
   // Drivers can only pick up and drop off — return/completion and all
   // payment actions are staff-only (Car Tracking / Payments).
   app.post ("/api/driver-dispatch/my-trips/:id/remind-inspection", verifyToken, requireRole(driverOnly), myRemindInspection);
+  // Heading to the customer's pickup location (NOT Start Pickup) — notifies the customer; and the balance nudge.
+  app.patch("/api/driver-dispatch/my-trips/:id/on-my-way",       verifyToken, requireRole(driverOnly), myOnMyWay);
+  app.post ("/api/driver-dispatch/my-trips/:id/remind-balance",  verifyToken, requireRole(driverOnly), myRemindBalance);
 };

@@ -1,6 +1,7 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver, getDriverAvailabilityForBooking,
   getMyTrips, getMyTripHistory, getMyTripInspection, driverPickup, driverDropoff, driverRemindInspection,
+  driverOnMyWay, driverRemindBalance,
   driverCreatePenalty, getDriverActivity,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
@@ -144,6 +145,30 @@ export const myRemindInspection = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     if (error.status !== 429) console.error("[DRIVER DISPATCH] my-remind-inspection error:", error);
+    return res.status(error.status || 400).json({
+      success: false,
+      message: error.message,
+      ...(error.retryAfterSeconds != null ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+    });
+  }
+};
+
+export const myOnMyWay = async (req, res) => {
+  try {
+    const data = await driverOnMyWay(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.status !== 403 && error.status !== 400) console.error("[DRIVER DISPATCH] my-on-my-way error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+export const myRemindBalance = async (req, res) => {
+  try {
+    const data = await driverRemindBalance(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.status !== 429 && error.status !== 400) console.error("[DRIVER DISPATCH] my-remind-balance error:", error);
     return res.status(error.status || 400).json({
       success: false,
       message: error.message,

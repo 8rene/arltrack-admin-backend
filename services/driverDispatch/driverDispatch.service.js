@@ -574,6 +574,132 @@ export const getMyTripInspection = async (bookingDocID, driverID) => {
   };
 };
 
+// ─────────────────────────────────────────────
+// "On my way" — the chauffeur is driving to the customer's pickup location.
+//
+// NOT Start Pickup: Start Pickup means the customer has already been received
+// (booking -> ongoing, trip tracking starts). This is the step before it. It
+// stamps booking.enRouteAt, which (1) tells the customer's app the driver is
+// coming (notification -> the temporary arrival page) and (2) opens the short
+// window in which the customer may see the car's position and plate number.
+// The window closes by itself at Start Pickup (the customer app only serves it
+// while the booking is still "upcoming"). Same readiness gate as pickup, since
+// the car leaves the lot here.
+// ─────────────────────────────────────────────
+const firstNameOf = async (userID) => {
+  try {
+    const d = await db.collection("userDetails").doc(userID).get();
+    return (d.exists && (d.data().firstName || "").trim()) || "";
+  } catch { return ""; }
+};
+
+export const driverOnMyWay = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+
+  if ((booking.status || "").toLowerCase() !== "upcoming") {
+    throw driverErr(400, "You can only head out for a trip that is still upcoming.");
+  }
+  if (booking.modeOfDriving !== "With Chauffeur") {
+    throw driverErr(400, "This booking is not a chauffeur booking.");
+  }
+  if (booking.enRouteAt) return { id: bookingDocID, alreadyOnTheWay: true };
+
+  // Same readiness gate as Start Pickup (payment settled + before-trip inspection complete).
+  const docKeys = [...new Set([booking.bookingID, bookingDocID].filter(Boolean))];
+  const [pay, checklist] = await Promise.all([resolvePaymentInfo(bID), getPhaseChecklist(docKeys, "before")]);
+  const paymentReady = ["approved", "paid"].includes((pay.paymentStatus || "").toLowerCase()) && (pay.balance ?? 0) <= 0;
+  if (!paymentReady) throw driverErr(400, "Payment still needs to be settled before you head out.");
+  if (!checklist.complete) throw driverErr(400, "The vehicle inspection must be complete before you head out.");
+
+  const firstName = await firstNameOf(driverID);
+  const ref = db.collection("bookings").doc(bookingDocID);
+  let alreadyOnTheWay = false;
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.data()?.enRouteAt) { alreadyOnTheWay = true; return; } // two quick taps land as one
+    tx.update(ref, {
+      enRouteAt:              admin.firestore.Timestamp.now(),
+      enRouteDriverID:        driverID,
+      enRouteDriverFirstName: firstName,
+    });
+  });
+  if (alreadyOnTheWay) return { id: bookingDocID, alreadyOnTheWay: true };
+
+  if (booking.userID) {
+    try {
+      await createNotification({
+        type: "driver_en_route",
+        refID: bID,
+        refCollection: "bookings",
+        userID: booking.userID,
+        title: "Your driver is on the way",
+        message: `${firstName || "Your driver"} is heading to your pickup location now. Tap to see the car, its plate number and where it is.`,
+      });
+    } catch (err) {
+      console.error("[DRIVER DISPATCH] driver_en_route notify failed:", err.message);
+    }
+  }
+  return { id: bookingDocID };
+};
+
+// ─────────────────────────────────────────────
+// "Remind customer" — a driver blocked at Pickup by an unpaid balance can't
+// fix it (staff collect it), but the customer can: this rings their bell.
+// 10-minute cooldown enforced here on the server (balanceReminders/{bookingKey}).
+// ─────────────────────────────────────────────
+const pesoText = (n) => `₱${Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const startText = (d) => {
+  const dt = toJSDate(d);
+  return dt ? dt.toLocaleString("en-PH", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }) : "";
+};
+
+export const driverRemindBalance = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+
+  if ((booking.status || "").toLowerCase() !== "upcoming") {
+    throw driverErr(400, "A balance reminder can only be sent while the trip is still upcoming.");
+  }
+  if (!booking.userID) throw driverErr(400, "This booking has no customer account to notify.");
+
+  const pay = await resolvePaymentInfo(bID);
+  const balance = Number(pay.balance) || 0;
+  if (balance <= 0) throw driverErr(400, "There is no balance remaining on this booking.");
+
+  // Reserve the cooldown slot first (transactionally), THEN notify; hand the slot back if notifying fails.
+  const ref   = db.collection(BALANCE_REMINDERS).doc(bID);
+  const nowTs = admin.firestore.Timestamp.now();
+  let previous = null;
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    previous = snap.exists ? snap.data() : null;
+    const left = previous ? balanceSecondsLeft(tsToMs(previous.lastRemindedAt), nowTs.toMillis()) : 0;
+    if (left > 0) throw driverErr(429, "The customer was already reminded recently.", { retryAfterSeconds: left });
+    tx.set(ref, { bookingKey: bID, bookingDocID, driverID, lastRemindedAt: nowTs, count: (previous?.count || 0) + 1 });
+  });
+
+  try {
+    const when = startText(booking.startDateTime);
+    await createNotification({
+      type: "balance_reminder",
+      refID: bID,
+      refCollection: "bookings",
+      userID: booking.userID,
+      title: "Balance remaining on your booking",
+      message: `You still have a balance of ${pesoText(balance)} on your booking${when ? ` starting ${when}` : ""}. Please pay it online from your booking page before pickup.`,
+      renotify: true, // a second reminder rings the bell again instead of being swallowed
+    });
+  } catch (err) {
+    // Give the slot back so a failed send doesn't lock the driver out for 10 minutes.
+    try {
+      if (previous) await ref.set(previous); else await ref.delete();
+    } catch { /* best effort */ }
+    throw err;
+  }
+  return { id: bookingDocID, balance };
+};
+
 /** A driver's own live trips (upcoming + ongoing), same shape as getDispatchBoard's per-booking entries. */
 export const getMyTrips = async (driverID) => {
   if (!driverID) throw new Error("driverID is required.");
@@ -600,6 +726,36 @@ export const getMyTripHistory = async (driverID) => {
 // Shared shaping for the two driver-facing lists above — same vehicle/
 // customer resolution as getDispatchBoard, plus each booking's session
 // (for startedAt/droppedOffTime display) plus the booking's own completedAt.
+// "Remind customer" (balance) cooldown — same 10 minutes and same server-side
+// rule as Remind Staff, kept per booking in balanceReminders/{bookingKey}.
+const BALANCE_REMINDER_COOLDOWN_SECONDS = 10 * 60;
+const BALANCE_REMINDERS = "balanceReminders";
+
+const driverErr = (status, message, extra = {}) => Object.assign(new Error(message), { status, ...extra });
+const tsToMs = (ts) => {
+  if (!ts) return null;
+  if (typeof ts.toMillis === "function") return ts.toMillis();
+  const t = new Date(ts).getTime();
+  return Number.isNaN(t) ? null : t;
+};
+const balanceSecondsLeft = (lastMs, nowMs = Date.now()) =>
+  lastMs == null ? 0 : Math.max(0, Math.ceil((BALANCE_REMINDER_COOLDOWN_SECONDS * 1000 - (nowMs - lastMs)) / 1000));
+
+/** { [bookingKey]: secondsLeft } — never throws; a failure just shows the button as available (server still enforces). */
+const getBalanceReminderCooldowns = async (bookingKeys = []) => {
+  const keys = [...new Set(bookingKeys.filter(Boolean))];
+  const out = {};
+  if (!keys.length) return out;
+  try {
+    const snaps = await db.getAll(...keys.map((k) => db.collection(BALANCE_REMINDERS).doc(k)));
+    const now = Date.now();
+    keys.forEach((k, i) => { out[k] = snaps[i].exists ? balanceSecondsLeft(tsToMs(snaps[i].data().lastRemindedAt), now) : 0; });
+  } catch (err) {
+    console.error("[BALANCE REMINDER] cooldown lookup failed:", err.message);
+  }
+  return out;
+};
+
 const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
@@ -609,7 +765,7 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const docKeys = {};
   bookings.forEach((b) => { docKeys[b.bookingID || b.id] = [...new Set([b.bookingID, b.id].filter(Boolean))]; });
 
-  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries, reminderCooldowns] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries, reminderCooldowns, balanceCooldowns] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
@@ -621,6 +777,7 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
     // Remaining "Remind Staff" cooldown per booking/phase (seconds, so the
     // driver's own clock can't skew the countdown).
     withDocs ? getReminderCooldowns(bookingIDs) : Promise.resolve({}),
+    withDocs ? getBalanceReminderCooldowns(bookingIDs) : Promise.resolve({}),
   ]);
   const vehicleMap = Object.fromEntries(vehicleEntries);
   const userMap    = Object.fromEntries(userEntries);
@@ -677,6 +834,10 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         beforeInspection:     beforeDocsMap[bID] ?? EMPTY_CHECKLIST,
         afterInspection:      afterDocsMap[bID]  ?? EMPTY_CHECKLIST,
         inspectionReminder:   reminderCooldowns[bID] ?? { before: { retryAfterSeconds: 0 }, after: { retryAfterSeconds: 0 } },
+        // Set when the driver tapped "On my way" (heading to the customer's pickup location).
+        enRouteAt:            toJSDate(b.enRouteAt),
+        // Seconds left before the driver can send another balance reminder to the customer.
+        balanceReminder:      { retryAfterSeconds: balanceCooldowns[bID] ?? 0 },
       };
     })
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
