@@ -361,6 +361,15 @@ export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallS
   if (!bookingID || !carID) throw new Error("bookingID and carID are required.");
   if (tripType !== "before" && tripType !== "after") throw new Error("tripType must be 'before' or 'after'.");
 
+  // Hard rule: the parts condition can't be saved for a trip phase that has neither a video nor the 3 exterior
+  // photos yet — an inspection is never recorded "with nothing". (The page enforces this too; this is the backstop.)
+  const evidence = await getPhaseChecklist(bookingID, tripType);
+  if (!evidence.photos) {
+    const err = new Error("Add a video (or the front, side and back photos) before saving the parts condition.");
+    err.status = 400;
+    throw err;
+  }
+
   const collectionName = INVENTORY_COLLECTION[tripType];
   const timestamp = admin.firestore.FieldValue.serverTimestamp();
 
