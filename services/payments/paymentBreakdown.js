@@ -200,14 +200,25 @@ const channelOfPhase = (payment, phase) => {
 };
 const refundableOnlyByHand = (payment, phase) => NO_API_REFUND_CHANNELS.includes(channelOfPhase(payment, phase));
 
+// A discount given on a FULLY PAID booking is held for the customer (discountCredit): money they already paid.
+// getPaymentBreakdown takes it out of amountPaid (it is not rental revenue), but a cancellation refunds what the
+// customer actually PAID, so it goes back with the rest -- no separate payout, and no deduction for the discount.
+// Only the still-held part counts: what already paid a penalty or went back is gone, and a discount that came off the
+// balance was never paid. A legacy discount has no credit (it was refunded on the spot).
+const heldCreditOf = (p) =>
+  p && p.discountApplied !== undefined && p.discountApplied !== null ? Math.max(0, num(p.discountCredit)) : 0;
+
 const computeRefundPlan = (payment, opts = {}) => {
   const b   = getPaymentBreakdown(payment);
   const ids = resolvePaymongoIDs(payment);
   let qrphAmount = 0;   // the part handed back by staff only because the channel is QR Ph (included in manualAmount)
 
-  const forfeit = Math.min(Math.max(0, num(opts.forfeit)), b.amountPaid);
+  const heldCredit = heldCreditOf(payment);
+  const paid       = b.amountPaid + heldCredit;   // everything the customer paid for this booking, before the forfeit
 
-  let remaining = b.amountPaid - forfeit;
+  const forfeit = Math.min(Math.max(0, num(opts.forfeit)), paid);
+
+  let remaining = paid - forfeit;
   const parts = [];
   const unrefundable = [];
   let manualAmount = 0;
@@ -253,8 +264,8 @@ const computeRefundPlan = (payment, opts = {}) => {
   const unrefundableAmount = unrefundable.reduce((s, u) => s + u.amount, 0);
   // total = what can actually be returned (parts + manual). The unrefundable amount is NOT promised to the customer.
   return {
-    total: b.amountPaid - forfeit - unrefundableAmount,
-    grossPaid: b.amountPaid, forfeit, parts, manualAmount, qrphAmount,
+    total: paid - forfeit - unrefundableAmount,
+    grossPaid: paid, heldCredit, forfeit, parts, manualAmount, qrphAmount,
     channels: { deposit: channelOfPhase(payment, "deposit") || null, balance: channelOfPhase(payment, "balance") || null },
     unrefundable, unrefundableAmount, breakdown: b,
   };

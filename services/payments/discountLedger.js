@@ -14,6 +14,9 @@
 // The held credit then moves on in one of two ways:
 //   • a penalty is paid from it (right away if one is unpaid, otherwise at settlement): credit -= x, applied += x
 //   • at settlement what is left goes back to the customer, as its own payout: credit -> 0, returned += credit
+//   • the booking is CANCELLED (a refund request is approved, or staff cancel and refund): the credit is money the
+//     customer paid, so it goes back INSIDE that refund (the refund plan counts it), with no payout of its own:
+//     credit -> 0, returned += credit, and one internal row (discount_in_refund) says so. The cash is in the refund's rows.
 //
 // Fields on payments/{paymentID} (written together, in the same transaction as the ledger row they describe):
 //   discountAmount    total discount given, across every discount given on this booking (a running total)
@@ -28,7 +31,7 @@
 // it keeps its old behaviour everywhere and cannot be added to.
 //
 // Ledger rows live in paymentEntries (see models/paymentEntries/paymentEntry.model.js):
-//   internal (no cash)  discount_applied_balance · discount_credit · discount_applied_penalty
+//   internal (no cash)  discount_applied_balance · discount_credit · discount_applied_penalty · discount_in_refund
 //   out (real money)    discount_return -- the credit paid back. Its OWN payout, separate from deposit_return: same
 //                       way of returning (in store, or its own PayMongo refund), its own status, retry and hand-back.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -42,6 +45,7 @@ export const DISCOUNT_PHASES = Object.freeze({
   appliedBalance: "discount_applied_balance",
   appliedPenalty: "discount_applied_penalty",
   return: "discount_return",
+  inRefund: "discount_in_refund",   // internal: the held credit went back INSIDE a cancellation refund (no cash of its own)
 });
 export const DISCOUNT_ROW_PHASES = Object.freeze(Object.values(DISCOUNT_PHASES));
 
@@ -199,6 +203,20 @@ export const planSettlement = ({ depositAmount, alreadyApplied = 0, penalties = 
   };
 };
 
+/**
+ * The figures after the held credit went back INSIDE a cancellation refund: all of it moves from `credit` to `returned`.
+ * (The refund plan counts the credit as paid money -- see computeRefundPlan -- so no payout of its own is needed.)
+ */
+export const closeCreditInRefund = (p) => {
+  const f = getDiscountFigures(p);
+  return {
+    discountAmount: f.total,
+    discountApplied: f.applied,
+    discountCredit: 0,
+    discountReturned: round2(f.returned + f.credit),
+  };
+};
+
 /** The figures after settlement: the credit that went back moves from `credit` to `returned`, the rest was used on penalties. */
 export const applySettlement = (p, plan) => {
   const f = getDiscountFigures(p);
@@ -223,7 +241,7 @@ const iso = (d) => {
 // The ledger rows: the three no-cash "internal" ones (only when they succeeded) and the real-money discount_return payout
 // (whatever its status: it is how the credit went back, and a failed attempt is history too).
 const isLedgerRow = (e) => !!e && (
-  (e.direction === "internal" && [DISCOUNT_PHASES.credit, DISCOUNT_PHASES.appliedBalance, DISCOUNT_PHASES.appliedPenalty].includes(e.phase) && lower(e.status) === "success") ||
+  (e.direction === "internal" && [DISCOUNT_PHASES.credit, DISCOUNT_PHASES.appliedBalance, DISCOUNT_PHASES.appliedPenalty, DISCOUNT_PHASES.inRefund].includes(e.phase) && lower(e.status) === "success") ||
   (e.direction === "out" && e.phase === DISCOUNT_PHASES.return)
 );
 const byTime = (a, b) => millis(a.createdAt || a.processedAt) - millis(b.createdAt || b.processedAt)
@@ -236,7 +254,8 @@ export const listDiscountEvents = (entries = []) =>
     id: e.id || e.paymentEntryID,
     kind: e.phase === DISCOUNT_PHASES.appliedBalance ? "balance"
         : e.phase === DISCOUNT_PHASES.credit ? "credit"
-        : e.phase === DISCOUNT_PHASES.appliedPenalty ? "penalty" : "return",
+        : e.phase === DISCOUNT_PHASES.appliedPenalty ? "penalty"
+        : e.phase === DISCOUNT_PHASES.inRefund ? "refund" : "return",
     phase: e.phase,
     amount: round2(e.amount),
     status: lower(e.status),
@@ -278,12 +297,13 @@ export const rebuildFiguresFromEntries = (entries = []) => {
   const creditGiven = sum(DISCOUNT_PHASES.credit);
   const appliedBalance = sum(DISCOUNT_PHASES.appliedBalance);
   const appliedPenalty = sum(DISCOUNT_PHASES.appliedPenalty);
+  const returnedInRefund = sum(DISCOUNT_PHASES.inRefund);   // went back inside a cancellation refund
   const rr = returnRows(entries);
-  const returned = rr.length ? round2(rr[rr.length - 1].amount) : 0;
+  const returned = round2((rr.length ? num(rr[rr.length - 1].amount) : 0) + returnedInRefund);
   return {
     total: round2(appliedBalance + creditGiven),
     applied: round2(appliedBalance + appliedPenalty),
-    appliedBalance, appliedPenalty, returned,
+    appliedBalance, appliedPenalty, returned, returnedInRefund,
     credit: round2(creditGiven - appliedPenalty - returned),
   };
 };
@@ -318,6 +338,7 @@ export const getDiscountView = (p, entries = []) => {
     // for display: how the used part splits (the payment stores only the sum)
     appliedBalance: rebuilt ? rebuilt.appliedBalance : 0,
     appliedPenalty: rebuilt ? rebuilt.appliedPenalty : 0,
+    returnedInRefund: rebuilt ? rebuilt.returnedInRefund : 0,   // part of `returned` that went back inside a cancellation refund
     status: discountStatusOf(f),
     creditReturn: f.ledger ? deriveCreditReturn(entries) : null,
     events: f.ledger ? listDiscountEvents(entries) : [],

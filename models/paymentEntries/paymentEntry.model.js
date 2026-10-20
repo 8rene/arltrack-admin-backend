@@ -43,12 +43,16 @@
 // Deposit offsets (penalties covered by the held security deposit) are NOT entries: no money moves, they are
 // adjustments and stay on payments (depositSettled / depositStatus ...).
 //
-// Staff discounts ARE written as rows. Three are direction "internal": no cash is received or released, value just moves
+// Staff discounts ARE written as rows. Four are direction "internal": no cash is received or released, value just moves
 // between the discount's parts. One row per real event:
 //     (auto ID)  discount_applied_balance   a discount given while the payment is still partial; it came off the
 //                                           remaining balance. Nothing is owed back.
 //     (auto ID)  discount_credit            a discount given on a FULLY PAID booking. The customer has already paid
 //                                           it, so it is held and returned when the trip is settled.
+//     (auto ID)  discount_in_refund         the held credit went back INSIDE a cancellation refund (a refund request was
+//                                           approved, or staff cancelled and refunded). The credit is money the customer
+//                                           paid, so the refund plan counts it; the cash is in that refund's own "out" rows,
+//                                           and this row (refundReqID is set) only closes the credit in the ledger.
 //     (auto ID)  discount_applied_penalty   part of the held credit that covered a penalty the deposit could not
 //                                           (penaltyID is set).
 // The fourth is real money, direction "out":
@@ -64,7 +68,7 @@ export const ENTRY_COLLECTION = "paymentEntries";
 
 export const ENTRY_DIRECTIONS = ["in", "out", "internal"];   // "internal" = no cash moved (a discount changing buckets)
 export const ENTRY_PHASES     = ["deposit", "balance", "penalty", "deposit_return", "discount",
-                                 "discount_credit", "discount_applied_balance", "discount_applied_penalty", "discount_return"];
+                                 "discount_credit", "discount_applied_balance", "discount_applied_penalty", "discount_return", "discount_in_refund"];
 export const ENTRY_SOURCES    = ["online", "in_person"];            // PayMongo | staff collected / handed back
 export const ENTRY_METHODS    = ["gcash", "maya", "qrph", "cash", "bank_transfer"];   // customers can only pay online via gcash / maya / qrph
 // "unrefundable" is only used by direction "out" rows (an amount with no PayMongo payment id).
@@ -79,7 +83,7 @@ export const PaymentEntry = {
   refundReqID: null,        // FK -> refundRequests.refundRequestID. Set on a refund's "out" rows only.
   penaltyID:   null,        // FK -> penalties.penaltyID. Set on "penalty" phase rows only.
   direction:   "in",        // "in" | "out" | "internal"
-  phase:       "deposit",   // "deposit" | "balance" | "penalty" | "deposit_return" | "discount" | "discount_credit" | "discount_applied_balance" | "discount_applied_penalty" | "discount_return"   (for "out": the phase being refunded)
+  phase:       "deposit",   // "deposit" | "balance" | "penalty" | "deposit_return" | "discount" | "discount_credit" | "discount_applied_balance" | "discount_applied_penalty" | "discount_return" | "discount_in_refund"   (for "out": the phase being refunded)
   source:      "online",    // "online" | "in_person"
   method:      null,        // gcash | maya | qrph | cash | bank_transfer | null (online, channel unknown)
   amount:      0,           // pesos moved by THIS entry

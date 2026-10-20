@@ -27,7 +27,7 @@ export const PaymentEntryArchive = {
   refundReqID: null,       // set on a refund's "out" rows only
   penaltyID: null,         // set on "penalty" phase rows only
   direction: "in",         // "in" | "out" | "internal" (internal = no cash moved: a discount changing parts)
-  phase: "deposit",        // "deposit" | "balance" | "penalty" | "deposit_return" | "discount" (legacy) | "discount_credit" | "discount_applied_balance" | "discount_applied_penalty" | "discount_return"
+  phase: "deposit",        // "deposit" | "balance" | "penalty" | "deposit_return" | "discount" (legacy) | "discount_credit" | "discount_applied_balance" | "discount_applied_penalty" | "discount_return" | "discount_in_refund"
   source: "online",        // "online" | "in_person"
   method: null,
   amount: 0,

@@ -13,6 +13,7 @@ import { recordDirectCancellation, inferCancelledBy, getRequestsByBookingKeys, g
 import { writeRefundEntries, hydrateRefundRequests, hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { normalizeMethod } from "../paymentEntries/paymentEntries.mapper.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
+import { closeCreditInRefund, getDiscountFigures, DISCOUNT_PHASES } from "../payments/discountLedger.js";
 
 // A refund's parts[] / manualRefund / unrefundable[] live ONLY in paymentEntries ("out" rows) now. Readers get
 // the old shape back through hydrate (it only fills what the request document does not carry).
@@ -182,6 +183,43 @@ const policyForRequest = (request, payment, { waiveForfeit = false } = {}) => {
   });
 };
 
+// A discount given on a fully paid booking is HELD for the customer, and it is money they already paid. So when the booking
+// is cancelled and refunded, it goes back INSIDE that refund: computeRefundPlan counts it with everything else the customer
+// paid (only the security deposit is ever forfeited -- never the credit). This closes it in the ledger in the SAME batch
+// that commits the refund: payments.discountCredit -> 0, discountReturned += credit, and one internal row (no cash of its
+// own -- the money is in the refund's "out" rows) that says so. Returns the credit it closed (0 when there was none).
+const closeHeldCreditInBatch = (batch, paymentRef, payment, { refundRequestID, bookingID, paymentID, userID, processedBy, at }) => {
+  const credit = getDiscountFigures(payment).credit;
+  if (!(credit > 0)) return 0;
+  const entryRef = db.collection(ENTRY_COLLECTION).doc();
+  batch.update(paymentRef, { ...closeCreditInRefund(payment), updatedAt: at });
+  batch.set(entryRef, {
+    paymentEntryID: entryRef.id,
+    paymentID,
+    bookingID,
+    userID: userID || null,
+    refundReqID: refundRequestID,                    // the refund this credit went back with
+    penaltyID: null,
+    direction: "internal",                           // no cash moved here: it is in the refund's own rows
+    phase: DISCOUNT_PHASES.inRefund,
+    source: null,
+    method: null,
+    amount: credit,
+    status: "success",
+    referenceNumber: null,
+    sessionID: null,
+    transactionFee: null,
+    processedBy: processedBy || null,
+    processedAt: at,
+    settledAt: at,
+    groupID: null,
+    transactionErrorNote: null,
+    createdAt: at,
+    updatedAt: at,
+  });
+  return credit;
+};
+
 // After a refund is committed, the held security deposit is no longer "Held":
 // it was either KEPT (forfeit > 0 → "Forfeited") or returned to the customer
 // inside the refund ("Refunded"). Without this the deposit would still look
@@ -253,6 +291,7 @@ export const getAllRefundRequests = async (status) => {
               onlineAmount: plan.total - plan.manualAmount,
               manualAmount: plan.manualAmount,
               qrphAmount: plan.qrphAmount,                   // the part of manualAmount that is hand-back only because it was paid by QR Ph
+              heldCredit: plan.heldCredit,                   // discount credit held for the customer: already paid by them, so it is inside `total`
               unrefundableAmount: plan.unrefundableAmount,   // paid online, no PayMongo payment id on record
               bookingPaid: plan.grossPaid,
               grossPaid: plan.grossPaid,                   // old name, same value, until the web apps read bookingPaid
@@ -515,12 +554,9 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // (or after it failed) the customer's real balance is unsettled, so approving now could leave them short.
     const discountRefund = await getDiscountRefundState(payment, paymentSnap.docs[0].id);
 
-    // A discount given on a fully paid booking is HELD for the customer and returns with the security deposit. A refund
-    // request doesn't know about it yet, so approving one now would quietly leave the customer short. Stop, loudly.
-    const heldCredit = Number(payment.discountCredit) || 0;
-    if (heldCredit > 0) {
-      throw fail(`This booking holds ${peso(heldCredit)} of discount credit that belongs to the customer, and refund requests don't return it yet. Don't approve this request until the credit has been dealt with.`, 409);
-    }
+    // A discount given on a fully paid booking is HELD for the customer. It is money they already paid, so computeRefundPlan
+    // counts it with the rest of what they paid and it goes back inside this refund (closed in the ledger in the approval
+    // batch below). Nothing to block here, and nothing is deducted for the discount.
     // (Only a LEGACY discount refund can be in flight here: a held credit is never refunded on the spot.)
     if (discountRefund && !(discountRefund.view && discountRefund.view.ledger) && discountRefund.state === "processing") {
       throw fail(`A ${peso(discountRefund.amount)} discount refund is still processing at PayMongo for this booking. Wait for it to finish, then approve this request.`, 409);
@@ -628,7 +664,11 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
     // status change. Strict: if the rows can't be written the request stays Pending-with-lock, never "Approved"
     // without the PayMongo refund ids.
     const approveBatch = db.batch();
-    approveBatch.update(reqRef, { ...approvedFields, approvalLockedAt: admin.firestore.FieldValue.delete(), processedBy: adminUserID, ...dropOldRefundNames() });   // approval done: the lock field is removed, not left as null
+    approveBatch.update(reqRef, { ...approvedFields, approvalLockedAt: admin.firestore.FieldValue.delete(), processedBy: adminUserID, ...dropOldRefundNames() });
+    const creditReturned = closeHeldCreditInBatch(approveBatch, paymentSnap.docs[0].ref, payment, {
+      refundRequestID, bookingID: refundRequest.bookingID, paymentID: refundRequest.paymentID, userID: refundRequest.userID,
+      processedBy: adminUserID, at: now,
+    });   // approval done: the lock field is removed, not left as null
     await writeRefundEntries(refundRequestID, {
       request: { ...refundRequest, ...approvedFields, ...approvedBy, refundRequestID: refundRequest.refundRequestID || refundRequestID },
       parts, manualRefund, unrefundable: plan.unrefundable,
@@ -666,7 +706,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 
     auditSafe({
       action: "update",
-      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""}${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
+      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)}${creditReturned > 0 ? ` (includes ${peso(creditReturned)} held discount credit)` : ""} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""}${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
       userID: adminUserID,
       bookingID: refundRequest.bookingID,
       paymentID: refundRequest.paymentID,
@@ -1185,7 +1225,10 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     };
     // Same rule as approveRefundRequest: the rows are the record, committed with the status, strict.
     const staffApproveBatch = db.batch();
-    staffApproveBatch.update(reqRef, { ...staffApprovedFields, approvalLockedAt: admin.firestore.FieldValue.delete(), ...dropOldRefundNames() });   // a placeholder from before the rename may still carry the old names
+    staffApproveBatch.update(reqRef, { ...staffApprovedFields, approvalLockedAt: admin.firestore.FieldValue.delete(), ...dropOldRefundNames() });
+    closeHeldCreditInBatch(staffApproveBatch, paymentRef, payment, {
+      refundRequestID, bookingID, paymentID, userID, processedBy: staffUserID || null, at: now,
+    });   // a placeholder from before the rename may still carry the old names
     await writeRefundEntries(refundRequestID, {
       request: { refundRequestID, bookingID, paymentID, userID, ...staffApprovedFields, processedBy: staffUserID || null, processedAt: now, createdAt: claimedAt },   // the entry rows still record who / when
       parts, manualRefund, unrefundable: plan.unrefundable,
