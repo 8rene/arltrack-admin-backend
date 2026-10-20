@@ -312,13 +312,16 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
   const buildStatement = async ({ bookingID, printedByUserID = null }) => {
     if (!bookingID) throw httpError(400, "A booking is required.");
 
-    const [booking, payment, entries, penaltyRows] = await Promise.all([
+    const [booking, payment, allEntries, penaltyRows] = await Promise.all([
       firstWhere(["bookings", "bookingArchives"], "bookingID", bookingID),
       firstWhere(["payments", "paymentsArchives"], "bookingID", bookingID),
       rowsWhere(ENTRY_COLLECTIONS, "bookingID", bookingID),
       rowsWhere(PENALTY_COLLECTIONS, "bookingID", bookingID),
     ]);
-    if (!booking && !payment && entries.length === 0 && penaltyRows.length === 0) throw httpError(404, "Booking not found.");
+    // Staff discounts are written as "internal" rows (no cash moves: value just changes bucket). They are not payments or
+    // refunds, so they stay off the money flow and the pending list; the discount itself is on `charges`.
+    const entries = allEntries.filter((e) => e.direction !== "internal");
+    if (!booking && !payment && allEntries.length === 0 && penaltyRows.length === 0) throw httpError(404, "Booking not found.");
     entries.sort(byTime);
 
     // For the online payment fee on penalty payments (see penaltyFeeOf).

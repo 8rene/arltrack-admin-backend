@@ -10,7 +10,7 @@ import { computeAmounts, derivePaymentStage } from "../../services/payments/paym
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
-import { planOnlineDepositReturn, sendOnlineReturns, onlineDepositReturnOption, getDepositReturnForBooking } from "../../services/depositReturn/depositReturn.service.js";
+import { planOnlineDepositReturn, sendOnlineReturns, onlineDepositReturnOption, getDepositReturnForBooking, notifyCustomerReturnedInStore } from "../../services/depositReturn/depositReturn.service.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
 import { getDiscountFigures } from "../payments/discountLedger.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
@@ -582,6 +582,11 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
       credit: res.creditEntryID ? { entryID: res.creditEntryID, amount: res.creditReturn } : null,
       paymongoPaymentID: onlinePlan.paymongoPaymentID, performedBy, customerUserID: customerUserID || res.userID || null,
     });
+  }
+
+  // In store the money is already in the customer's hands, so tell them (the online path tells them in sendOnlineReturns).
+  if (!goOnline && res.net > 0) {
+    notifyCustomerReturnedInStore(res.userID || booking.userID || null, bID, { deposit: res.depositReturn, credit: res.creditReturn });
   }
 
   createAuditLog({

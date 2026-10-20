@@ -139,6 +139,39 @@ const notifyCustomerProcessing = (customerUserID, bookingID, parts) => {
   }).catch((e) => console.error("[DEPOSIT RETURN] customer notify failed:", e.message));
 };
 
+// The online return could not be sent: the customer is told it is delayed (staff retry it or hand it back in store).
+const notifyCustomerDelayed = (customerUserID, bookingID, failed) => {
+  if (!customerUserID || !failed.length) return;
+  const dep = failed.find((p) => p.phase === DEPOSIT);
+  const cr = failed.find((p) => p.phase === CREDIT);
+  const what = dep && cr ? `your security deposit of ${peso(dep.amount)} and your ${peso(cr.amount)} discount`
+    : dep ? `your security deposit of ${peso(dep.amount)}` : `your ${peso(cr.amount)} discount`;
+  createNotification({
+    type: "refund_failed", refID: bookingID, refCollection: "bookings", userID: customerUserID, dedupeKey: `payout_delayed:${bookingID}`,
+    title: dep ? "Deposit return delayed" : "Discount return delayed",
+    message: `We couldn't send ${what} back to your original payment method. Our team will follow up to return it another way.`,
+  }).catch((e) => console.error("[DEPOSIT RETURN] customer notify (delayed) failed:", e.message));
+};
+
+/**
+ * Tells the customer their deposit and/or discount credit was handed back IN STORE (settleDeposit with a method, or a
+ * hand-back after a failed online return). Online returns are told through notifyCustomerProcessing and the webhook.
+ * Fire-and-forget: a notification must never fail a settlement.
+ */
+export const notifyCustomerReturnedInStore = (customerUserID, bookingID, { deposit = 0, credit = 0 } = {}) => {
+  const dep = num(deposit) > 0 ? num(deposit) : 0;
+  const cr = num(credit) > 0 ? num(credit) : 0;
+  if (!customerUserID || (!dep && !cr)) return;
+  const text = dep && cr ? `Your security deposit of ${peso(dep)} and your ${peso(cr)} discount were`
+    : dep ? `Your security deposit of ${peso(dep)} was` : `Your ${peso(cr)} discount was`;
+  createNotification({
+    type: "refund_completed", refID: bookingID, refCollection: "bookings", userID: customerUserID,
+    dedupeKey: `in_store:${bookingID}:${dep ? "d" : ""}${cr ? "c" : ""}`,
+    title: dep ? "Deposit Returned" : "Discount Returned",
+    message: `${text} handed back to you in store.`,
+  }).catch((e) => console.error("[DEPOSIT RETURN] customer notify (in store) failed:", e.message));
+};
+
 /**
  * Steps 2 and 3 above for the booking's payout rows -- the deposit and/or the discount credit -- run right after
  * settleBooking() (or a retry) has committed them as pending. Each is its own PayMongo refund. Never throws: the deposit
@@ -146,7 +179,7 @@ const notifyCustomerProcessing = (customerUserID, bookingID, parts) => {
  *   deposit / credit: { entryID, amount } | null
  * Returns { state: "processing" | "failed" | "partial", deposit, credit } (each { state, refundID?, error? } or null).
  */
-export const sendOnlineReturns = async ({ bookingID, paymentID, deposit = null, credit = null, paymongoPaymentID, performedBy, customerUserID }) => {
+export const sendOnlineReturns = async ({ bookingID, paymentID, deposit = null, credit = null, paymongoPaymentID, performedBy, customerUserID, notifyFailure = true }) => {
   const out = { deposit: null, credit: null };
   if (deposit) out.deposit = await refundRow({ bookingID, paymentID, entryID: deposit.entryID, amount: deposit.amount, paymongoPaymentID, performedBy, phase: DEPOSIT });
   if (credit) out.credit = await refundRow({ bookingID, paymentID, entryID: credit.entryID, amount: credit.amount, paymongoPaymentID, performedBy, phase: CREDIT });
@@ -154,6 +187,14 @@ export const sendOnlineReturns = async ({ bookingID, paymentID, deposit = null, 
   if (deposit && out.deposit.state === "processing") sent.push({ phase: DEPOSIT, amount: deposit.amount });
   if (credit && out.credit.state === "processing") sent.push({ phase: CREDIT, amount: credit.amount });
   notifyCustomerProcessing(customerUserID, bookingID, sent);
+  // PayMongo refused it up front (nothing was sent): tell the customer too, not only staff. A retry that fails again passes
+  // notifyFailure: false so the customer isn't told twice. A refusal that comes later (the webhook) is told by the customer backend.
+  if (notifyFailure) {
+    const failed = [];
+    if (deposit && out.deposit.state === "failed") failed.push({ phase: DEPOSIT, amount: deposit.amount });
+    if (credit && out.credit.state === "failed") failed.push({ phase: CREDIT, amount: credit.amount });
+    notifyCustomerDelayed(customerUserID, bookingID, failed);
+  }
   const states = [out.deposit, out.credit].filter(Boolean).map((r) => r.state);
   const state = states.every((x) => x === "processing") ? "processing" : states.every((x) => x === "failed") ? "failed" : "partial";
   return { state, ...out };
@@ -336,6 +377,7 @@ export const retryDepositReturn = async (bookingID, retriedBy) => {
   const out = await sendOnlineReturns({
     bookingID, paymentID, deposit: pick(DEPOSIT), credit: pick(CREDIT),
     paymongoPaymentID: plan.paymongoPaymentID, performedBy: retriedBy, customerUserID: payment.userID || null,
+    notifyFailure: false,   // the customer was told when it first failed
   });
   if (out.state === "failed") throw new Error(`PayMongo refused it again: ${(out.deposit || out.credit).error}`);
   const first = [out.deposit, out.credit].find((r) => r && r.state === "processing");
@@ -383,5 +425,9 @@ export const handBackDepositReturn = async (bookingID, { method, referenceNumber
       description: `${t.phase === CREDIT ? "Discount" : "Deposit"} of ${peso(t.amount)} for booking ${bookingID} handed back in store (${method || "Cash"}) after the online return failed.` });
   }
   await resolveNotification("refund_due", bookingID).catch(() => {});
+  notifyCustomerReturnedInStore(payment.userID || null, bookingID, {
+    deposit: targets.filter((t) => t.phase === DEPOSIT).reduce((n, t) => n + num(t.amount), 0),
+    credit: targets.filter((t) => t.phase === CREDIT).reduce((n, t) => n + num(t.amount), 0),
+  });
   return { bookingID, amount: total };
 };

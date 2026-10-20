@@ -49,10 +49,10 @@ const unrefundableSentence = (amount) =>
 // refund that is ALL hand-back (nothing online) must not say "₱0 will be returned through PayMongo".
 const returnRouteSentence = ({ onlineAmount = 0, manualAmount = 0, qrphAmount = 0 }) => {
   if (manualAmount > 0 && !(onlineAmount > 0)) {
-    return `${qrphAmount > 0 ? "Payments made by QR Ph can't be returned through PayMongo, so our staff" : "Our staff"} will hand the ${peso(manualAmount)} back to you in person. We'll let you know once it has been returned.`;
+    return `${qrphAmount > 0 ? "Payments made by QR Ph can't be refunded online. " : ""}Please visit our store to collect your ${peso(manualAmount)} refund.`;
   }
   if (manualAmount > 0) {
-    return `${peso(onlineAmount)} will be returned through PayMongo and ${peso(manualAmount)} will be handed back to you by our staff. Please allow up to 24 hours for the online part to be processed.`;
+    return `${peso(onlineAmount)} will be returned through PayMongo (please allow up to 24 hours). Please visit our store to collect the other ${peso(manualAmount)}.`;
   }
   return "Please allow up to 24 hours for PayMongo to process it — we'll notify you once it has been returned.";
 };
@@ -706,7 +706,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 
     auditSafe({
       action: "update",
-      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)}${creditReturned > 0 ? ` (includes ${peso(creditReturned)} held discount credit)` : ""} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""}${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
+      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)} (${peso(onlineAmount)} via PayMongo in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""}${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
       userID: adminUserID,
       bookingID: refundRequest.bookingID,
       paymentID: refundRequest.paymentID,
