@@ -540,10 +540,10 @@ const shapeInspectionForDriver = (doc, inv) => {
     .map(([k, v]) => ({ key: k, label: humanizeFieldKey(k), url: v }));
   const videos = (Array.isArray(doc?.videos) ? doc.videos : [])
     .filter((v) => isHttpUrl(v?.url))
-    .map((v) => ({ id: v.id, url: v.url, durationSec: v.durationSec || null, sizeBytes: v.sizeBytes || null }));
+    .map((v) => ({ url: v.url }));
   const extraPhotos = (Array.isArray(doc?.extraPhotos) ? doc.extraPhotos : [])
     .filter((p) => isHttpUrl(p?.url))
-    .map((p) => ({ id: p.id, url: p.url }));
+    .map((p) => ({ url: p.url, ...(p.caption ? { caption: p.caption } : {}) }));
   const damageParts = (inv?.damageParts || []).map((d) => ({
     carPartName: d.carPartName || "—",
     status:      d.status || "—",

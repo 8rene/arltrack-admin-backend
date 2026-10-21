@@ -9,6 +9,7 @@ import {
 } from "../../models/vehicleDocumentation/vehicleDocumentation.model.js";
 import { storagePathFromUrl, deleteStorageFiles } from "../../utils/storage/storageFiles.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+import { createNotification } from "../notification/notification.service.js";
 import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 
 const DOC_COLLECTIONS = {
@@ -144,8 +145,9 @@ const mergeDocs = (snap) => {
       // videos / extraPhotos: combine across docs (by item id) rather than letting the newest doc's list replace the others
       if (Array.isArray(v)) {
         if (!v.length) return;
-        const seen = new Set((merged[k] || []).map((i) => i?.id));
-        merged[k] = [...(merged[k] || []), ...v.filter((i) => !seen.has(i?.id))];
+        const keyOf = (i) => i?.url || i?.id;
+        const seen = new Set((merged[k] || []).map(keyOf));
+        merged[k] = [...(merged[k] || []), ...v.filter((i) => !seen.has(keyOf(i)))];
         return;
       }
       if (v !== "" && v !== null && v !== undefined) merged[k] = v;
@@ -404,6 +406,84 @@ export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallS
   return { success: true, id: docID };
 };
 
+// ---------------------------------------------
+// Staff confirm that the car (exterior) and the car parts were checked and are in the condition recorded for this
+// phase. Needs the same two things the pickup / return gate needs (a video or the 3 exterior photos, and a saved
+// parts record). Stamps the phase record and tells the customer. Once per phase: a second press is refused, so the
+// customer is never notified twice for the same inspection.
+// ---------------------------------------------
+const findBookingByKey = async (key) => {
+  const byField = await db.collection("bookings").where("bookingID", "==", key).limit(1).get();
+  if (!byField.empty) return { id: byField.docs[0].id, ...byField.docs[0].data() };
+  const byID = await db.collection("bookings").doc(String(key)).get();
+  return byID.exists ? { id: byID.id, ...byID.data() } : null;
+};
+
+export const confirmInspection = async ({ phase, bookingID, carID, confirmedBy }) => {
+  const collectionName = DOC_COLLECTIONS[phase];
+  if (!collectionName) { const e = new Error('phase must be "before" or "after".'); e.status = 400; throw e; }
+  if (!bookingID) { const e = new Error("bookingID is required."); e.status = 400; throw e; }
+
+  const checklist = await getPhaseChecklist(bookingID, phase);
+  if (!checklist.complete) {
+    const e = new Error(`Can't confirm yet: still needed ${describeMissingInspection(checklist)}.`);
+    e.status = 400;
+    throw e;
+  }
+
+  const docsSnap = await db.collection(collectionName).where("bookingID", "==", bookingID).get();
+  if (docsSnap.empty) { const e = new Error("There is no inspection record to confirm yet."); e.status = 400; throw e; }
+  if (docsSnap.docs.some((d) => d.data().inspectionConfirmed)) {
+    const e = new Error("This inspection was already confirmed.");
+    e.status = 409;
+    throw e;
+  }
+
+  const invSnap = await db.collection(INVENTORY_COLLECTION[phase]).where("bookingID", "==", bookingID).limit(1).get();
+  const damageParts = invSnap.empty ? [] : (Array.isArray(invSnap.docs[0].data().damageParts) ? invSnap.docs[0].data().damageParts : []);
+
+  const latest = pickLatest(docsSnap);
+  const confirmedAt = new Date();
+  await db.collection(collectionName).doc(latest.id).update({
+    inspectionConfirmed: { at: confirmedAt, by: confirmedBy || null, damagedPartCount: damageParts.length },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  // Tell the customer. A notification problem never undoes the confirmation.
+  let notified = false;
+  try {
+    const booking = await findBookingByKey(bookingID);
+    if (booking?.userID) {
+      const before = phase === "before";
+      await createNotification({
+        type: "inspection_confirmed",
+        refID: booking.bookingID || bookingID,
+        refCollection: "bookings",
+        userID: booking.userID,
+        dedupeKey: phase,
+        title: before ? "Your rental car was checked before pickup" : "Your rental car was checked after return",
+        message: (before
+          ? "Our team checked the car's exterior and all of its parts and confirmed their condition before pickup."
+          : "Our team checked the car's exterior and all of its parts and confirmed their condition after your trip.")
+          + (damageParts.length > 0 ? " Some condition notes were recorded." : " Everything was recorded in good condition.")
+          + ` Booking ${booking.bookingID || bookingID}.`,
+        extra: { carID: carID || booking.carID || null, phase },
+      });
+      notified = true;
+    }
+  } catch (err) {
+    console.error("[VEHICLE_DOCS] could not notify the customer of the confirmed inspection:", err.message);
+  }
+
+  await createAuditLog({
+    action: "update",
+    description: `Confirmed the ${phase}-trip inspection of booking ${bookingID} (${damageParts.length} part(s) flagged).${notified ? " Customer notified." : " Customer was NOT notified."}`,
+    userID: confirmedBy || null,
+  }).catch((err) => console.error("[VEHICLE_DOCS] audit log failed:", err.message));
+
+  return { confirmedAt, notified, damagedPartCount: damageParts.length };
+};
+
 // ─────────────────────────────────────────────
 // GET — read-only before/after inventory condition summary for one
 // booking. Same inventoryBeforeTrip/inventoryAfterTrip collections
@@ -458,7 +538,7 @@ const cleanNumber = (n) => (Number.isFinite(Number(n)) && Number(n) > 0 ? Math.r
  * Add one video or additional photo to a booking's before/after record.
  * Creates the record if none exists yet (same shape saveVehicleDocBefore/After create).
  */
-export const addInspectionMedia = async ({ phase, kind, bookingID, carID, url, durationSec, sizeBytes, mimeType, addedBy }) => {
+export const addInspectionMedia = async ({ phase, kind, bookingID, carID, url, durationSec, sizeBytes, mimeType, addedBy, caption }) => {
   const collectionName = DOC_COLLECTIONS[phase];
   if (!collectionName) throw new Error('phase must be "before" or "after".');
   const { field, max, label } = mediaConfig(kind);
@@ -474,22 +554,20 @@ export const addInspectionMedia = async ({ phase, kind, bookingID, carID, url, d
 
   const size = cleanNumber(sizeBytes);
   const type = String(mimeType || "");
-  const item = { id: `${kind === "videos" ? "vid" : "img"}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, url };
+  const item = { url };   // all that is stored: the link (+ an optional caption on additional photos)
 
   if (kind === "videos") {
     if (!type.startsWith("video/")) throw new Error("That file is not a video.");
     if (size && size > MAX_VIDEO_BYTES) throw new Error(`Video is too large (max ${Math.round(MAX_VIDEO_BYTES / 1048576)} MB).`);
     const dur = cleanNumber(durationSec);
     if (dur && dur > MAX_VIDEO_SECONDS) throw new Error(`Video is too long (max ${MAX_VIDEO_SECONDS / 60} minutes).`);
-    item.durationSec = dur;
   } else {
     if (!type.startsWith("image/")) throw new Error("That file is not an image.");
     if (size && size > MAX_EXTRA_PHOTO_BYTES) throw new Error(`Photo is too large (max ${Math.round(MAX_EXTRA_PHOTO_BYTES / 1048576)} MB).`);
+    // Optional label ("Front bumper", "Left mirror" ...). A photo with no label is fine: it is just an additional photo.
+    const label = String(caption || "").replace(/\s+/g, " ").trim().slice(0, 60);
+    if (label) item.caption = label;
   }
-  item.sizeBytes = size;
-  item.mimeType = type;
-  item.uploadedBy = addedBy || null;
-  item.uploadedAt = new Date().toISOString();
 
   const query = db.collection(collectionName).where("bookingID", "==", bookingID);
   const timestamp = admin.firestore.FieldValue.serverTimestamp();
@@ -497,6 +575,10 @@ export const addInspectionMedia = async ({ phase, kind, bookingID, carID, url, d
   const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(query);
     const current = snap.docs.reduce((n, d) => n + (Array.isArray(d.data()[field]) ? d.data()[field].length : 0), 0);
+    // the url is what identifies an entry, so the same file can't be added twice
+    if (snap.docs.some((d) => (Array.isArray(d.data()[field]) ? d.data()[field] : []).some((i) => i?.url === url))) {
+      throw new Error(`That ${label} was already added.`);
+    }
     if (current >= max) throw new Error(`Limit reached: at most ${max} ${label}s per inspection.`);
 
     if (!snap.empty) {
@@ -531,11 +613,11 @@ export const addInspectionMedia = async ({ phase, kind, bookingID, carID, url, d
  * Remove one video or additional photo by its id, then delete the file from Storage
  * (best effort — a file that can't be deleted never blocks the record change).
  */
-export const removeInspectionMedia = async ({ phase, kind, bookingID, mediaID, removedBy }) => {
+export const removeInspectionMedia = async ({ phase, kind, bookingID, url, removedBy }) => {
   const collectionName = DOC_COLLECTIONS[phase];
   if (!collectionName) throw new Error('phase must be "before" or "after".');
   const { field, label } = mediaConfig(kind);
-  if (!bookingID || !mediaID) throw new Error("bookingID and mediaID are required.");
+  if (!bookingID || !url) throw new Error("bookingID and url are required.");
 
   const query = db.collection(collectionName).where("bookingID", "==", bookingID);
 
@@ -543,9 +625,9 @@ export const removeInspectionMedia = async ({ phase, kind, bookingID, mediaID, r
     const snap = await tx.get(query);
     for (const d of snap.docs) {
       const list = Array.isArray(d.data()[field]) ? d.data()[field] : [];
-      const hit = list.find((i) => i?.id === mediaID);
+      const hit = list.find((i) => i?.url === url);
       if (hit) {
-        tx.update(d.ref, { [field]: list.filter((i) => i?.id !== mediaID), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        tx.update(d.ref, { [field]: list.filter((i) => i?.url !== url), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
         return hit;
       }
     }
@@ -556,9 +638,9 @@ export const removeInspectionMedia = async ({ phase, kind, bookingID, mediaID, r
   const files = await deleteStorageFiles([removed.url]);
   await createAuditLog({
     action: "delete",
-    description: `Removed ${label} from the ${phase}-trip inspection of booking ${bookingID} (${removed.id}).`,
+    description: `Removed ${label} from the ${phase}-trip inspection of booking ${bookingID} (${storagePathFromUrl(removed.url) || "file"}).`,
     userID: removedBy || null,
   }).catch((err) => console.error("[VEHICLE_DOCS] audit log failed:", err.message));
 
-  return { removed: removed.id, files };
+  return { removed: removed.url, files };
 };

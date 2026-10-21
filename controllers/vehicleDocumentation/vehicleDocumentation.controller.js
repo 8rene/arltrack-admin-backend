@@ -6,6 +6,7 @@ import {
   adminReplaceHistoryPhoto,
   addInspectionMedia,
   removeInspectionMedia,
+  confirmInspection,
 } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { resolveInspectionReminderIfComplete } from "../../services/inspectionReminders/inspectionReminders.service.js";
@@ -168,10 +169,12 @@ export const saveInventoryStatusHandler = async (req, res) => {
 // Videos & additional photos
 //   POST   /api/vehicle-docs/:phase/videos          (phase = before | after)
 //   POST   /api/vehicle-docs/:phase/extra-photos
-//   DELETE /api/vehicle-docs/:phase/videos/:mediaID?bookingID=
-//   DELETE /api/vehicle-docs/:phase/extra-photos/:mediaID?bookingID=
+//   DELETE /api/vehicle-docs/:phase/videos?bookingID=&url=
+//   DELETE /api/vehicle-docs/:phase/extra-photos?bookingID=&url=
 // The browser uploads the file to Storage first, then POSTs the URL here.
-// Body (POST): { bookingID, carID, url, mimeType, sizeBytes, durationSec? }
+// Body (POST): { bookingID, carID, url, caption?, mimeType, sizeBytes, durationSec? }
+// Stored per entry: { url } (+ caption on additional photos). mimeType / sizeBytes / durationSec are only used to
+// validate the upload, not saved. Entries are removed by their url.
 // ─────────────────────────────────────────────
 const KIND_BY_SEGMENT = { videos: "videos", "extra-photos": "extraPhotos" };
 
@@ -179,9 +182,9 @@ const mediaHandler = (segment) => ({
   add: async (req, res) => {
     try {
       const { phase } = req.params;
-      const { bookingID, carID, url, mimeType, sizeBytes, durationSec } = req.body || {};
+      const { bookingID, carID, url, mimeType, sizeBytes, durationSec, caption } = req.body || {};
       const result = await addInspectionMedia({
-        phase, kind: KIND_BY_SEGMENT[segment], bookingID, carID, url, mimeType, sizeBytes, durationSec,
+        phase, kind: KIND_BY_SEGMENT[segment], bookingID, carID, url, mimeType, sizeBytes, durationSec, caption,
         addedBy: req.user?.uid || req.user?.userID || null,
       });
       return res.status(200).json({ success: true, data: result });
@@ -192,10 +195,11 @@ const mediaHandler = (segment) => ({
   },
   remove: async (req, res) => {
     try {
-      const { phase, mediaID } = req.params;
+      const { phase } = req.params;
       const bookingID = req.query.bookingID || req.body?.bookingID;
+      const url = req.query.url || req.body?.url;
       const result = await removeInspectionMedia({
-        phase, kind: KIND_BY_SEGMENT[segment], bookingID, mediaID,
+        phase, kind: KIND_BY_SEGMENT[segment], bookingID, url,
         removedBy: req.user?.uid || req.user?.userID || null,
       });
       return res.status(200).json({ success: true, data: result });
@@ -208,3 +212,17 @@ const mediaHandler = (segment) => ({
 
 export const videoHandlers = mediaHandler("videos");
 export const extraPhotoHandlers = mediaHandler("extra-photos");
+
+// POST /api/vehicle-docs/:phase/confirm   { bookingID, carID }
+// Staff confirm the car and its parts were checked and match the recorded condition. Notifies the customer.
+export const confirmInspectionHandler = async (req, res) => {
+  try {
+    const { phase } = req.params;
+    const { bookingID, carID } = req.body || {};
+    const data = await confirmInspection({ phase, bookingID, carID, confirmedBy: req.user?.uid || req.user?.userID || null });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[VEHICLE_DOCS] confirmInspection error:", error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};

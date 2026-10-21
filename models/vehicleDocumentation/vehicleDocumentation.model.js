@@ -40,8 +40,8 @@ export const VehicleDocumentationAfterTrip = {
 // ─────────────────────────────────────────────
 // Optional free-form media on both docs above.
 //
-//   videos:      [{ id, url, durationSec, sizeBytes, mimeType, uploadedBy, uploadedAt }]
-//   extraPhotos: [{ id, url, sizeBytes, mimeType, uploadedBy, uploadedAt }]
+//   videos:      [{ url }]
+//   extraPhotos: [{ url, caption? }]   (caption is an optional label, max 60 chars)
 //
 // They sit beside the fixed front/side/back fields and the per-part fields,
 // never instead of them: the three exterior photos stay required, videos and

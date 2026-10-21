@@ -6,6 +6,7 @@ import {
   editHistoryPhoto,
   videoHandlers,
   extraPhotoHandlers,
+  confirmInspectionHandler,
 } from "../../controllers/vehicleDocumentation/vehicleDocumentation.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
@@ -35,4 +36,5 @@ export const registerVehicleDocsRoutes = (app) => {
   app.delete("/api/vehicle-docs/:phase/videos/:mediaID",       verifyToken, requireRole(allowed), videoHandlers.remove);
   app.post("/api/vehicle-docs/:phase/extra-photos",           verifyToken, requireRole(allowed), extraPhotoHandlers.add);
   app.delete("/api/vehicle-docs/:phase/extra-photos/:mediaID", verifyToken, requireRole(allowed), extraPhotoHandlers.remove);
+  app.post("/api/vehicle-docs/:phase/confirm",                 verifyToken, requireRole(allowed), confirmInspectionHandler);
 };
