@@ -902,7 +902,7 @@ export const applyDiscount = async (bookingID, amount, appliedBy, actorID = null
 // "Not used yet" is decided by discountLedger.discountEditRoom: nothing has paid a penalty from it, nothing was returned,
 // the deposit is not settled, and (for a discount off the balance) the customer has not paid that balance since.
 // The amount is changed IN PLACE on the discount's own ledger row: the figures are rebuilt from those rows, so the row
-// and the payment stay in step. The row remembers the amount it started with, who changed it last, and when.
+// and the payment stay in step. Who changed it, and from what to what, is in the audit log and the transaction log.
 //
 // The payment, the row and the entries behind it are re-read INSIDE the transaction: if anything landed on this payment
 // since staff opened the screen (a penalty paid from the credit, a settlement, a payment of the balance, another
@@ -975,15 +975,8 @@ export const editDiscount = async (bookingID, entryID, amount, editedBy, actorID
       throw new Error("This booking's discount changed a moment ago. Please refresh and try again.");
     }
     tx.update(doc.ref, { ...newFigures, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-    tx.update(entryRef, {
-      amount: newAmount,
-      // the first amount is kept once; later edits only move the "last changed" fields
-      originalAmount: row.originalAmount != null ? row.originalAmount : plan.current,
-      editedBy: actorID || editedBy || null,
-      editedAt: now,
-      editCount: (Number(row.editCount) || 0) + 1,
-      updatedAt: now,
-    });
+    // Only the amount changes. Who changed it, and from what, is in the audit log and the transaction log below.
+    tx.update(entryRef, { amount: newAmount, updatedAt: now });
   });
 
   const after = computeAmounts({ ...existing, ...newFigures });

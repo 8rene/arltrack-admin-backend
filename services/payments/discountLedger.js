@@ -35,7 +35,7 @@
 // money since it was given: no penalty was paid from the credit, nothing was returned (alone or inside a cancellation
 // refund), the deposit is not settled, and -- for a discount that came off the balance -- the customer has not paid
 // that balance since. The amount is changed IN PLACE on its own ledger row (the figures are rebuilt from those rows, so
-// the row and the payment can't drift apart); who changed it, when, and from what amount is kept on the row.
+// the row and the payment can't drift apart); who changed it, and from what, is in the audit log.
 //
 // Ledger rows live in paymentEntries (see models/paymentEntries/paymentEntry.model.js):
 //   internal (no cash)  discount_applied_balance · discount_credit · discount_applied_penalty · discount_in_refund
@@ -345,7 +345,6 @@ export const listDiscountEvents = (entries = []) =>
         : e.phase === DISCOUNT_PHASES.inRefund ? "refund" : "return",
     phase: e.phase,
     amount: round2(e.amount),
-    originalAmount: e.originalAmount != null ? round2(e.originalAmount) : null,   // set once a discount was edited: what it was first given as
     status: lower(e.status),
     penaltyID: e.penaltyID || null,
     by: e.processedBy || null,
