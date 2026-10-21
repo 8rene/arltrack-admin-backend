@@ -965,6 +965,9 @@ const finishStaffRefund = async (r) => {
     onlineAmount: r.onlineAmount,
     manualAmount: r.manualAmount,
     manualRefund: r.manualRefund || null,
+    unrefundableAmount: Number(r.unrefundableAmount) || 0,   // paid online, no PayMongo payment ID on record
+    paymentID: r.paymentID || null,
+    refundRequestID: r.refundRequestID || null,
     bookingCancelled: cancel.cancelled,
   };
 };
