@@ -1,4 +1,4 @@
-import { listPayments, getPayment, patchPaymentStatus, collectBalance, notifyBalance, discountPayment, refundIssued, retryDiscountRefundPayment } from "../../controllers/payments/payments.controller.js";
+import { listPayments, getPayment, patchPaymentStatus, collectBalance, notifyBalance, discountPayment, editDiscountPayment, refundIssued, retryDiscountRefundPayment } from "../../controllers/payments/payments.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -24,9 +24,13 @@ export const registerPaymentsRoutes = (app) => {
   // Owner only (`allowed`), with the payment mode and a reference number on record.
   app.patch("/api/payments/booking/:bookingID/collect-balance", verifyToken, requireRole(allowed), collectBalance);
 
-  // Gives a discount. No edits and no correction route: a discount that was too small is fixed by giving another.
+  // Gives a discount. A discount that has been USED (a penalty was paid from it, it was returned, the deposit is settled)
+  // can't be changed: a discount that is too small then is fixed by giving another.
   // On a partial payment it comes off the remaining balance; on a fully paid one it is held and returns with the security deposit.
   app.patch("/api/payments/booking/:bookingID/discount", verifyToken, requireRole(allowed), discountPayment);
+
+  // Changes the amount of ONE discount that has not been used yet (:entryID = its ledger row). Same roles as giving one.
+  app.patch("/api/payments/booking/:bookingID/discount/:entryID", verifyToken, requireRole(allowed), editDiscountPayment);
 
   // LEGACY discounts only (refunded on the spot before the ledger): the PayMongo refund failed, send it again. A ledger discount
   // returns with the deposit, so its retry is the deposit return's.

@@ -28,7 +28,14 @@
 // payment or the row: it is in the activity log.
 //
 // A payment WITHOUT discountApplied is a "legacy" discount (given before this model, refunded on the spot):
-// it keeps its old behaviour everywhere and cannot be added to.
+// it keeps its old behaviour everywhere and cannot be added to or edited.
+//
+// EDITING A DISCOUNT
+// A discount that has not been used yet can have its amount changed. "Not used yet" means nothing has happened to the
+// money since it was given: no penalty was paid from the credit, nothing was returned (alone or inside a cancellation
+// refund), the deposit is not settled, and -- for a discount that came off the balance -- the customer has not paid
+// that balance since. The amount is changed IN PLACE on its own ledger row (the figures are rebuilt from those rows, so
+// the row and the payment can't drift apart); who changed it, when, and from what amount is kept on the row.
 //
 // Ledger rows live in paymentEntries (see models/paymentEntries/paymentEntry.model.js):
 //   internal (no cash)  discount_applied_balance · discount_credit · discount_applied_penalty · discount_in_refund
@@ -139,6 +146,86 @@ export const applyNewDiscount = (p, kind, amount) => {
     discountAmount: round2(f.total + a),
     discountApplied: round2(f.applied + (kind === "balance" ? a : 0)),
     discountCredit: round2(f.credit + (kind === "credit" ? a : 0)),
+    discountReturned: f.returned,
+  };
+};
+
+// ── editing a discount that has not been used yet ──────────────────────────────────────────────────────────────
+
+/**
+ * Can ONE discount (one ledger row) be changed, and to what? Pure.
+ *   events         listDiscountEvents(entries): the whole history, so we can see whether anything has used the money
+ *   entryID        the discount row to change (a "balance" or "credit" event)
+ *   totalFee       the booking's grand total
+ *   grossPaid      what the customer has paid in total, BEFORE any discount
+ *   balance        what is still owed after the discounts already given
+ *   given          total of ALL the discounts given on this booking
+ *   depositStatus  the security deposit's status ("Held" | "Settled" | ... | null)
+ *   legacy         a discount given under the old rules is on the payment
+ *   balancePaid    the customer has paid something toward the balance (online or in person)
+ *   refundOpen     a refund request is open for this payment
+ *   balancePending a PayMongo balance checkout is open
+ * Returns { editable, kind, current, max, blocked } -- `blocked` is the reason it can't be changed, or null.
+ * Fails closed: no history (events missing) or an unknown row means "not editable".
+ */
+export const discountEditRoom = ({
+  events, entryID, totalFee, grossPaid, balance, given = 0, depositStatus = null,
+  legacy = false, balancePaid = false, refundOpen = false, balancePending = false,
+}) => {
+  const list = Array.isArray(events) ? events : [];
+  const target = list.find((e) => e.id === entryID && (e.kind === "balance" || e.kind === "credit"));
+  const no = (blocked, kind = null, current = 0) => ({ editable: false, kind, current, max: 0, blocked });
+  if (legacy) return no("A discount given under the old rules can't be changed.");
+  if (!target) return no("This discount could not be found in the booking's history.");
+  const { kind } = target;
+  const current = round2(target.amount);
+  // Nothing may have used the money yet.
+  if (list.some((e) => e.kind === "penalty")) return no("The discount credit has already paid a penalty, so this discount can't be changed any more.", kind, current);
+  if (list.some((e) => e.kind === "return" || e.kind === "refund")) return no("The discount has already been returned to the customer, so it can't be changed any more.", kind, current);
+  if (lower(depositStatus) === "settled") return no("The security deposit has already been settled, so this discount can't be changed any more.", kind, current);
+  if (refundOpen) return no("A refund request is open for this payment. Resolve or cancel it before changing a discount.", kind, current);
+  if (balancePending) return no("A balance payment is in progress on PayMongo. Wait for it to finish before changing a discount.", kind, current);
+  if (kind === "balance" && balancePaid) return no("The customer has already paid the balance this discount was taken off, so it can't be changed any more.", kind, current);
+  if (kind === "credit" && lower(depositStatus) !== "held") return no("There is no held security deposit to return this discount with, so it can't be changed.", kind, current);
+
+  // The most it can be changed to: put this discount's own amount back, then see how much room there is.
+  const max = kind === "balance"
+    ? Math.max(0, round2(num(balance) + current))
+    : Math.max(0, round2(Math.min(num(totalFee), num(grossPaid)) - (num(given) - current)));
+  if (!(max > 0)) return no("There is no room to change this discount.", kind, current);
+  return { editable: true, kind, current, max, blocked: null };
+};
+
+/**
+ * Can this discount be changed to `amount`?  Pure.  Same inputs as discountEditRoom, plus `amount`.
+ * Returns { ok: true, kind, current, max, delta } or { ok: false, error, max }.
+ */
+export const planDiscountEdit = ({ amount, ...room }) => {
+  const a = round2(amount);
+  const peso = (n) => `₱${round2(n).toLocaleString()}`;
+  const r = discountEditRoom(room);
+  if (!r.editable) return { ok: false, max: 0, error: r.blocked };
+  if (!Number.isFinite(Number(amount)) || !(a > 0)) return { ok: false, max: r.max, error: "Enter a discount greater than ₱0." };
+  if (a === r.current) return { ok: false, max: r.max, error: "That is the amount already given. Enter a different amount." };
+  if (a > r.max) {
+    return {
+      ok: false, max: r.max,
+      error: r.kind === "balance"
+        ? `A discount on a partial payment can't be more than ${peso(r.max)} (the balance it came off).`
+        : `This discount can't be more than ${peso(r.max)} (all the discounts together can't go past what the customer paid).`,
+    };
+  }
+  return { ok: true, kind: r.kind, current: r.current, max: r.max, delta: round2(a - r.current) };
+};
+
+/** The figures after one discount of `kind` was changed from `oldAmount` to `newAmount`. Nothing else moves. */
+export const applyDiscountEdit = (p, kind, oldAmount, newAmount) => {
+  const f = getDiscountFigures(p);
+  const delta = round2(round2(newAmount) - round2(oldAmount));
+  return {
+    discountAmount: round2(f.total + delta),
+    discountApplied: round2(f.applied + (kind === "balance" ? delta : 0)),
+    discountCredit: round2(f.credit + (kind === "credit" ? delta : 0)),
     discountReturned: f.returned,
   };
 };
@@ -258,6 +345,7 @@ export const listDiscountEvents = (entries = []) =>
         : e.phase === DISCOUNT_PHASES.inRefund ? "refund" : "return",
     phase: e.phase,
     amount: round2(e.amount),
+    originalAmount: e.originalAmount != null ? round2(e.originalAmount) : null,   // set once a discount was edited: what it was first given as
     status: lower(e.status),
     penaltyID: e.penaltyID || null,
     by: e.processedBy || null,

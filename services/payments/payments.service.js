@@ -11,6 +11,7 @@ import { resolveUserNames } from "../archives/resolveUserName.service.js";
 import { getDepositView } from "./paymentHelpers.js";
 import {
   getDiscountFigures, getDiscountView, hasLegacyDiscount, discountRoom, planNewDiscount, applyNewDiscount, DISCOUNT_PHASES,
+  listDiscountEvents, discountEditRoom, planDiscountEdit, applyDiscountEdit,
 } from "./discountLedger.js";
 
 // Customer-facing bell notification — mirrors the helper of the same name
@@ -378,6 +379,30 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
       });
       return { discountMax: room.max, discountKind: room.kind, discountBlocked: room.blocked };
     })(),
+    // Which discounts can still be changed (nothing has used them yet), and up to how much: [{ id, kind, current, max }].
+    // Built from the discount's history, so it is empty (fails closed) whenever that history was not loaded.
+    discountEdits: (() => {
+      const events = (discountRefund && discountRefund.view && discountRefund.view.events) || [];
+      const dep2 = dep;
+      const gross = getPaymentBreakdown({ ...payment, discountAmount: 0 });
+      const shared = {
+        events,
+        totalFee: Number(payment.amount) || 0,
+        grossPaid: computeAmounts({ ...payment, discountAmount: 0 }).amountPaid,
+        balance,
+        given: getDiscountFigures(payment).total,
+        depositStatus: dep2 ? dep2.status : null,
+        legacy: hasLegacyDiscount(payment),
+        balancePaid: (Number(gross.balanceOnline) || 0) + (Number(gross.balanceInPerson) || 0) > 0,
+        refundOpen: !!openRefund,
+        balancePending: String(payment.balanceStatus || "").toLowerCase() === "pending",
+      };
+      return events
+        .filter((e) => e.kind === "balance" || e.kind === "credit")
+        .map((e) => ({ id: e.id, ...discountEditRoom({ ...shared, entryID: e.id }) }))
+        .filter((r) => r.editable)
+        .map((r) => ({ id: r.id, kind: r.kind, current: r.current, max: r.max }));
+    })(),
     methodOfPayment: payment.methodOfPayment || "—",
     paymentMethod: payment.paymentMethod || "—",
     paymongoPaymentID: payment.paymongoPaymentID || null,
@@ -662,8 +687,8 @@ const planDiscountRefund = (payment, amount) => {
 };
 
 // ─────────────────────────────────────────────
-// Giving a discount. There is no edit and no correction, but MORE than one can be given: a discount that turned
-// out too small is fixed by giving another, never by rewriting the first. Every discount is its own ledger row.
+// Giving a discount. MORE than one can be given, and every discount is its own ledger row. A discount that has not been
+// used yet can also be changed (see editDiscount below); one that has been used is fixed by giving another.
 // The rules live in discountLedger.js; in short:
 //
 //   • Payment still partial  -> the discount comes off the REMAINING balance (it can't be more than that balance).
@@ -868,6 +893,134 @@ export const applyDiscount = async (bookingID, amount, appliedBy, actorID = null
     creditHeld,                             // still held for the customer, after any penalty it just paid
     creditPaidPenalties: usedOnPenalties,   // the part that paid an unpaid penalty
     balanceAfter: after.balance,
+  };
+};
+
+// ─────────────────────────────────────────────
+// Changing a discount that has not been used yet.
+//
+// "Not used yet" is decided by discountLedger.discountEditRoom: nothing has paid a penalty from it, nothing was returned,
+// the deposit is not settled, and (for a discount off the balance) the customer has not paid that balance since.
+// The amount is changed IN PLACE on the discount's own ledger row: the figures are rebuilt from those rows, so the row
+// and the payment stay in step. The row remembers the amount it started with, who changed it last, and when.
+//
+// The payment, the row and the entries behind it are re-read INSIDE the transaction: if anything landed on this payment
+// since staff opened the screen (a penalty paid from the credit, a settlement, a payment of the balance, another
+// discount), this stops with "changed a moment ago" instead of editing a discount that is no longer untouched.
+// Nothing moves in money terms: a discount is never refunded on the spot, so there is no PayMongo call here.
+// ─────────────────────────────────────────────
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+export const editDiscount = async (bookingID, entryID, amount, editedBy, actorID = null) => {
+  if (!bookingID) throw new Error("bookingID is required.");
+  if (!entryID) throw new Error("Choose which discount to change.");
+  const newAmount = Number(amount);
+  if (!Number.isFinite(newAmount) || newAmount <= 0) throw new Error("Enter a discount greater than ₱0.");
+
+  const snap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  if (snap.empty) throw new Error("No payment record found for this booking.");
+  const doc = snap.docs[0];
+  const existing = await hydratePaymentData(doc.data(), doc.id);
+  const status = String(existing.status || "").toLowerCase();
+  if (status === "refunded") throw new Error("This payment has already been refunded — its discount can't be changed.");
+  if (status !== "paid" && status !== "approved") throw new Error("This payment has no received first payment, so it has no discount to change.");
+
+  const paymentID = existing.paymentID || doc.id;
+  const entries = (await getEntriesForPaymentIDs([paymentID])).get(paymentID) || [];
+
+  // The same inputs the Payments screen used to decide whether to show the button.
+  const inputsFor = (pay, rows) => {
+    const dep = getDepositView(pay);
+    const gross = getPaymentBreakdown({ ...pay, discountAmount: 0 });
+    return {
+      events: listDiscountEvents(rows),
+      entryID,
+      totalFee: Number(pay.amount) || 0,
+      grossPaid: computeAmounts({ ...pay, discountAmount: 0 }).amountPaid,
+      balance: computeAmounts(pay).balance,
+      given: getDiscountFigures(pay).total,
+      depositStatus: dep ? dep.status : null,
+      legacy: hasLegacyDiscount(pay),
+      balancePaid: (Number(gross.balanceOnline) || 0) + (Number(gross.balanceInPerson) || 0) > 0,
+      balancePending: String(pay.balanceStatus || "").toLowerCase() === "pending",
+    };
+  };
+  const openRefundRequest = await findOpenRefundRequest(paymentID);
+  const plan = planDiscountEdit({ amount: newAmount, refundOpen: !!openRefundRequest, ...inputsFor(existing, entries) });
+  if (!plan.ok) throw new Error(plan.error);
+
+  const booking = await findBookingByBookingID(bookingID);
+  const customerUserID = resolveCustomerUserID(existing.userID, booking);
+  const figuresBefore = getDiscountFigures(existing);
+  const newFigures = applyDiscountEdit(existing, plan.kind, plan.current, newAmount);
+  const entryRef = db.collection(ENTRY_COLLECTION).doc(entryID);
+  const knownIDs = entries.map((e) => e.id || e.paymentEntryID).sort().join("|");
+  const now = new Date();
+
+  await db.runTransaction(async (tx) => {
+    const [cur, rowSnap, allRows] = await Promise.all([
+      tx.get(doc.ref),
+      tx.get(entryRef),
+      tx.get(db.collection(ENTRY_COLLECTION).where("paymentID", "==", paymentID)),
+    ]);
+    if (!cur.exists || !rowSnap.exists) throw new Error("This discount changed a moment ago. Please refresh and try again.");
+    const c = getDiscountFigures(cur.data());
+    const row = rowSnap.data();
+    const rowsNow = allRows.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const idsNow = rowsNow.map((e) => e.id).sort().join("|");
+    if (
+      c.total !== figuresBefore.total || c.applied !== figuresBefore.applied || c.credit !== figuresBefore.credit ||
+      c.returned !== figuresBefore.returned || row.paymentID !== paymentID || round2(row.amount) !== plan.current || idsNow !== knownIDs
+    ) {
+      throw new Error("This booking's discount changed a moment ago. Please refresh and try again.");
+    }
+    tx.update(doc.ref, { ...newFigures, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    tx.update(entryRef, {
+      amount: newAmount,
+      // the first amount is kept once; later edits only move the "last changed" fields
+      originalAmount: row.originalAmount != null ? row.originalAmount : plan.current,
+      editedBy: actorID || editedBy || null,
+      editedAt: now,
+      editCount: (Number(row.editCount) || 0) + 1,
+      updatedAt: now,
+    });
+  });
+
+  const after = computeAmounts({ ...existing, ...newFigures });
+  const money = (n) => `₱${n.toLocaleString()}`;
+  const what = plan.kind === "balance"
+    ? `the remaining balance is now ${money(after.balance)}`
+    : "it stays held for the customer and returns with the security deposit";
+  const change = `${money(plan.current)} → ${money(newAmount)}`;
+
+  await notifyStaff({
+    type: "discount_edited",
+    refID: bookingID,
+    refCollection: "bookings",
+    title: "Discount Changed",
+    message: `A discount on booking ${bookingID} was changed from ${money(plan.current)} to ${money(newAmount)}: ${what}.`,
+  });
+  await notifyCustomer(
+    customerUserID, bookingID, "discount_edited", "Discount Updated",
+    plan.kind === "balance"
+      ? `Your discount on booking ${bookingID} was changed from ${money(plan.current)} to ${money(newAmount)}. Your remaining balance is now ${money(after.balance)}.`
+      : `Your discount on booking ${bookingID} was changed from ${money(plan.current)} to ${money(newAmount)}. It will be returned to you together with your security deposit after your trip, less any penalties.`,
+  );
+  createTransactionLog({
+    bookingID, paymentID, userID: customerUserID, type: "Discount", amount: newAmount, status: "Success",
+    description: `Discount on booking ${bookingID} changed ${change}: ${what}.`,
+    performedBy: editedBy || "—",
+  });
+  auditSafe({
+    action: "update",
+    description: `Discount on booking ${bookingID} changed ${change}: ${what} (${money(newFigures.discountAmount)} discounts in total).`,
+    userID: editedBy || null, bookingID, paymentID,
+  });
+
+  return {
+    id: doc.id, bookingID, entryID, kind: plan.kind,
+    previousAmount: plan.current, discountAmount: newAmount,
+    discountTotal: newFigures.discountAmount, balanceAfter: after.balance,
   };
 };
 

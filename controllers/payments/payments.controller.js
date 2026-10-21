@@ -4,6 +4,7 @@ import {
   getPaymentById,
   collectRemainingBalance,
   applyDiscount,
+  editDiscount,
   notifyBalanceDue,
   markRefundIssued,
   retryDiscountRefund,
@@ -68,6 +69,22 @@ export const discountPayment = async (req, res) => {
     // rejection (exceeds total fee, no driver assigned yet, etc.), already
     // surfaced to the user via the response message — not a real bug.
     console.warn("[PAYMENTS] discount rejected:", error.message);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Staff (Owner/Admin/Supervisor) changing the amount of a discount that has not been used yet (nothing has paid a
+// penalty from it, nothing was returned, the deposit is not settled). The rules live in discountLedger.js and are
+// checked again inside the transaction, so a screen that was open too long gets a clear message instead.
+export const editDiscountPayment = async (req, res) => {
+  try {
+    const { bookingID, entryID } = req.params;
+    const { amount } = req.body;
+    const editedBy = req.user?.email || req.user?.uid || "staff";
+    const result = await editDiscount(bookingID, entryID, amount, editedBy, actorUid(req));
+    return res.status(200).json({ success: true, data: result, message: "Discount updated." });
+  } catch (error) {
+    console.warn("[PAYMENTS] discount edit rejected:", error.message);
     return res.status(400).json({ success: false, message: error.message });
   }
 };
