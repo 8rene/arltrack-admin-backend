@@ -2,6 +2,10 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { loadLiveBookingKeys, countsAsRevenue } from "../payments/paymentHelpers.js";
 import { resolveVehicleName } from "../booking/booking.service.js";
+import { getPayoutsNeedingAttention } from "../depositReturn/depositReturn.service.js";
+
+// Deposit / discount returns that failed or are still processing at PayMongo (the dashboard raises an alert / warning).
+export const getReturnAlerts = () => getPayoutsNeedingAttention();
 
 const parsePaymentTotal = (data) => {
   const rental  = parseFloat(data.rentalFee  ?? 0) || 0;

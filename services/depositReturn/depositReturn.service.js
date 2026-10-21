@@ -431,3 +431,37 @@ export const handBackDepositReturn = async (bookingID, { method, referenceNumber
   });
   return { bookingID, amount: total };
 };
+
+/**
+ * Deposit / discount payouts that still need someone, for the dashboard: the NEWEST row of each payout (per payment and
+ * kind) that is failed (the customer has NOT received it) or still pending at PayMongo. A retry or an in-store hand-back
+ * writes a newer row, so it drops off this list by itself. Read-only.
+ *   [{ paymentID, bookingID, kind: "deposit" | "discount", state: "failed" | "processing", amount, errorNote, at }]
+ */
+export const getPayoutsNeedingAttention = async () => {
+  const out = [];
+  for (const phase of PAYOUT_PHASES) {
+    const snap = await db.collection(ENTRY_COLLECTION).where("phase", "==", phase).where("direction", "==", "out").get();
+    const latest = new Map();
+    snap.docs.forEach((d) => {
+      const row = { id: d.id, ...d.data() };
+      if (!row.paymentID) return;
+      const cur = latest.get(row.paymentID);
+      if (!cur || toMillis(row.createdAt) > toMillis(cur.createdAt)) latest.set(row.paymentID, row);
+    });
+    for (const row of latest.values()) {
+      const state = stateOfRow(row);
+      if (state === "refunded") continue;
+      out.push({
+        paymentID: row.paymentID,
+        bookingID: row.bookingID || null,
+        kind: phase === CREDIT ? "discount" : "deposit",
+        state,
+        amount: num(row.amount),
+        errorNote: row.transactionErrorNote || null,
+        at: isoOf(row.createdAt || row.processedAt),
+      });
+    }
+  }
+  return out;
+};
