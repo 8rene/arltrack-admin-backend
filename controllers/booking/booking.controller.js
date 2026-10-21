@@ -65,8 +65,8 @@ export const markDroppedOff = async (req, res) => {
 export const settleDepositHandler = async (req, res) => {
   try {
     const { id } = req.params;
-    const { method, referenceNumber, online } = req.body || {};
-    const result = await settleDeposit(id, { method, referenceNumber, online }, req.user?.email || req.user?.uid || null);
+    const { method, referenceNumber, online, completeBooking } = req.body || {};
+    const result = await settleDeposit(id, { method, referenceNumber, online, completeBooking: completeBooking === true }, req.user?.email || req.user?.uid || null);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] settleDeposit error:", error);

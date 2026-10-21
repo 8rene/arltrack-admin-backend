@@ -519,12 +519,47 @@ const resolveBookingDocID = async (idOrBookingID) => {
  * deposit without waiting for the after-trip inspection. A penalty raised
  * after this stays a normal unpaid penalty.
  */
-export const settleDeposit = async (docID, { method, referenceNumber = "", online = false } = {}, performedBy = null) => {
+export const settleDeposit = async (docID, { method, referenceNumber = "", online = false, completeBooking = false } = {}, performedBy = null) => {
   docID = await resolveBookingDocID(docID);
   const bookingDoc = await db.collection("bookings").doc(docID).get();
   if (!bookingDoc.exists) throw new Error("Booking not found.");
-  const booking = bookingDoc.data();
+  let booking = bookingDoc.data();
   const bID = booking.bookingID || docID;
+
+  // A booking flagged stolen is never completed (updateBooking refuses to touch it), so its deposit can't be returned here.
+  if (String(booking.status || "").toLowerCase() === "stolen") {
+    throw new Error("This booking was flagged as stolen, so it can't be completed and its deposit can't be returned here.");
+  }
+
+  // Payments can return the deposit of a booking that is still ongoing, on one condition: the booking is COMPLETED first,
+  // in the same step. The Car Tracking completion gates (vehicle dropped off, after-trip inspection, GPS unassigned) are
+  // skipped here -- they are only warnings on this screen. Everything the settlement itself needs (held deposit, no penalty
+  // waiting for review, a valid way to return the money) is still checked BEFORE completing, so a refusal there never
+  // leaves the booking completed with the deposit still held.
+  if (completeBooking === true && String(booking.status || "").toLowerCase() === "ongoing") {
+    const pre = await getDepositPosition(bID);
+    if (!pre.deposit || pre.deposit.status !== "Held") {
+      throw new Error(`There is no held security deposit to settle (deposit status: ${pre.depositStatus}).`);
+    }
+    if (pre.alreadySettled) throw new Error("This booking's deposit has already been settled.");
+    const waiting = (pre.penalties || []).filter((p) => p.status === "UnderReview").length;
+    if (waiting > 0) {
+      throw new Error(`${waiting} penalt${waiting === 1 ? "y is" : "ies are"} still waiting for a supervisor's review. Confirm or discard ${waiting === 1 ? "it" : "them"} on the Penalties page first.`);
+    }
+    const preOnline = online === true || online === "true";
+    if (preOnline) {
+      if (!(pre.amountToReturn > 0)) throw new Error("There is nothing to return to the customer, so there is nothing to refund online.");
+      const payDoc = await db.collection("payments").where("bookingID", "==", bID).limit(1).get();
+      if (payDoc.empty) throw new Error("This booking has no payment record.");
+      const payment = await hydratePaymentData(payDoc.docs[0].data(), payDoc.docs[0].id);
+      const plan = planOnlineDepositReturn(payment, pre.amountToReturn);
+      if (!plan.ok) throw new Error(plan.reason);
+    } else if (pre.amountToReturn > 0 && !method) {
+      throw new Error("Choose how the deposit is being returned to the customer.");
+    }
+    await updateBooking(docID, { status: "completed" }, performedBy, { skipReturnGates: true });
+    booking = (await db.collection("bookings").doc(docID).get()).data();
+  }
 
   // The deposit is returned only AFTER the booking is completed (Car Tracking step 3: drop-off, inspection and the GPS
   // trail are all done by then, so the penalties are final). Completing no longer waits for the deposit -- see the note
@@ -532,10 +567,8 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
   if (String(booking.status || "").toLowerCase() !== "completed") {
     throw new Error(`Cannot settle the deposit yet: booking status is "${booking.status}". Complete the booking first, then return the deposit.`);
   }
-  const session = await getSessionByBookingID(bID);
-  if (!session?.data?.droppedOffTime) {
-    throw new Error("Mark the vehicle dropped off before settling the deposit.");
-  }
+  // No drop-off requirement any more: a completed booking is enough. Payments can complete an ongoing trip and return the
+  // deposit in one step; the screen warns about whatever Car Tracking hasn't finished.
 
   const pos = await getDepositPosition(bID);
   if (!pos.deposit || pos.deposit.status !== "Held") {
@@ -599,7 +632,9 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
   return onlineResult ? { ...res, online: onlineResult } : res;
 };
 
-export const updateBooking = async (docID, updates, performedBy = null) => {
+// skipReturnGates: only the Payments "Return deposit" flow passes it. Completing from there no longer waits for the
+// drop-off / after-trip inspection / GPS unassign checks: staff are warned on screen and confirm anyway.
+export const updateBooking = async (docID, updates, performedBy = null, { skipReturnGates = false } = {}) => {
   const doc = await db.collection("bookings").doc(docID).get();
   if (!doc.exists) throw new Error("Booking not found");
 
@@ -740,7 +775,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
   // the after-trip inspection is complete (photos AND parts condition).
   // Mirrors the before-trip guard above so Return can't skip the
   // inspection the same way Pickup can't. ──
-  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+  if (!skipReturnGates && filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
     const bID = bookingID || docID;
     const checklist = await getPhaseChecklist(bID, "after");
     if (!checklist.complete) {
@@ -757,7 +792,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
   // the checkpoint that unblocks the after-trip inspection in the first
   // place — a supervisor can't meaningfully inspect a car that, per the
   // system, hasn't arrived yet. ──
-  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+  if (!skipReturnGates && filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
     const bID = bookingID || docID;
     const session = await getSessionByBookingID(bID);
     if (!session?.data?.droppedOffTime) {
@@ -770,7 +805,7 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
 
   // ── GPS gate: cannot mark completed while a GPS device is still
   // assigned to this car. Unassign it first on the GPS Setup page. ──
-  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
+  if (!skipReturnGates && filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
     const stillAssigned = await getDevicesStillAssigned(bookingData.carID);
     if (stillAssigned.length > 0) {
       throw new Error(
@@ -781,7 +816,8 @@ export const updateBooking = async (docID, updates, performedBy = null) => {
   }
 
   // No deposit gate here: a booking can be completed while its security deposit is still held. The deposit is
-  // returned afterwards from Payments (settleDeposit accepts ongoing and completed bookings).
+  // returned afterwards from Payments, which can also complete an ongoing booking and return the deposit in one step
+  // (settleDeposit with completeBooking: it comes back through this same function, so the gates above still apply).
 
   // Stamp the actual return moment, once, at the exact instant Return is
   // clicked (ongoing -> completed). This is deliberately a server
@@ -1093,6 +1129,7 @@ export const getReturnChecklist = async (docID) => {
   // leave them as money owed later, so the server refuses (see settleBooking) and the screen says why up front.
   const underReviewCount = (pos.penalties || []).filter((p) => p.status === "UnderReview").length;
   const isCompleted = String(booking.status || "").toLowerCase() === "completed";
+  const isOngoing = String(booking.status || "").toLowerCase() === "ongoing";
   const settlement = pos.deposit?.settlement || null;
   // Can the deposit go back through PayMongo? Only while it is still to be returned, and only for GCash / Maya.
   const onlineOption = holdsDeposit && pos.amountToReturn > 0
@@ -1126,6 +1163,8 @@ export const getReturnChecklist = async (docID) => {
     bookingID: bID,
     canReturn: items.every((i) => i.complete),
     canSettle: isCompleted && droppedOff && holdsDeposit && underReviewCount === 0,
+    // Payments can complete an ongoing booking and return its deposit in one step. Unmet Return requirements (items) are only shown as a warning.
+    canCompleteAndSettle: isOngoing && holdsDeposit && underReviewCount === 0,
     bookingStatus: booking.status || null,
     underReviewCount,
     onlineReturn: onlineOption,   // { available, channel? , reason? }

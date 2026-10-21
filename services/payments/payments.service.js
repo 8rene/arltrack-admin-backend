@@ -9,6 +9,7 @@ import { sendBalanceReminderEmail } from "../email/email.service.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolveUserNames } from "../archives/resolveUserName.service.js";
 import { getDepositView } from "./paymentHelpers.js";
+import { getDepositReturnForBooking } from "../depositReturn/depositReturn.service.js";
 import {
   getDiscountFigures, getDiscountView, hasLegacyDiscount, discountRoom, planNewDiscount, applyNewDiscount, DISCOUNT_PHASES,
   listDiscountEvents, discountEditRoom, planDiscountEdit, applyDiscountEdit,
@@ -1465,7 +1466,10 @@ export const getPaymentById = async (id) => {
     const names = ids.length ? await resolveUserNames(ids).catch(() => ({})) : {};
     discount = { ...discount, events: discount.events.map((e) => ({ ...e, byName: names[e.by] || e.by || null })) };
   }
-  return { ...row, discount, penalties, penaltyGateway };
+  // Where the security deposit's payout really stands (in store / PayMongo processing / failed / refunded). depositReturned
+  // above only says what settlement DECIDED to hand back, not whether the money actually reached the customer.
+  const depositReturn = await getDepositReturnForBooking(payment.bookingID);
+  return { ...row, discount, penalties, penaltyGateway, depositReturn };
 };
 
 // Same full detail as getPaymentById() above (discounts, the deposit/balance
