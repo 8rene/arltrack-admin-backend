@@ -25,6 +25,13 @@ export const INSPECTION_COLLECTIONS = [
 const ARCHIVE = "vehicleInspectionArchives";
 const stamp = () => admin.firestore.FieldValue.serverTimestamp();
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
+// toISO only handles a top-level timestamp; this walks objects/lists so nested ones (inspectionConfirmed.at) are converted too.
+const deepISO = (val) => {
+  if (val?.toDate) return val.toDate().toISOString();
+  if (Array.isArray(val)) return val.map(deepISO);
+  if (val && typeof val === "object") return Object.fromEntries(Object.entries(val).map(([k, v]) => [k, deepISO(v)]));
+  return val ?? null;
+};
 const millis = (val) => (val?.toDate ? val.toDate().getTime() : val ? new Date(val).getTime() || 0 : 0);
 
 // live inspection docs of a booking, found by every key the booking is known by
@@ -122,7 +129,7 @@ export const shapeInspectionRecords = (records = []) => {
   const out = Object.fromEntries(INSPECTION_COLLECTIONS.map((c) => [c, []]));
   records.forEach((r) => {
     if (!out[r.collection]) return;
-    const clean = Object.fromEntries(Object.entries(r.data || {}).map(([k, v]) => [k, toISO(v)]));
+    const clean = Object.fromEntries(Object.entries(r.data || {}).map(([k, v]) => [k, deepISO(v)]));
     out[r.collection].push({ id: r.id, ...clean });
   });
   return out;
@@ -151,6 +158,8 @@ export const getAllInspectionArchives = async () => {
       // fixed exterior/part photos + any additional photos
       const photos = (c) => shaped[c].reduce((n, r) => n + Object.keys(r).filter((k) => /Url$/.test(k) && r[k]).length + arrLen(r, "extraPhotos"), 0);
       const videos = (c) => shaped[c].reduce((n, r) => n + arrLen(r, "videos"), 0);
+      // did staff confirm this phase's inspection (and so notify the customer)?
+      const confirmed = (c) => shaped[c].some((r) => !!r.inspectionConfirmed);
       return {
         vehicleInspectionArchivesId: d.id,
         bookingID: data.bookingID,
@@ -165,6 +174,8 @@ export const getAllInspectionArchives = async () => {
         afterPhotos: photos("vehicleDocumentationAfterTrip"),
         beforeVideos: videos("vehicleDocumentationBeforeTrip"),
         afterVideos: videos("vehicleDocumentationAfterTrip"),
+        beforeConfirmed: confirmed("vehicleDocumentationBeforeTrip"),
+        afterConfirmed: confirmed("vehicleDocumentationAfterTrip"),
         archivedAt: toISO(data.archivedAt),
         archivedBy: data.archivedBy || null,
         records: shaped,

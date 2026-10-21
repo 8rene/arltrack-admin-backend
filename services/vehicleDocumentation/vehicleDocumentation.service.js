@@ -10,6 +10,7 @@ import {
 import { storagePathFromUrl, deleteStorageFiles } from "../../utils/storage/storageFiles.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createNotification } from "../notification/notification.service.js";
+import { resolveCurrentDriverID } from "../driverAssignments/driverAssignments.service.js";
 import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 
 const DOC_COLLECTIONS = {
@@ -409,7 +410,7 @@ export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallS
 // ---------------------------------------------
 // Staff confirm that the car (exterior) and the car parts were checked and are in the condition recorded for this
 // phase. Needs the same two things the pickup / return gate needs (a video or the 3 exterior photos, and a saved
-// parts record). Stamps the phase record and tells the customer. Once per phase: a second press is refused, so the
+// parts record). Stamps the phase record and notifies the assigned driver, or the customer when there is no driver. Once per phase: a second press is refused, so the
 // customer is never notified twice for the same inspection.
 // ---------------------------------------------
 const findBookingByKey = async (key) => {
@@ -449,39 +450,64 @@ export const confirmInspection = async ({ phase, bookingID, carID, confirmedBy }
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Tell the customer. A notification problem never undoes the confirmation.
-  let notified = false;
+  // Tell whoever is handling the car on this trip. When a driver is assigned, ONLY the driver is told; the customer
+  // is notified only when there is no driver (self-drive, or a chauffeur booking with nobody assigned yet).
+  // A notification problem never undoes the confirmation.
+  let notifiedTo = null;   // "driver" | "customer" | null
   try {
     const booking = await findBookingByKey(bookingID);
-    if (booking?.userID) {
+    if (booking) {
       const before = phase === "before";
-      await createNotification({
-        type: "inspection_confirmed",
-        refID: booking.bookingID || bookingID,
-        refCollection: "bookings",
-        userID: booking.userID,
-        dedupeKey: phase,
-        title: before ? "Your rental car was checked before pickup" : "Your rental car was checked after return",
-        message: (before
-          ? "Our team checked the car's exterior and all of its parts and confirmed their condition before pickup."
-          : "Our team checked the car's exterior and all of its parts and confirmed their condition after your trip.")
-          + (damageParts.length > 0 ? " Some condition notes were recorded." : " Everything was recorded in good condition.")
-          + ` Booking ${booking.bookingID || bookingID}.`,
-        extra: { carID: carID || booking.carID || null, phase },
-      });
-      notified = true;
+      const bookingRef = booking.bookingID || bookingID;
+      const driverID = await resolveCurrentDriverID(booking, booking.id);
+      const note = damageParts.length > 0 ? " Some condition notes were recorded." : " Everything was recorded in good condition.";
+      const extra = { carID: carID || booking.carID || null, phase };
+      if (driverID) {
+        await createNotification({
+          type: "inspection_confirmed",
+          refID: booking.id,                 // same reference the driver_assigned notification uses
+          refCollection: "bookings",
+          userID: driverID,
+          dedupeKey: phase,
+          title: before ? "Car inspected - ready for pickup" : "Return inspection confirmed",
+          message: (before
+            ? `The car for booking ${bookingRef} was checked and its condition confirmed. You can go ahead with the pickup.`
+            : `The car for booking ${bookingRef} was checked after the trip and its condition confirmed.`) + note,
+          extra,
+        });
+        notifiedTo = "driver";
+      } else if (booking.userID) {
+        await createNotification({
+          type: "inspection_confirmed",
+          refID: bookingRef,
+          refCollection: "bookings",
+          userID: booking.userID,
+          dedupeKey: phase,
+          title: before ? "Your rental car was checked before pickup" : "Your rental car was checked after return",
+          message: (before
+            ? "Our team checked the car's exterior and all of its parts and confirmed their condition before pickup."
+            : "Our team checked the car's exterior and all of its parts and confirmed their condition after your trip.")
+            + note + ` Booking ${bookingRef}.`,
+          extra,
+        });
+        notifiedTo = "customer";
+      }
     }
   } catch (err) {
-    console.error("[VEHICLE_DOCS] could not notify the customer of the confirmed inspection:", err.message);
+    console.error("[VEHICLE_DOCS] could not send the inspection-confirmed notification:", err.message);
+  }
+  if (notifiedTo) {
+    await db.collection(collectionName).doc(latest.id).update({ "inspectionConfirmed.notifiedTo": notifiedTo })
+      .catch((err) => console.error("[VEHICLE_DOCS] could not record who was notified:", err.message));
   }
 
   await createAuditLog({
     action: "update",
-    description: `Confirmed the ${phase}-trip inspection of booking ${bookingID} (${damageParts.length} part(s) flagged).${notified ? " Customer notified." : " Customer was NOT notified."}`,
+    description: `Confirmed the ${phase}-trip inspection of booking ${bookingID} (${damageParts.length} part(s) flagged).${notifiedTo ? ` ${notifiedTo === "driver" ? "Driver" : "Customer"} notified.` : " Nobody was notified (no driver or customer found)."}`,
     userID: confirmedBy || null,
   }).catch((err) => console.error("[VEHICLE_DOCS] audit log failed:", err.message));
 
-  return { confirmedAt, notified, damagedPartCount: damageParts.length };
+  return { confirmedAt, notified: !!notifiedTo, notifiedTo, damagedPartCount: damageParts.length };
 };
 
 // ─────────────────────────────────────────────
