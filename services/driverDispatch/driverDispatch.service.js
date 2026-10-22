@@ -264,6 +264,21 @@ const getDriverBookings = async (driverID, statuses) => {
 
   const rows = [...byId.values()];
   await attachCurrentDrivers(rows);
+
+  // attachCurrentDrivers only knows "assigned" rows. Once a trip is over, its row flips to "completed", so the
+  // booking would come back with no driver and be filtered out below -- which emptied the driver's History tab.
+  // A finished trip still belongs to the driver whose own (completed) row it is, so keep that link.
+  const rowByKey = new Map(assignments.map((a) => [a.bookingID, a]));
+  rows.forEach((b) => {
+    if (b.driverID) return;
+    const a = rowByKey.get(bookingKeyOf(b.id, b));
+    if (a && a.status === ASSIGNMENT_STATUS.COMPLETED && a.driverID === driverID) {
+      b.driverID         = a.driverID;
+      b.driverAssignedAt = a.assignedAt || null;
+      b.driverAssignedBy = a.assignedBy || null;
+    }
+  });
+
   return rows.filter((b) => b.driverID === driverID);
 };
 
