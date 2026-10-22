@@ -1,4 +1,4 @@
-import { listRefundRequests, listDiscountRefunds, listDepositReturns, approveRefund, rejectRefund, manualRefundIssued } from "../../controllers/refundRequest/refundRequest.controller.js";
+import { listRefundRequests, listDiscountRefunds, listDepositReturns, approveRefund, rejectRefund, manualRefundIssued, failedRefundHandedBack } from "../../controllers/refundRequest/refundRequest.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -15,6 +15,8 @@ export const registerRefundRequestRoutes = (app) => {
   app.patch("/api/refund-requests/:id/reject",  verifyToken, requireRole(allowed), rejectRefund);
   // Staff confirm the in-person part of a refund (the balance PayMongo can't return) was handed back.
   app.patch("/api/refund-requests/:id/manual-issued", verifyToken, requireRole(allowed), manualRefundIssued);
+  // Staff paid back, themselves, the part(s) PayMongo refused on a Failed request (cash / GCash / Maya / bank transfer).
+  app.patch("/api/refund-requests/:id/failed-handback", verifyToken, requireRole(allowed), failedRefundHandedBack);
   // NOTE: a car's upcoming bookings are now force-refunded/cancelled as one
   // batch, entirely server-side, inside PATCH /api/fleet/cars/:carID/status
   // (fleet.controller.js's changeCarStatus) — there's no standalone

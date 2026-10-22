@@ -5,6 +5,7 @@ import {
   approveRefundRequest,
   rejectRefundRequest,
   markManualRefundIssued,
+  markFailedRefundHandedBack,
 } from "../../services/refundRequest/refundRequest.service.js";
 
 export const listRefundRequests = async (req, res) => {
@@ -91,6 +92,27 @@ export const manualRefundIssued = async (req, res) => {
     });
   } catch (error) {
     console.error("[REFUND] manual-issued error:", error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+// PATCH /api/refund-requests/:id/failed-handback   { method: "Cash" | "GCash" | "Maya" | "Bank Transfer", referenceNumber?: string }
+// Staff paid back, themselves, the part(s) PayMongo refused on a Failed refund request.
+export const failedRefundHandedBack = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { method, referenceNumber } = req.body || {};
+    const issuedBy = req.user?.userID || req.user?.uid || null;
+    const data = await markFailedRefundHandedBack(id, issuedBy, method || "Cash", referenceNumber);
+    return res.status(200).json({
+      success: true,
+      message: data.refundCompleted
+        ? "Marked as handed back. The refund is now complete."
+        : "Marked as handed back. The refund is still waiting on another part.",
+      data,
+    });
+  } catch (error) {
+    console.error("[REFUND] failed-handback error:", error);
     return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };

@@ -1331,7 +1331,9 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     const rows = rowSnap.docs
       .map((d) => ({ id: d.id, ...d.data() }))
       .filter((e) => e.direction === "out");
-    const manualRow = rows.find((e) => e.source === "in_person") || null;
+    // A row written by markFailedRefundHandedBack (handBackFor) belongs to a FAILED PayMongo part, not to this manual portion.
+    const manualRow = rows.find((e) => e.source === "in_person" && !e.handBackFor) || null;
+    const coveredIDs = new Set(rows.filter((e) => e.handBackFor && e.status === "success").map((e) => e.handBackFor));
 
     // The rows are the only source -- nothing is read from manualRefund / parts on the request document.
     const manualAmount = Number(manualRow?.amount) || 0;
@@ -1342,9 +1344,10 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
     const manualRefund = { amount: manualAmount, issued: true, issuedBy: issuedBy || null, issuedAt: now, method, referenceNumber: refNo };
     // Finished only if every PayMongo part has already settled. Otherwise the
     // customer-backend webhook completes it when the last part lands.
+    // A failed part that staff already handed back in person counts as settled.
     const finalize = rows
       .filter((e) => e.source === "online" && e.status !== "unrefundable")
-      .every((e) => e.status === "success");
+      .every((e) => e.status === "success" || (e.status === "failed" && coveredIDs.has(e.id)));
 
     t.update(reqRef, {
       updatedAt: now,
@@ -1396,6 +1399,186 @@ export const markManualRefundIssued = async (refundRequestID, issuedBy, method =
   }
 
   return { ...r, refundCompleted: outcome.finalize };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A refund request that is "Failed": PayMongo refused one (or more) of its online parts. Staff pay that part back
+// themselves (cash, GCash, Maya, bank transfer) and record it here.
+//
+//   * Each uncovered failed part gets ONE new success row  <partRowID>_handback  (source "in_person", handBackFor = the
+//     failed row's id). The failed row itself is left untouched, so the ledger keeps the true story: PayMongo refused it,
+//     staff paid it by hand.
+//   * Everything that reads a request treats a failed part as covered once its hand-back row exists
+//     (hydrateRefundRequest here, the same mapper in the customer backend, and the PayMongo webhook).
+//   * When nothing is left outstanding the request becomes Refunded; if something else is still pending at PayMongo or
+//     still to hand back, it goes back to Approved (not Failed) so it sits in the right Under Process stage.
+//
+// A request that failed part-way inside approveRefundRequest / staffRefundBooking never reached the "finish-up" of an
+// approval (close the held discount credit, settle the deposit, cancel the booking). The hand-back runs that catch-up
+// too. Every step is idempotent, so a request that already went through it (e.g. PayMongo failed later, by webhook)
+// is left exactly as it was.
+// ─────────────────────────────────────────────────────────────────────────────
+// Not a top-level constant: payments.service.js and this file import each other, so PAYMENT_METHODS is not initialised yet
+// while this module loads. It is read here, when the endpoint is actually called.
+export const markFailedRefundHandedBack = async (refundRequestID, issuedBy, method = "Cash", referenceNumber = null) => {
+  const HANDBACK_METHODS = [...PAYMENT_METHODS, "Maya"];
+  if (!HANDBACK_METHODS.includes(method)) {
+    throw fail(`method must be one of: ${HANDBACK_METHODS.join(", ")}.`, 400);
+  }
+  const refNo = nullIfSentinel(referenceNumber);
+  if (refNo && refNo.length > 100) throw fail("Reference number is too long (100 characters max).", 400);
+
+  const reqRef = db.collection("refundRequests").doc(refundRequestID);
+  const entryCol = db.collection(ENTRY_COLLECTION);
+  const methodCode = normalizeMethod(method).method;
+
+  const outcome = await db.runTransaction(async (t) => {
+    const snap = await t.get(reqRef);
+    if (!snap.exists) throw fail("Refund request not found.", 404);
+    const r = snap.data();
+    if (r.status !== "Failed") throw fail(`Only a Failed refund can be handed back this way (this one is ${r.status}).`, 409);
+
+    const rowSnap = await t.get(entryCol.where("refundReqID", "==", refundRequestID));
+    const rows = rowSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((e) => e.direction === "out");
+
+    const covered = new Set(rows.filter((e) => e.handBackFor && e.status === "success").map((e) => e.handBackFor));
+    const failedRows = rows.filter((e) => e.source === "online" && e.status === "failed" && !covered.has(e.id));
+    if (!failedRows.length) throw fail("There is no failed part left to hand back on this refund.", 409);
+
+    const now = new Date();
+    const written = failedRows.map((f) => {
+      const id = `${f.id}_handback`;
+      const row = {
+        paymentEntryID: id,
+        paymentID: f.paymentID || r.paymentID || null,
+        bookingID: f.bookingID || r.bookingID || null,
+        userID: f.userID || r.userID || null,
+        refundReqID: refundRequestID,
+        penaltyID: null,
+        direction: "out",
+        phase: f.phase === "balance" ? "balance" : "deposit",
+        source: "in_person",
+        method: methodCode,
+        amount: Number(f.amount) || 0,
+        status: "success",
+        referenceNumber: refNo,
+        sessionID: null,
+        transactionFee: null,
+        groupID: null,
+        handBackFor: f.id,                       // the failed PayMongo part this row pays back
+        processedBy: issuedBy || null,
+        processedAt: now,
+        settledAt: now,
+        transactionErrorNote: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      t.set(entryCol.doc(id), row);
+      return row;
+    });
+
+    // Anything else still open? (a PayMongo part not settled yet, or the original in-person portion not handed back)
+    const stillOnline = rows.some((e) => e.source === "online" && e.status !== "unrefundable" && e.status !== "success" && e.status !== "failed");
+    const manualOutstanding = rows.some((e) => e.source === "in_person" && !e.handBackFor && e.status !== "success");
+    const finalize = !stillOnline && !manualOutstanding;
+
+    // Everything the customer has actually been given back, counting these hand-backs.
+    const returnedTotal = rows
+      .filter((e) => e.status === "success" || (e.status === "pending" && e.source === "online"))
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0)
+      + written.reduce((s, e) => s + e.amount, 0);
+
+    t.update(reqRef, {
+      status: finalize ? "Refunded" : "Approved",
+      updatedAt: now,
+      ...(finalize ? { refundedAt: now, toRefundAmount: Math.round(returnedTotal * 100) / 100 } : {}),
+    });
+    return { request: r, rows, written, finalize, returnedTotal: Math.round(returnedTotal * 100) / 100 };
+  });
+
+  const { request: r, rows, written, finalize, returnedTotal } = outcome;
+  const handedTotal = written.reduce((s, e) => s + e.amount, 0);
+
+  // One transaction log per hand-back row (the same shape the normal hand-back writes).
+  written.forEach((row) => {
+    createTransactionLog({
+      bookingID: r.bookingID,
+      paymentID: r.paymentID,
+      refundReqID: refundRequestID,
+      userID: r.userID,
+      type: "Refund",
+      amount: row.amount,
+      status: "Refunded",
+      paymentMethod: method,
+      referenceNumber: refNo,
+      description: `${peso(row.amount)} handed back to the customer (${method}) for the ${row.phase} refund PayMongo could not complete, booking ${r.bookingID}.`,
+      performedBy: issuedBy || "—",
+      logID: row.paymentEntryID,
+    });
+  });
+
+  auditSafe({
+    action: "update",
+    description: `Refund ${refundRequestID}: ${peso(handedTotal)} that PayMongo could not refund was handed back to the customer via ${method}${refNo ? ` (ref ${refNo})` : ""}.${finalize ? " Refund complete." : " Other part(s) are still open."}`,
+    userID: issuedBy || null,
+    bookingID: r.bookingID,
+    paymentID: r.paymentID,
+    refundRequestID,
+  });
+
+  // ── catch-up of the approval's finish-up (every step idempotent; none may undo the hand-back already saved) ──
+  try {
+    if (r.paymentID) {
+      const pSnap = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
+      if (!pSnap.empty) {
+        const pRef = pSnap.docs[0].ref;
+        const payment = await hydratePaymentData(pSnap.docs[0].data(), pSnap.docs[0].id);
+        const now = new Date();
+
+        // How much of the deposit was kept: stored on the request when known, otherwise worked out from what was
+        // actually paid back (the plan's total minus what the rows add up to). Only needed while the deposit is Held.
+        const dep = getDepositView(payment);
+        let forfeit = typeof r.depositForfeited === "number" ? r.depositForfeited : null;
+        if (dep && dep.status === "Held" && forfeit === null) {
+          const policy = policyForRequest(r, payment);
+          const policyForfeit = policy ? policy.forfeit : 0;
+          const shortfall = computeRefundPlan(payment, { forfeit: 0 }).total - returnedTotal;
+          forfeit = shortfall > 0.5 && policyForfeit > 0 ? Math.min(Math.round(shortfall * 100) / 100, policyForfeit) : 0;
+        }
+
+        // Held discount credit goes back inside the refund (no-op when it was closed already).
+        const creditBatch = db.batch();
+        const creditReturned = closeHeldCreditInBatch(creditBatch, pRef, payment, {
+          refundRequestID, bookingID: r.bookingID, paymentID: r.paymentID, userID: r.userID, processedBy: issuedBy || null, at: now,
+        });
+        if (creditReturned > 0) await creditBatch.commit();
+
+        await markDepositAfterRefund(pRef, payment, forfeit || 0, { processedBy: issuedBy || null, refundRequestID });
+
+        if (finalize) await pRef.update({ status: "Refunded", updatedAt: now });
+      }
+    }
+
+    // Approval cancels the booking; a request that failed part-way never got that far. No-op if it is already cancelled / started.
+    const reason = r.source === "staff" ? `Cancelled by staff: ${(await staffRefundContext({ ...r, refundRequestID })).reason}` : "Cancelled: refund approved.";
+    const cancel = await cancelBookingForRefund(r.bookingID, reason, issuedBy || null);
+    if (cancel.cancelled && cancel.driverID) {
+      createNotification({
+        type: "refund_request", refID: refundRequestID, refCollection: "refundRequests",
+        title: "Booking cancelled — refund approved",
+        message: `A booking you were assigned to (${r.bookingID}) was cancelled because its refund was approved.`,
+        userID: cancel.driverID,
+      }).catch((err) => console.error("[REFUND] Failed to notify assigned driver:", err.message));
+    }
+    resolveNotification("refund_request", refundRequestID).catch(() => {});
+    resolveNotification("refund_due", r.bookingID).catch(() => {});
+  } catch (err) {
+    console.error("[REFUND] hand-back saved, but the catch-up of the approval steps failed:", err.message);
+  }
+
+  if (finalize) await notifyCustomer(r.userID, r.bookingID, "refund_completed", "Refund Completed", `Your refund of ${peso(returnedTotal)} has been returned.`);
+
+  return { ...r, status: finalize ? "Refunded" : "Approved", handedBackAmount: handedTotal, refundCompleted: finalize };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
