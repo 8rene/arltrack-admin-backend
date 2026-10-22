@@ -70,6 +70,18 @@ export const getActiveAssignment = async (bookingKey) => {
   return snap.empty ? null : shape(snap.docs[0]);
 };
 
+/** This driver's own "completed" row for a booking (a finished trip), or null. Read-only checks use it. */
+export const getCompletedAssignment = async (bookingKey, driverID) => {
+  if (!bookingKey || !driverID) return null;
+  const snap = await db.collection(COL)
+    .where("bookingID", "==", bookingKey)
+    .where("driverID", "==", driverID)
+    .where("status", "==", ASSIGNMENT_STATUS.COMPLETED)
+    .limit(1)
+    .get();
+  return snap.empty ? null : shape(snap.docs[0]);
+};
+
 /**
  * Map<bookingKey, assignment> for many bookings at once. If a booking ever has
  * two "assigned" rows (a data problem -- createAssignment closes extras), the

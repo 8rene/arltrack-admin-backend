@@ -11,7 +11,7 @@ import { createPenalty, listPenaltiesForDriver, editPenaltyAsDriver } from "../p
 import { sessionStartedAt } from "../../utils/date/sessionDates.js";
 import { getTermsVersion } from "../terms/terms.service.js";
 import {
-  ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID,
+  ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getCompletedAssignment,
   getAssignmentsForDriver, getBookingsByKeys, createAssignment, endActiveAssignment,
   legacyDriverFieldsPatch,
 } from "../driverAssignments/driverAssignments.service.js";
@@ -527,6 +527,24 @@ const assertOwnsBooking = async (bookingDocID, driverID) => {
   return doc.data();
 };
 
+// Read-only variant: also lets a driver open a trip he already FINISHED (his assignment row is "completed", so he is no
+// longer the booking's current driver). Used only by the read-only views (inspection, terms) the History tab needs;
+// every action (pickup, dropoff, remind...) still uses assertOwnsBooking above.
+const assertOwnsOrFinishedBooking = async (bookingDocID, driverID) => {
+  const doc = await db.collection("bookings").doc(bookingDocID).get();
+  if (!doc.exists) throw new Error("Booking not found.");
+  const currentDriverID = await resolveCurrentDriverID(doc.data(), doc.id);
+  if (currentDriverID !== driverID) {
+    const finished = await getCompletedAssignment(bookingKeyOf(doc.id, doc.data()), driverID);
+    if (!finished) {
+      const err = new Error("This booking is not assigned to you.");
+      err.status = 403;
+      throw err;
+    }
+  }
+  return doc.data();
+};
+
 // ─────────────────────────────────────────────
 // Read-only inspection proof for the driver's own booking.
 //
@@ -562,7 +580,7 @@ const shapeInspectionForDriver = (doc) => {
 
 /** Before + after inspection proof for one of THIS driver's bookings (read-only). */
 export const getMyTripInspection = async (bookingDocID, driverID) => {
-  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const booking = await assertOwnsOrFinishedBooking(bookingDocID, driverID);
   // Records may have been saved under the business bookingID or the doc id.
   const keys = [...new Set([booking.bookingID, bookingDocID].filter(Boolean))];
   const docResults = await Promise.all(keys.map((k) => getVehicleDocsByBooking(k)));
@@ -580,7 +598,7 @@ export const getMyTripInspection = async (bookingDocID, driverID) => {
  * available:false when the booking has no recorded agreement.
  */
 export const getMyTripTerms = async (bookingDocID, driverID) => {
-  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const booking = await assertOwnsOrFinishedBooking(bookingDocID, driverID);
   const id = booking.termsVersionID || booking.termsHash || null;
   if (!id) return { available: false };
   const terms = await getTermsVersion(id);
