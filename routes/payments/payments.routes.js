@@ -24,13 +24,13 @@ export const registerPaymentsRoutes = (app) => {
   // Owner only (`allowed`), with the payment mode and a reference number on record.
   app.patch("/api/payments/booking/:bookingID/collect-balance", verifyToken, requireRole(allowed), collectBalance);
 
-  // Gives a discount. A discount that has been USED (a penalty was paid from it, it was returned, the deposit is settled)
+  // Gives a discount (Admin / Owner only). A discount that has been USED (a penalty was paid from it, it was returned, the deposit is settled)
   // can't be changed: a discount that is too small then is fixed by giving another.
   // On a partial payment it comes off the remaining balance; on a fully paid one it is held and returns with the security deposit.
-  app.patch("/api/payments/booking/:bookingID/discount", verifyToken, requireRole(allowed), discountPayment);
+  app.patch("/api/payments/booking/:bookingID/discount", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), discountPayment);
 
-  // Changes the amount of ONE discount that has not been used yet (:entryID = its ledger row). Same roles as giving one.
-  app.patch("/api/payments/booking/:bookingID/discount/:entryID", verifyToken, requireRole(allowed), editDiscountPayment);
+  // Changes the amount of ONE discount that has not been used yet (:entryID = its ledger row). Owner only.
+  app.patch("/api/payments/booking/:bookingID/discount/:entryID", verifyToken, requireRole([roles.OWNER]), editDiscountPayment);
 
   // LEGACY discounts only (refunded on the spot before the ledger): the PayMongo refund failed, send it again. A ledger discount
   // returns with the deposit, so its retry is the deposit return's.
