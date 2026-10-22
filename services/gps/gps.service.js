@@ -1,9 +1,8 @@
 // ── GPS Service ───────────────────────────────────────────────────────────────
 // Keeps the latest location per device in memory, so the ping handler gets a normalised record back.
 //
-// This used to ALSO write every persisted ping to a `gpsLocations` Firestore collection. Nothing ever read that
-// collection (the live map reads `gpsLocation`, written by gps.controller.js), so it was a duplicate write on every
-// ping and has been removed. If you have an old `gpsLocations` collection, it can be deleted.
+// The `gpsLocations` Firestore collection (the one the live map reads) is written by gps.controller.js, not here.
+// This service used to write a second copy of every ping, which was a duplicate write and has been removed.
 
 // In-memory cache of the last record per device
 const cache = {};

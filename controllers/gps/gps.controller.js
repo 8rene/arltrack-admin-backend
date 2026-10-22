@@ -40,7 +40,7 @@ export const receiveLocation = async (req, res) => {
   // start, multipath — the kind of glitch that reports a point on another
   // continent while the car hasn't moved) before they're saved anywhere.
   // Silent drop, by design: no error surfaced to the device, nothing
-  // written to gpsLocation/gpsDevice/session/Sheets for this ping. See
+  // written to gpsLocations/gpsDevice/session/Sheets for this ping. See
   // utils/gps/philippinesBounds.js for what this box does and doesn't catch.
   if (!isWithinPhilippines(latVal, lngVal)) {
     console.warn(`[GPS] Dropped out-of-bounds ping from ${device_id}: lat=${lat}, lng=${lng}`);
@@ -71,7 +71,7 @@ export const receiveLocation = async (req, res) => {
 
   // ── gpsDevice: is this a REGISTERED device, and which car is it on? ─────
   // Checked BEFORE anything is saved, so a ping from an unknown device_id
-  // creates no gpsLocation doc, no cache entry and no live-map marker.
+  // creates no gpsLocations doc, no cache entry and no live-map marker.
   // Cached for ~60s (cleared on any device add/assign/unassign/edit/delete)
   // so a ping doesn't re-run the same `where` query every few seconds — a
   // registered tracker costs about one read a minute, "not found" included.
@@ -131,7 +131,7 @@ export const receiveLocation = async (req, res) => {
     );
   }
 
-  // ── gpsLocation: the doc the live map reads ─────────────────────────────
+  // ── gpsLocations: the doc the live map reads ─────────────────────────────
   if (!skipWrite) {
     try {
       const locPayload = {
@@ -146,7 +146,7 @@ export const receiveLocation = async (req, res) => {
       const cachedLocId = getCachedLocDocId(device_id);
       if (cachedLocId) {
         try {
-          await db.collection("gpsLocation").doc(cachedLocId).update(locPayload);
+          await db.collection("gpsLocations").doc(cachedLocId).update(locPayload);
           updated = true;
         } catch (err) {
           clearLocDocId(device_id); // stale id — fall through to the query path
@@ -154,14 +154,14 @@ export const receiveLocation = async (req, res) => {
       }
 
       if (!updated) {
-        const locSnap = await db.collection("gpsLocation")
+        const locSnap = await db.collection("gpsLocations")
           .where("gpsDeviceID", "==", device_id).limit(1).get();
 
         if (!locSnap.empty) {
           await locSnap.docs[0].ref.update(locPayload);
           setCachedLocDocId(device_id, locSnap.docs[0].id);
         } else {
-          const ref = await db.collection("gpsLocation").add({
+          const ref = await db.collection("gpsLocations").add({
             gpsDeviceID: device_id,
             ...locPayload,
             createdAt:   admin.firestore.FieldValue.serverTimestamp(), // doc creation bookkeeping — receive time is correct here
@@ -183,7 +183,7 @@ export const getDeviceLocation = async (req, res) => {
   try {
     const deviceId = req.params.id;
 
-    const locSnap = await db.collection("gpsLocation")
+    const locSnap = await db.collection("gpsLocations")
       .where("gpsDeviceID", "==", deviceId).limit(1).get();
 
     if (!locSnap.empty) {
@@ -229,7 +229,7 @@ export const getAllDeviceLocations = async (req, res) => {
     // Shared ~15s cache: no matter how many staff have the map open (or how
     // often they poll), Firestore is read at most about once per window.
     const data = await getLiveLocationsCached(async () => {
-    const snap = await db.collection("gpsLocation").get();
+    const snap = await db.collection("gpsLocations").get();
     return snap.docs
       .map(d => {
         const doc = d.data();

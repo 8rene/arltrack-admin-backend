@@ -33,10 +33,10 @@ export const getLiveLocationsCached = async (loader) => {
   return liveInflight;
 };
 
-// ── gpsDevice / gpsLocation document lookups (receiveLocation) ──────────────
+// ── gpsDevice / gpsLocations document lookups (receiveLocation) ──────────────
 const DEVICE_TTL_MS = 60_000;
 const deviceCache = new Map();  // gpsDeviceID -> { docId|null, carID|null, expires }
-const locDocCache = new Map();  // gpsDeviceID -> gpsLocation docId
+const locDocCache = new Map();  // gpsDeviceID -> gpsLocations docId
 
 export const getCachedDevice = (gpsDeviceID) => {
   const hit = deviceCache.get(gpsDeviceID);

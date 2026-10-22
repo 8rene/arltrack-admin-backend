@@ -133,7 +133,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   // seedCacheFromFirestore() removed: it read the whole gpsLocations
   // collection on every (serverless) cold start, and nothing reads that
-  // in-memory cache — the live map is served from gpsLocation via /api/gps.
+  // in-memory cache — the live map is served from gpsLocations via /api/gps.
   // both watchers removed — see comment above the imports
 });
 
