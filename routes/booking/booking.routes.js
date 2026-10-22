@@ -13,10 +13,11 @@ export const registerBookingRoutes = (app) => {
   app.get("/api/bookings",       verifyToken, requireRole(allowed), listBookings);
   app.patch("/api/bookings/:id", verifyToken, requireRole(allowed), editBooking);
   app.patch("/api/bookings/:id/dropoff", verifyToken, requireRole(allowed), markDroppedOff);
-  app.patch("/api/bookings/:id/settle-deposit", verifyToken, requireRole(allowed), settleDepositHandler);
+  // Deposit return: Admin / Owner only (money-moving).
+  app.patch("/api/bookings/:id/settle-deposit", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), settleDepositHandler);
   // An online deposit return PayMongo refused: retry it, or record the in-store hand-back instead.
-  app.patch("/api/bookings/:id/deposit-return/retry", verifyToken, requireRole(allowed), retryDepositReturnHandler);
-  app.patch("/api/bookings/:id/deposit-return/handback", verifyToken, requireRole(allowed), handBackDepositReturnHandler);
+  app.patch("/api/bookings/:id/deposit-return/retry", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), retryDepositReturnHandler);
+  app.patch("/api/bookings/:id/deposit-return/handback", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), handBackDepositReturnHandler);
   app.get("/api/bookings/:id/return-checklist", verifyToken, requireRole(allowed), returnChecklist);
   app.patch("/api/bookings/:id/cancellation/approve", verifyToken, requireRole(allowed), approveCancellation);
   app.patch("/api/bookings/:id/cancellation/reject",  verifyToken, requireRole(allowed), rejectCancellation);
