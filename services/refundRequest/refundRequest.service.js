@@ -225,7 +225,10 @@ const closeHeldCreditInBatch = (batch, paymentRef, payment, { refundRequestID, b
 // it was either KEPT (forfeit > 0 → "Forfeited") or returned to the customer
 // inside the refund ("Refunded"). Without this the deposit would still look
 // Held and could be offered for return/settlement a second time.
-const markDepositAfterRefund = async (paymentRef, payment, forfeit) => {
+// When money is KEPT (forfeit > 0) it is also written as one "internal" paymentEntries row (phase deposit_forfeited), so the
+// Money movements list shows it. No cash moves. The row id is fixed per payment and the deposit leaves "Held" only once, so
+// a retry can never write it twice. A failure here never blocks the refund / cancellation.
+const markDepositAfterRefund = async (paymentRef, payment, forfeit, { processedBy = null, refundRequestID = null, reason = "" } = {}) => {
   const dep = getDepositView(payment);
   if (!dep || dep.status !== "Held") return;
   const now = new Date();
@@ -241,6 +244,39 @@ const markDepositAfterRefund = async (paymentRef, payment, forfeit) => {
     });
   } catch (err) {
     console.error("[REFUND] failed to update the deposit status:", err.message);
+    return;
+  }
+  if (!(forfeit > 0)) return;
+  try {
+    const paymentID = payment.paymentID || paymentRef.id;
+    const entryID = `${paymentID}_deposit_forfeited`;
+    await db.collection(ENTRY_COLLECTION).doc(entryID).set({
+      paymentEntryID: entryID,
+      paymentID,
+      bookingID: payment.bookingID || null,
+      userID: payment.userID || null,
+      refundReqID: refundRequestID || null,
+      penaltyID: null,
+      direction: "internal",                 // no cash moved: the business keeps what it already holds
+      phase: "deposit_forfeited",
+      source: null,
+      method: null,
+      amount: forfeit,
+      status: "success",
+      referenceNumber: null,
+      sessionID: null,
+      transactionFee: null,
+      processedBy: processedBy || null,
+      processedAt: now,
+      settledAt: now,
+      groupID: null,
+      reason: String(reason || "").trim() || null,
+      transactionErrorNote: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  } catch (err) {
+    console.error("[REFUND] failed to record the forfeited deposit row:", err.message);
   }
 };
 
@@ -688,7 +724,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       { renotify: true }
     );
 
-    await markDepositAfterRefund(paymentSnap.docs[0].ref, payment, forfeit);
+    await markDepositAfterRefund(paymentSnap.docs[0].ref, payment, forfeit, { processedBy: adminUserID, refundRequestID, reason: decisionReason });
 
     // Decision: the booking is cancelled at APPROVAL. Staff have decided this trip
     // isn't happening, so the car is released straight away; a PayMongo hiccup is
@@ -1091,7 +1127,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
 
   // Everything the customer paid is the non-refundable deposit → nothing to send back.
   if (totalToRefund === 0 && forfeit > 0) {
-    await markDepositAfterRefund(paymentRef, payment, forfeit);
+    await markDepositAfterRefund(paymentRef, payment, forfeit, { processedBy: staffUserID, reason });
     return staffCancelWithNoRefund(bookingID, booking, { ...payment, paymentID }, reason, staffUserID, "deposit_forfeited", contextLabel, skipDriverNotify, { depositForfeited: forfeit, bookingPaid: plan.grossPaid, returnDeposit: false });
   }
 
@@ -1246,7 +1282,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       updatedAt: now,
       ...(outstandingDiscountRefund > 0 ? { refundIssued: true } : {}),
     });
-    await markDepositAfterRefund(paymentRef, payment, forfeit);
+    await markDepositAfterRefund(paymentRef, payment, forfeit, { processedBy: staffUserID, reason });
 
     // ── 4. cancel the booking + notify (also what a retry re-runs) ──
     return await finishStaffRefund({
@@ -1609,7 +1645,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
   // Nothing is going back, so the held security deposit is kept: close it as forfeited. Left "Held" it would look like money
   // still owed to the customer, and settlement only runs for a completed trip, so nothing would ever close it. Done only
   // once the booking is really cancelled, so a failed cancel never forfeits a deposit.
-  if (keepDeposit) await markDepositAfterRefund(keepDeposit.ref, keepDeposit.payment, getDepositAmount(keepDeposit.payment));
+  if (keepDeposit) await markDepositAfterRefund(keepDeposit.ref, keepDeposit.payment, getDepositAmount(keepDeposit.payment), { processedBy: adminUserID, reason: cleanReason });
 
   await notifyCustomer(
     booking.userID, bookingID, "booking_cancelled", "Booking Cancelled",

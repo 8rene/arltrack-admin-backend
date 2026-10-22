@@ -55,12 +55,16 @@ export const patchPaymentStatus = async (req, res) => {
 export const discountPayment = async (req, res) => {
   try {
     const { bookingID } = req.params;
-    const { amount } = req.body;   // no reason is asked for: a discount is a decision, not a request
+    const { amount, reason } = req.body;
+    // A discount is money the business gives up, so the reason is required and kept on the discount's ledger row.
+    const cleanReason = String(reason || "").trim().slice(0, 300);
+    if (!cleanReason) return res.status(400).json({ success: false, message: "A reason is required to give a discount." });
     const appliedBy = req.user?.email || req.user?.uid || "staff";
     // A discount on a fully paid booking is held as credit. If a penalty is still unpaid, the credit pays it right away
     // (credit only, never the deposit). That happens inside applyDiscount, after the discount is saved and BEFORE the
     // customer is told, so their message says what really happened. It never fails the discount.
     const result = await applyDiscount(bookingID, amount, appliedBy, actorUid(req), {
+      reason: cleanReason,
       afterSave: () => applyCreditToUnpaidPenalties(bookingID, actorUid(req)),
     });
     return res.status(200).json({ success: true, data: result, message: "Discount applied." });

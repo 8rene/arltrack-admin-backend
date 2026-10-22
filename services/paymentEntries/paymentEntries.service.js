@@ -196,7 +196,7 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
         direction: r.direction, phase: r.phase, source: r.source ?? null, method: r.method ?? null, amount: num(r.amount), status: r.status,
         referenceNumber: r.referenceNumber ?? null, sessionID: r.sessionID ?? null, transactionFee: r.transactionFee ?? null,
         processedBy: r.processedBy ?? null, processedByName: await nameOf(r.processedBy), processedAt: toISO(r.processedAt), settledAt: toISO(r.settledAt),
-        groupID: r.groupID ?? null, errorNote: r.transactionErrorNote ?? null, createdAt: toISO(r.createdAt),
+        groupID: r.groupID ?? null, errorNote: r.transactionErrorNote ?? null, reason: r.reason ?? null, createdAt: toISO(r.createdAt),
       });
     }
     // Never let a problem reading the adjustments hide the real money rows.

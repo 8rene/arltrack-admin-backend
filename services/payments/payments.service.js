@@ -706,7 +706,7 @@ const planDiscountRefund = (payment, amount) => {
 // `afterSave` (optional) runs once the discount is saved and BEFORE anyone is told about it: the controller uses it to let the
 // held credit pay a penalty that is still unpaid, so the customer's message says what actually happened to their discount.
 // It returns { fromCredit } (the credit it paid toward penalties); a failure there never fails the discount.
-export const applyDiscount = async (bookingID, amount, appliedBy, actorID = null, { afterSave = null } = {}) => {
+export const applyDiscount = async (bookingID, amount, appliedBy, actorID = null, { afterSave = null, reason = "" } = {}) => {
   if (!bookingID) throw new Error("bookingID is required.");
   const discountAmount = Number(amount);
   if (!Number.isFinite(discountAmount) || discountAmount <= 0) {
@@ -788,7 +788,7 @@ export const applyDiscount = async (bookingID, amount, appliedBy, actorID = null
     }
     tx.update(doc.ref, {
       ...newFigures,
-      // Who gave it and when is on the ledger row below (processedBy / processedAt); no reason is asked for or kept.
+      // Who gave it and when is on the ledger row below (processedBy / processedAt); its reason is kept on the row as `reason`.
       discountAt:     admin.firestore.FieldValue.serverTimestamp(),   // when the LATEST discount was given
       refundDue:      0,                                // nothing is handed back on the spot any more
       updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
@@ -813,6 +813,7 @@ export const applyDiscount = async (bookingID, amount, appliedBy, actorID = null
       processedAt: now,
       settledAt: now,
       groupID: null,
+      reason: String(reason || "").trim() || null,       // why the discount was given (required by the route)
       transactionErrorNote: null,
       createdAt: now,
       updatedAt: now,
