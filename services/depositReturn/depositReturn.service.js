@@ -124,6 +124,30 @@ const refundRow = async ({ bookingID, paymentID, entryID, amount, paymongoPaymen
   return { state: "processing", refundID };
 };
 
+// Deposit + discount going back online TOGETHER: ONE PayMongo refund for the combined amount. The two ledger rows stay
+// separate (each keeps its own amount, phase and status); both carry the same PayMongo refund id in referenceNumber.
+// Never throws. Same result shape as refundRow, for both rows. If PayMongo refuses, BOTH rows are marked failed.
+const refundCombined = async ({ bookingID, paymentID, deposit, credit, paymongoPaymentID, performedBy }) => {
+  const total = Math.round((num(deposit.amount) + num(credit.amount)) * 100) / 100;
+  const depRef = db.collection(ENTRY_COLLECTION).doc(deposit.entryID);
+  const crRef = db.collection(ENTRY_COLLECTION).doc(credit.entryID);
+  let refundID;
+  try {
+    refundID = await createPaymongoRefund({ paymongoPaymentID, amount: total, reason: `Security deposit and discount return for booking ${bookingID}` });
+  } catch (e) {
+    await Promise.all([depRef, crRef].map((r) => failRow(r, e.message).catch((err) => console.error("[DEPOSIT RETURN] could not mark the row failed:", err.message))));
+    await notifyFailure(bookingID, deposit.amount, e.message, DEPOSIT);
+    await notifyFailure(bookingID, credit.amount, e.message, CREDIT);
+    auditSafe({ action: "update", userID: performedBy || null, bookingID, paymentID,
+      description: `Online return of ${peso(total)} (${peso(deposit.amount)} deposit + ${peso(credit.amount)} discount, one refund) for booking ${bookingID} was refused by PayMongo (${e.message}). Needs a retry or an in-store hand-back.` });
+    return { deposit: { state: "failed", error: e.message }, credit: { state: "failed", error: e.message } };
+  }
+  const [l1, l2] = await Promise.all([attachRefundID(depRef, refundID), attachRefundID(crRef, refundID)]);
+  auditSafe({ action: "update", userID: performedBy || null, bookingID, paymentID,
+    description: `Deposit ${peso(deposit.amount)} + discount ${peso(credit.amount)} for booking ${bookingID} sent back through PayMongo as ONE refund of ${peso(total)} (ref ${refundID}); waiting for PayMongo to confirm.${l1 && l2 ? "" : " WARNING: the refund id could not be saved on every ledger row — match it by hand."}` });
+  return { deposit: { state: "processing", refundID }, credit: { state: "processing", refundID } };
+};
+
 // What the customer is told when their money is on its way: ONE message for whatever went out (deposit, discount, or both).
 const notifyCustomerProcessing = (customerUserID, bookingID, parts) => {
   if (!customerUserID || !parts.length) return;
@@ -180,9 +204,14 @@ export const notifyCustomerReturnedInStore = (customerUserID, bookingID, { depos
  * Returns { state: "processing" | "failed" | "partial", deposit, credit } (each { state, refundID?, error? } or null).
  */
 export const sendOnlineReturns = async ({ bookingID, paymentID, deposit = null, credit = null, paymongoPaymentID, performedBy, customerUserID, notifyFailure = true }) => {
-  const out = { deposit: null, credit: null };
-  if (deposit) out.deposit = await refundRow({ bookingID, paymentID, entryID: deposit.entryID, amount: deposit.amount, paymongoPaymentID, performedBy, phase: DEPOSIT });
-  if (credit) out.credit = await refundRow({ bookingID, paymentID, entryID: credit.entryID, amount: credit.amount, paymongoPaymentID, performedBy, phase: CREDIT });
+  let out = { deposit: null, credit: null };
+  if (deposit && credit) {
+    // Both payouts at once: a single PayMongo refund for the total, two ledger rows.
+    out = await refundCombined({ bookingID, paymentID, deposit, credit, paymongoPaymentID, performedBy });
+  } else {
+    if (deposit) out.deposit = await refundRow({ bookingID, paymentID, entryID: deposit.entryID, amount: deposit.amount, paymongoPaymentID, performedBy, phase: DEPOSIT });
+    if (credit) out.credit = await refundRow({ bookingID, paymentID, entryID: credit.entryID, amount: credit.amount, paymongoPaymentID, performedBy, phase: CREDIT });
+  }
   const sent = [];
   if (deposit && out.deposit.state === "processing") sent.push({ phase: DEPOSIT, amount: deposit.amount });
   if (credit && out.credit.state === "processing") sent.push({ phase: CREDIT, amount: credit.amount });

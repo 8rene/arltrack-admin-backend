@@ -257,6 +257,16 @@ export const createPenalty = async ({
   const payment = await getPaymentByBookingID(bookingID);
   if (!payment) return { error: "No payment record found for this booking." };
 
+  // Staff can't add a penalty while another one on the same booking is still under review: confirm or discard that one
+  // first. (Drivers noting penalties — needsReview — are not held up by this.)
+  if (!needsReview) {
+    const existing = await db.collection("penalties").where("bookingID", "==", bookingID).get();
+    const underReview = existing.docs.filter((d) => d.data().status === "UnderReview").length;
+    if (underReview > 0) {
+      return { error: `This booking has ${underReview} penalt${underReview === 1 ? "y" : "ies"} still under review. Confirm or discard ${underReview === 1 ? "it" : "them"} before adding a new penalty.` };
+    }
+  }
+
   const ref = db.collection("penalties").doc();
 
   const now = timestamp();

@@ -59,8 +59,14 @@ const app = express();
 // only works if that exact port happens to be free. Still safe: this
 // only widens things for localhost, nothing else gets in past the
 // explicit whitelist below.
-const PROD_ORIGINS = ['https://arltrack-admin-frontend.vercel.app'];
+// Extra origins (a custom domain, a Vercel preview URL) go in the ALLOWED_ORIGINS env var, comma-separated.
+// A page opened from an origin that isn't listed gets no CORS headers, and the browser reports it as just "Failed to fetch".
+const EXTRA_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
+const PROD_ORIGINS = ['https://arltrack-admin-frontend.vercel.app', ...EXTRA_ORIGINS];
 const LOCALHOST_ORIGIN = /^http:\/\/localhost:\d+$/;
+
+// A stray rejected promise must not take the whole server down mid-request (the browser would see "Failed to fetch").
+process.on('unhandledRejection', (err) => console.error('[UNHANDLED REJECTION]', err));
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -71,6 +77,8 @@ app.use(cors({
     }
     return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
 app.use(express.json());
