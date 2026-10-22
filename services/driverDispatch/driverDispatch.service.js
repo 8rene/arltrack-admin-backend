@@ -9,6 +9,7 @@ import { createNotification } from "../../services/notification/notification.ser
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createPenalty, listPenaltiesForDriver, editPenaltyAsDriver } from "../penalty/penalty.service.js";
 import { sessionStartedAt } from "../../utils/date/sessionDates.js";
+import { getTermsVersion } from "../terms/terms.service.js";
 import {
   ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID,
   getAssignmentsForDriver, getBookingsByKeys, createAssignment, endActiveAssignment,
@@ -555,6 +556,28 @@ export const getMyTripInspection = async (bookingDocID, driverID) => {
   return {
     before: shapeInspectionForDriver(firstOf(docResults, "before")),
     after:  shapeInspectionForDriver(firstOf(docResults, "after")),
+  };
+};
+
+/**
+ * The Terms & Conditions the customer agreed to for THIS booking (read-only, ownership-checked).
+ * Returns the exact version the booking points to, not the current Terms, so a later edit of the
+ * Terms never changes what the driver sees. Older bookings (termsHash) are read from the legacy snapshot.
+ * available:false when the booking has no recorded agreement.
+ */
+export const getMyTripTerms = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const id = booking.termsVersionID || booking.termsHash || null;
+  if (!id) return { available: false };
+  const terms = await getTermsVersion(id);
+  if (!terms) return { available: false };
+  const at = booking.termsAcceptedAt;
+  return {
+    available: true,
+    version: terms.version ?? booking.termsVersion ?? null,
+    acceptedAt: at?.toDate ? at.toDate().toISOString() : (at ?? null),
+    legacy: !!terms.legacy,
+    content: terms.content || "",
   };
 };
 

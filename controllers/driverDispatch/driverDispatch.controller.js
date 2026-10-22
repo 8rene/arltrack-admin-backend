@@ -1,6 +1,6 @@
 import {
   getDispatchBoard, assignDriver, unassignDriver, getDriverAvailabilityForBooking,
-  getMyTrips, getMyTripHistory, getMyTripInspection, driverPickup, driverDropoff, driverRemindInspection,
+  getMyTrips, getMyTripHistory, getMyTripInspection, getMyTripTerms, driverPickup, driverDropoff, driverRemindInspection,
   driverOnMyWay, driverRemindBalance,
   driverCreatePenalty, driverEditPenalty, getDriverActivity,
 } from "../../services/driverDispatch/driverDispatch.service.js";
@@ -112,6 +112,16 @@ export const getMyInspection = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     if (error.status !== 403) console.error("[DRIVER DISPATCH] my-inspection error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+export const getMyTerms = async (req, res) => {
+  try {
+    const data = await getMyTripTerms(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.status !== 403) console.error("[DRIVER DISPATCH] my-terms error:", error);
     return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };
