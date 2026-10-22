@@ -200,11 +200,9 @@ const pickPrimary = (docs) => {
  * Optional `guard` is an async (t) => void run INSIDE the transaction, after the assignment rows are
  * read and before anything is written. It may read more through `t` and throw to refuse the
  * assignment (the driver-schedule check lives there, so check and write are one atomic step).
- * Optional `lockRef` (a per-driver doc) is written in the same transaction; the guard reads it, so two
- * admins assigning the SAME driver at once are serialised and the second one re-runs its check.
  * The callback may be retried by Firestore, so the guard must not have side effects.
  */
-export const createAssignment = async ({ bookingKey, driverID, assignedBy, bookingRef = null, bookingPatch = null, guard = null, lockRef = null }) => {
+export const createAssignment = async ({ bookingKey, driverID, assignedBy, bookingRef = null, bookingPatch = null, guard = null }) => {
   const rowsQuery = db.collection(COL).where("bookingID", "==", bookingKey);
 
   return db.runTransaction(async (t) => {
@@ -241,7 +239,6 @@ export const createAssignment = async ({ bookingKey, driverID, assignedBy, booki
         t.update(d.ref, { status: ASSIGNMENT_STATUS.UNASSIGNED });
       }
     });
-    if (lockRef) t.set(lockRef, { driverID, lastBookingID: bookingKey, updatedAt: serverNow() }, { merge: true });
     if (bookingRef && bookingPatch) t.update(bookingRef, bookingPatch);
     return result;
   });

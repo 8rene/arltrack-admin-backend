@@ -17,7 +17,7 @@ import {
 } from "../driverAssignments/driverAssignments.service.js";
 import {
   OVERRIDE_REASON_MIN_LENGTH, effectiveEnd, evaluateDriverSchedule, getDriverBufferMinutes,
-  getDriverLiveBookings, driverLockRef, describeConflict,
+  getDriverLiveBookings, describeConflict,
 } from "./driverConflict.service.js";
 
 // ─────────────────────────────────────────────
@@ -298,8 +298,8 @@ const conflictSummary = (c, bufferMinutes) => c && ({
 //   * real overlap               needs force=true AND an overrideReason (min OVERRIDE_REASON_MIN_LENGTH
 //                                chars), which is written to the audit log
 // Every one of these throws with conflict: true (HTTP 409 in the controller). The check and the write are
-// ONE transaction (createAssignment's guard) that also reads/writes the driver's lock doc, so two admins
-// assigning the same driver at once cannot both pass.
+// ONE transaction (createAssignment's guard). There is no per-driver lock, so two admins assigning the same
+// driver to overlapping trips at the exact same moment could both pass (accepted risk).
 // ─────────────────────────────────────────────
 export const assignDriver = async (bookingDocID, driverID, assignedBy, force = false, editedBy = null, overrideReason = "") => {
   if (!bookingDocID) throw new Error("bookingDocID is required.");
@@ -341,9 +341,8 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
   // Set by the guard on every run (Firestore may retry the transaction), used afterwards for the audit log.
   let found = { worst: null, all: [] };
 
-  // Runs INSIDE the assignment transaction: reading the lock doc first serialises assignments to this driver.
+  // Runs INSIDE the assignment transaction, so the check and the write are one step.
   const guard = async (t) => {
-    await t.get(driverLockRef(driverID));
     found = await findDriverConflicts(driverID, booking, bookingDocID, bufferMinutes, t);
 
     const { worst, all } = found;
@@ -370,7 +369,7 @@ export const assignDriver = async (bookingDocID, driverID, assignedBy, force = f
   await createAssignment({
     bookingKey: bookingKeyOf(bookingDocID, booking), driverID, assignedBy,
     bookingRef, bookingPatch: legacyDriverFieldsPatch(),
-    guard, lockRef: driverLockRef(driverID),
+    guard,
   });
 
   // Personal notification to the driver themselves.

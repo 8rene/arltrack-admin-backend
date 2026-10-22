@@ -10,7 +10,7 @@
 //   A gap of exactly `bufferMs` is fine. The buffer is systemSettings.driverBufferMinutes (default 2 h),
 //   the same value the customer backend uses for its "is a driver still available" check.
 //
-// PART 2 (database): loading the driver's trips, the buffer setting, the per-driver lock, the wording
+// PART 2 (database): loading the driver's trips, the buffer setting, the wording
 //   of a clash, and the guard for date edits.
 //
 // Imports no booking/dispatch service, so booking.service.js (date edits) and
@@ -100,9 +100,6 @@ export const getDriverBufferMinutes = async () => {
     return DEFAULT_DRIVER_BUFFER_MINUTES;
   }
 };
-
-/** One lock doc per driver. Assigning reads and writes it inside the transaction (see createAssignment). */
-export const driverLockRef = (driverID) => db.collection("driverLocks").doc(String(driverID));
 
 /**
  * The driver's live (upcoming / ongoing) trips as { id, ...booking }, from their "assigned" rows.
