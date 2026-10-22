@@ -9,7 +9,7 @@
 // Lifecycle:
 //   Supervisor / Admin / Owner logs it:  Confirmed (customer notified at once) -> (optionally) Voided | Waived
 //   Driver logs it:  UnderReview -> Confirmed (a supervisor confirms it, customer notified then) -> (optionally) Voided | Waived
-//                                \-> Voided (a supervisor discards it; the customer is never told)
+//                                \-> Discarded (a supervisor rejects it during review; the customer is never told)
 //
 // UnderReview is the review step in front of Confirmed for penalties a Driver notes on a trip. While a penalty is
 // UnderReview the customer knows nothing about it and it counts toward nothing: not the deposit math, not
@@ -19,8 +19,9 @@
 //
 // The moment it is Confirmed the customer is notified and it is LOCKED: from then on corrections go through
 // Voided/Waived + a new entry, never a silent edit to amount/lineItems. That is also why Void/Waive of a Confirmed
-// penalty notifies the customer (see voidOrWaivePenalty) — they've already seen the charge once. Voiding an
-// UnderReview penalty does NOT notify anyone: the customer never saw it.
+// penalty notifies the customer (see voidOrWaivePenalty) — they've already seen the charge once. Discarding an
+// UnderReview penalty does NOT notify anyone: the customer never saw it. Discarded is its own status (it used to be
+// Voided + discardedFromReview), so nothing that lists "removed" charges to the customer can pick it up by accident.
 //
 // PENALTY_TYPES / the single `type` + `description` fields are gone —
 // replaced by `lineItems`, an array of { description, amount } typed
@@ -33,14 +34,15 @@
 // sum of lineItems' amounts, but can be overridden (see overrideReason).
 // ─────────────────────────────────────────────────────────────
 
-export const PENALTY_STATUSES = ["UnderReview", "Confirmed", "Voided", "Waived"];
+export const PENALTY_STATUSES = ["UnderReview", "Confirmed", "Voided", "Waived", "Discarded"];
 
 // Written only by the review step, never by createPenalty, so they are listed here rather than in createPenaltyPayload
 // (a new penalty must not carry empty columns). Present only on a penalty that went through UnderReview.
 //   confirmedBy / confirmedAt   who confirmed it (and so notified the customer) and when. Penalties that were
 //                               confirmed on creation don't store these: readers fall back to createdBy / createdAt.
 //   editedBy / editedAt         who last edited it while it was UnderReview, and when.
-//   discardedFromReview         true when it was voided while UnderReview, i.e. the customer was never told about it.
+//   discardedFromReview         LEGACY: true on penalties discarded before the Discarded status existed (they were saved as
+//                               Voided). scripts/migrate-discarded-penalties.js turns those into status "Discarded".
 export const PENALTY_REVIEW_FIELDS = ["confirmedBy", "confirmedAt", "editedBy", "editedAt", "discardedFromReview"];
 
 // Stamped by the archive restore, never by createPenalty, so it is listed here rather than in createPenaltyPayload
@@ -96,7 +98,7 @@ export const createPenaltyPayload = (penaltyID, data = {}) => ({
   gatewayFeePaid: data.gatewayFeePaid ?? 0,
 
   status:       data.status       || "Confirmed",
-  statusReason: data.statusReason || "", // required for Voided / Waived
+  statusReason: data.statusReason || "", // required for Voided / Waived / Discarded
 
   // paymentMethod / referenceNumber / paidAt are NOT stored on a penalty: each payment is a row in paymentEntries
   // (phase "penalty") and hydratePenalties() gives the latest method / reference / date back to readers. A

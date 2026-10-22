@@ -1420,7 +1420,7 @@ const getPenaltySummaries = async (paymentID) => {
       paidAmount: Number(p.paidAmount) || 0,
       gatewayFeeRate: p.gatewayFeeRate ?? null,   // online payment fee % saved when the penalty was created
       gatewayFeePaid: Number(p.gatewayFeePaid) || 0, // online payment fee the customer has paid on it so far (on top of paidAmount)
-      status: p.status || "Confirmed",            // Confirmed | Voided | Waived
+      status: p.status || "Confirmed",            // UnderReview | Confirmed | Voided | Waived | Discarded
       statusReason: p.statusReason || "",
       createdAt: isoOf(p.createdAt),
     }));

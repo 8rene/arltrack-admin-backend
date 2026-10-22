@@ -581,6 +581,101 @@ export const listUnpaidPenaltiesForUser = async (userID) => {
 };
 
 // ─────────────────────────────────────────────
+// What a DRIVER sees of penalties. Deliberately thin: what was noted, how much, and where it stands with staff. Never
+// what the customer has paid or still owes, the deposit, or the online payment fee: none of that is the driver's business.
+//   Under review  a supervisor hasn't looked yet (the driver can still edit their own)
+//   Accepted      a supervisor confirmed it (the customer has been told)
+//   Rejected      a supervisor discarded it in review (the customer was never told)
+//   Removed       confirmed first, then voided / waived by staff
+// ─────────────────────────────────────────────
+const DRIVER_PENALTY_LABEL = { UnderReview: "Under review", Confirmed: "Accepted", Discarded: "Rejected", Voided: "Removed", Waived: "Removed" };
+
+const driverPenaltyView = (p, driverID) => {
+  const mine = !!driverID && p.createdBy === driverID;
+  // Once a supervisor has edited it, the driver stops being able to: their save would overwrite the supervisor's changes.
+  const staffEdited = !!p.editedBy && p.editedBy !== driverID;
+  const toISODate = (v) => (v?.toDate ? v.toDate().toISOString() : v ?? null);
+  return {
+    penaltyID: p.penaltyID || p.id,
+    bookingID: p.bookingID,
+    items: (p.lineItems || []).map((i) => ({ description: i.description || "Charge", amount: Number(i.amount) || 0 })),
+    amount: Number(p.amount) || 0,
+    status: DRIVER_PENALTY_LABEL[p.status] || p.status,
+    // The staff reason is only shown for a penalty staff turned down or took back.
+    reason: ["Discarded", "Voided", "Waived"].includes(p.status) ? (p.statusReason || "") : "",
+    mine,
+    canEdit: mine && p.status === "UnderReview" && !staffEdited,
+    overrideReason: mine ? (p.overrideReason || "") : "",
+    createdAt: toISODate(p.createdAt),
+  };
+};
+
+/**
+ * { [bookingID]: [ trimmed penalty, ... ] } for the driver's trips, oldest first. Never throws: this is a display extra
+ * on My Trips, so a failed read must not take the whole trip list down with it.
+ */
+export const listPenaltiesForDriver = async (bookingIDs = [], driverID = null) => {
+  const keys = [...new Set((bookingIDs || []).filter(Boolean))];
+  const out = {};
+  keys.forEach((k) => { out[k] = []; });
+  try {
+    const chunks = [];
+    for (let i = 0; i < keys.length; i += 10) chunks.push(keys.slice(i, i + 10));   // Firestore "in" takes up to 10
+    const snaps = await Promise.all(chunks.map((c) => db.collection("penalties").where("bookingID", "in", c).get()));
+    snaps.forEach((snap) => snap.docs.forEach((d) => {
+      const p = { id: d.id, ...d.data() };
+      if (out[p.bookingID]) out[p.bookingID].push(p);
+    }));
+    Object.keys(out).forEach((k) => {
+      out[k] = out[k]
+        .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0))
+        .map((p) => driverPenaltyView(p, driverID));
+    });
+  } catch (err) {
+    console.error("[PENALTY] driver penalty list failed:", err.message);
+  }
+  return out;
+};
+
+// A driver fixing a penalty THEY noted, while it is still UnderReview. The same atomic edit staff use (editPenalty), so if
+// a supervisor confirms it a moment earlier the driver gets "already accepted" and nothing is overwritten. Staff are
+// pinged again so nobody confirms the old version.
+export const editPenaltyAsDriver = async (penaltyID, driverID, { lineItems, amount, overrideReason = "" } = {}) => {
+  const ref = db.collection("penalties").doc(penaltyID);
+  const snap = await ref.get();
+  if (!snap.exists) return { error: "Penalty not found." };
+  const before = snap.data();
+  if (!driverID || before.createdBy !== driverID) return { error: "You can only edit a penalty you noted yourself.", forbidden: true };
+  if (before.status !== "UnderReview") {
+    return { error: before.status === "Confirmed"
+      ? "Staff already accepted this penalty, so it can't be edited anymore."
+      : `This penalty is ${DRIVER_PENALTY_LABEL[before.status] || before.status} and can't be edited.` };
+  }
+  if (before.editedBy && before.editedBy !== driverID) {
+    return { error: "A supervisor already changed this penalty while reviewing it, so it can't be edited here anymore." };
+  }
+
+  const result = await editPenalty(penaltyID, { lineItems, amount, overrideReason }, driverID);
+  if (result.error) return result;
+
+  try {
+    const after = (await ref.get()).data();
+    const itemNames = (after.lineItems || []).map((i) => i.description).join(", ");
+    await notifyStaff({
+      type: "penalty_review",
+      refID: penaltyID,
+      refCollection: "penalties",
+      title: "A penalty under review was updated",
+      message: `The driver changed their noted penalty on booking ${before.bookingID} — now ₱${after.amount}: ${itemNames}. The customer hasn't been notified yet: review and confirm it on the Penalties page.`,
+      renotify: true,
+    });
+  } catch (err) {
+    console.error("[PENALTY] failed to notify staff of a driver's edit:", err.message);
+  }
+  return result;
+};
+
+// ─────────────────────────────────────────────
 // Void / Waive — the only correction path once a penalty is Confirmed. Both
 // notify the customer: they have already seen the original charge by then,
 // so a void needs its own "this was reversed" message just as much as a
@@ -590,22 +685,28 @@ export const listUnpaidPenaltiesForUser = async (userID) => {
 // ─────────────────────────────────────────────
 
 export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorUid) => {
-  if (!["Voided", "Waived"].includes(status)) return { error: "status must be Voided or Waived." };
+  if (!["Voided", "Waived", "Discarded"].includes(status)) return { error: "status must be Voided, Waived or Discarded." };
   if (!statusReason?.trim()) return { error: "A reason is required." };
 
   const ref = db.collection("penalties").doc(penaltyID);
   const snap = await ref.get();
   if (!snap.exists) return { error: "Penalty not found." };
   const penalty = snap.data();
-  if (penalty.status === "Voided" || penalty.status === "Waived") {
+  if (["Voided", "Waived", "Discarded"].includes(penalty.status)) {
     return { error: `Penalty is already ${penalty.status}.` };
   }
   // A penalty still UnderReview was never shown to the customer, so there is nothing to forgive: it can only be
-  // discarded (Voided), and discarding it tells the customer nothing.
+  // discarded, and discarding it tells the customer nothing.
   const underReview = penalty.status === "UnderReview";
   if (underReview && status === "Waived") {
-    return { error: "A penalty under review hasn't been charged yet, so it can't be waived. Void it to discard it, or confirm it first." };
+    return { error: "A penalty under review hasn't been charged yet, so it can't be waived. Discard it, or confirm it first." };
   }
+  if (!underReview && status === "Discarded") {
+    return { error: "Only a penalty that is still under review can be discarded. Void or waive it instead." };
+  }
+  // Rejecting a penalty under review always ends as "Discarded" (its own status, never "Voided"), whichever of the two
+  // the caller sent, so the customer-facing lists that show removed charges can never pick it up.
+  const newStatus = underReview ? "Discarded" : status;
 
   // A penalty already paid (partly or fully, via deposit or otherwise)
   // shouldn't be silently voided — that money needs its own reversal, not
@@ -615,10 +716,9 @@ export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorU
   }
 
   await ref.update({
-    status,
+    status: newStatus,
     statusReason,
     updatedAt: timestamp(),
-    ...(underReview ? { discardedFromReview: true } : {}),
   });
 
   const itemNames = (penalty.lineItems || []).map((i) => i.description).join(", ");
@@ -640,7 +740,7 @@ export const voidOrWaivePenalty = async (penaltyID, status, statusReason, actorU
       : `${status} penalty of \u20b1${penalty.amount} on booking ${penalty.bookingID} (penalty ${penaltyID}): ${itemNames}. Reason: ${statusReason}`,
   }).catch(() => {});
 
-  return { penaltyID };
+  return { penaltyID, status: newStatus };
 };
 
 // ─────────────────────────────────────────────
@@ -1094,6 +1194,7 @@ export const getAllPenalties = async () => {
   // recordShortfallPayment).
   const settlementStatusFor = (data) => {
     if (data.status === "UnderReview") return "Under Review";   // not charged yet: nothing is owed or paid
+    if (data.status === "Discarded") return "Discarded";   // rejected in review: never charged, the customer never saw it
     if (data.status === "Voided") return "Voided";
     if (data.status === "Waived") return "Waived";
     const paid = data.paidAmount || 0;

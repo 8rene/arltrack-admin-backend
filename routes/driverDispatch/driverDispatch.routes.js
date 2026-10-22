@@ -1,4 +1,4 @@
-import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, getMyInspection, getActivityForDriver, myPickup, myDropoff, myRemindInspection, myCreatePenalty, myOnMyWay, myRemindBalance } from "../../controllers/driverDispatch/driverDispatch.controller.js";
+import { getBoard, assign, unassign, getAvailability, getMine, getMyHistory, getMyInspection, getActivityForDriver, myPickup, myDropoff, myRemindInspection, myCreatePenalty, myOnMyWay, myRemindBalance, myEditPenalty } from "../../controllers/driverDispatch/driverDispatch.controller.js";
 import { verifyToken }        from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -28,6 +28,8 @@ export const registerDriverDispatchRoutes = (app) => {
   app.patch("/api/driver-dispatch/my-trips/:id/pickup",  verifyToken, requireRole(driverOnly), myPickup);
   app.patch("/api/driver-dispatch/my-trips/:id/dropoff", verifyToken, requireRole(driverOnly), myDropoff);
   app.post ("/api/driver-dispatch/my-trips/:id/penalty",          verifyToken, requireRole(driverOnly), myCreatePenalty);
+  // Driver correcting a penalty they noted themselves — only while it is still Under review (checked in the service).
+  app.patch("/api/driver-dispatch/my-penalties/:penaltyID",       verifyToken, requireRole(driverOnly), myEditPenalty);
   // Driver is blocked at Pickup because staff haven't finished the
   // vehicle inspection yet — nudges Owner/Admin/Supervisor via the bell.
   // Server-side 10-minute cooldown per booking.

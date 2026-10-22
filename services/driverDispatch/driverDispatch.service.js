@@ -7,7 +7,7 @@ import { getPhaseChecklist, getVehicleDocsByBooking } from "../../services/vehic
 import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
 import { createNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
-import { createPenalty } from "../penalty/penalty.service.js";
+import { createPenalty, listPenaltiesForDriver, editPenaltyAsDriver } from "../penalty/penalty.service.js";
 import { sessionStartedAt } from "../../utils/date/sessionDates.js";
 import {
   ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID,
@@ -694,7 +694,7 @@ export const getMyTrips = async (driverID) => {
   // before/after vehicle inspection (photos + parts condition) so Start
   // Pickup / Return can show what's still outstanding. History rows don't
   // need it (skipped there).
-  return shapeTripsForDriver(bookings, { withDocs: true });
+  return shapeTripsForDriver(bookings, { withDocs: true, driverID });
 };
 
 /** A driver's past trips — completed/cancelled/stolen — most recent first. Simple, no pagination (per-driver volume is small). */
@@ -703,7 +703,7 @@ export const getMyTripHistory = async (driverID) => {
 
   const bookings = await getDriverBookings(driverID, ["completed", "cancelled", "stolen"]);
 
-  const shaped = await shapeTripsForDriver(bookings);
+  const shaped = await shapeTripsForDriver(bookings, { driverID });
   return shaped.sort((a, b) => (b.startDateTime?.getTime() ?? 0) - (a.startDateTime?.getTime() ?? 0));
 };
 
@@ -740,7 +740,7 @@ const getBalanceReminderCooldowns = async (bookingKeys = []) => {
   return out;
 };
 
-const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
+const shapeTripsForDriver = async (bookings, { withDocs = false, driverID = null } = {}) => {
   const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
   const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
   const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
@@ -749,7 +749,7 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
   const docKeys = {};
   bookings.forEach((b) => { docKeys[b.bookingID || b.id] = [...new Set([b.bookingID, b.id].filter(Boolean))]; });
 
-  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries, reminderCooldowns, balanceCooldowns] = await Promise.all([
+  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries, reminderCooldowns, balanceCooldowns, penaltiesByBooking] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
     Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
@@ -762,6 +762,8 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
     // driver's own clock can't skew the countdown).
     withDocs ? getReminderCooldowns(bookingIDs) : Promise.resolve({}),
     withDocs ? getBalanceReminderCooldowns(bookingIDs) : Promise.resolve({}),
+    // The driver's view of the penalties on each trip (what was noted + where it stands with staff; no money owed).
+    listPenaltiesForDriver(bookingIDs, driverID),
   ]);
   const vehicleMap = Object.fromEntries(vehicleEntries);
   const userMap    = Object.fromEntries(userEntries);
@@ -822,6 +824,8 @@ const shapeTripsForDriver = async (bookings, { withDocs = false } = {}) => {
         enRouteAt:            toJSDate(b.enRouteAt),
         // Seconds left before the driver can send another balance reminder to the customer.
         balanceReminder:      { retryAfterSeconds: balanceCooldowns[bID] ?? 0 },
+        // Penalties on this trip, trimmed for the driver: Under review / Accepted / Rejected / Removed, no payment details.
+        penalties:            penaltiesByBooking[bID] || [],
       };
     })
     .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
@@ -886,9 +890,29 @@ export const driverDropoff = async (bookingDocID, driverID) => {
  * bookingID here is the booking DOC id from the URL, resolved to the
  * business bookingID the penalty service keys on.
  */
+const penaltySignature = (items) =>
+  (Array.isArray(items) ? items : [])
+    .map((i) => `${String(i?.description || "").trim().toLowerCase()}|${(Math.round((Number(i?.amount) || 0) * 100) / 100).toFixed(2)}`)
+    .sort()
+    .join(";");
+
 export const driverCreatePenalty = async (bookingDocID, driverID, body = {}) => {
   const booking = await assertOwnsBooking(bookingDocID, driverID);
   const bID = booking.bookingID || bookingDocID;
+
+  // A driver notes a penalty during the trip (the button only shows on an ongoing trip; this is the same rule on the server).
+  if ((booking.status || "").toLowerCase() !== "ongoing") {
+    return { error: "You can only note a penalty while the trip is ongoing." };
+  }
+  // The same charge, noted again by this driver while the first is still waiting for review, is almost always a double tap.
+  const existing = await db.collection("penalties").where("bookingID", "==", bID).get();
+  const wanted = penaltySignature(body.lineItems);
+  const duplicate = existing.docs.some((d) => {
+    const p = d.data();
+    return p.status === "UnderReview" && p.createdBy === driverID && penaltySignature(p.lineItems) === wanted;
+  });
+  if (duplicate) return { error: "You already noted this penalty — it's waiting for a supervisor's review." };
+
   return createPenalty({
     bookingID: bID,
     lineItems: body.lineItems,
@@ -897,6 +921,18 @@ export const driverCreatePenalty = async (bookingDocID, driverID, body = {}) => 
     overrideReason: body.overrideReason || "",
     createdBy: driverID,
     needsReview: true,
+  });
+};
+
+/**
+ * Driver correcting a penalty they noted, while it is still Under review (see editPenaltyAsDriver). It is the penalty's
+ * creator who is checked, not the trip: the trip may well be over by the time a supervisor gets to it.
+ */
+export const driverEditPenalty = async (penaltyID, driverID, body = {}) => {
+  return editPenaltyAsDriver(penaltyID, driverID, {
+    lineItems: body.lineItems,
+    amount: body.amount,
+    overrideReason: body.overrideReason || "",
   });
 };
 

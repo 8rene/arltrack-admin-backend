@@ -2,7 +2,7 @@ import {
   getDispatchBoard, assignDriver, unassignDriver, getDriverAvailabilityForBooking,
   getMyTrips, getMyTripHistory, getMyTripInspection, driverPickup, driverDropoff, driverRemindInspection,
   driverOnMyWay, driverRemindBalance,
-  driverCreatePenalty, getDriverActivity,
+  driverCreatePenalty, driverEditPenalty, getDriverActivity,
 } from "../../services/driverDispatch/driverDispatch.service.js";
 
 export const getBoard = async (req, res) => {
@@ -174,6 +174,18 @@ export const myRemindBalance = async (req, res) => {
       message: error.message,
       ...(error.retryAfterSeconds != null ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
     });
+  }
+};
+
+// PATCH /api/driver-dispatch/my-penalties/:penaltyID — a driver editing a penalty they noted, only while it is Under review.
+export const myEditPenalty = async (req, res) => {
+  try {
+    const result = await driverEditPenalty(req.params.penaltyID, req.user.uid, req.body);
+    if (result.error) return res.status(result.forbidden ? 403 : 400).json({ success: false, message: result.error });
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error("[DRIVER DISPATCH] my-edit-penalty error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };
 
