@@ -1,6 +1,6 @@
 import { db, bucket } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionDestination, updateSessionStops } from "../../services/booking/bookingSession.service.js";
+import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionStops } from "../../services/booking/bookingSession.service.js";
 import { toDate, sessionStartedAt } from "../../utils/date/sessionDates.js";
 import { fetchSessionRows } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
@@ -224,33 +224,6 @@ const resolveHistoryInfo = async (bookingID) => {
     };
   } catch { return EMPTY_HISTORY_INFO; }
 };
-
-// ─────────────────────────────────────────────
-// Archive to notificationsArchive when booking status resolves
-// (Frontend reads live from bookings collection directly)
-// ─────────────────────────────────────────────
-const archiveNotification = async ({ userID, bookingID, docID, oldStatus, newStatus, bookingData }) => {
-  try {
-    await db.collection("notificationsArchive").add({
-      bookingDocID:   docID,
-      bookingID:      bookingID || docID,
-      userID:         userID || "",
-      previousStatus: oldStatus || "",
-      resolvedStatus: newStatus || "",
-      startDateTime:  bookingData.startDateTime  || null,
-      endDateTime:    bookingData.endDateTime    || null,
-      carID:          bookingData.carID          || "",
-      location:       bookingData.location       || "",
-      notesAdmin:     bookingData.notesAdmin     || "",
-      archivedAt:     admin.firestore.FieldValue.serverTimestamp(),
-    });
-    console.log("[ARCHIVE] Notification archived for booking:", bookingID);
-  } catch (err) {
-    console.error("[ARCHIVE] Failed:", err.message);
-  }
-};
-
-
 
 // ─────────────────────────────────────────────
 // Main service functions
@@ -1009,7 +982,7 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
     );
   }
 
-  // ── Archive + auto-delete notification when booking moves out of pending/cancellation_request ──
+  // ── Auto-delete the "new booking" notification once the booking is handled ──
   const newStatus = filtered.status;
   const activeStatuses = ["upcoming", "cancellation_request"];
   const resolvedStatuses = ["upcoming", "ongoing", "completed", "cancelled", "stolen"];
@@ -1019,16 +992,7 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
     activeStatuses.includes(oldStatus?.toLowerCase()) &&
     resolvedStatuses.includes(newStatus)
   ) {
-    await archiveNotification({
-      userID,
-      bookingID: bookingID || docID,
-      docID,
-      oldStatus: oldStatus?.toLowerCase(),
-      newStatus,
-      bookingData,
-    });
-
-    // Delete corresponding notifications from the notifications collection
+    // The "new booking" notification is no longer actionable, so remove it
     try {
       const bID = bookingID || docID;
       const notifSnap = await db.collection("notifications")
