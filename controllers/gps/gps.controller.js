@@ -7,6 +7,7 @@ import {
   shouldSkipLocationWrite, markLocationWritten,
 } from "../../services/gps/gpsLookupCache.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
+import { maybeCheckSilentTrackers } from "../../services/gps/silentTracker.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getSessionsByCar, getActiveSessionByCar, getRecentSessionsByCarUpTo, getArchivePointCount } from "../../services/booking/bookingSession.service.js";
 import { getSessionArchivesByCar, getRecentSessionArchivesByCarUpTo } from "../../services/archives/bookingSessionArchives.service.js";
@@ -131,6 +132,10 @@ export const receiveLocation = async (req, res) => {
     );
   }
 
+  // Any ping is a chance to sweep for trackers that have gone quiet (throttled to once per 5 minutes,
+  // never throws). See silentTracker.service.js for why this isn't a cron job.
+  maybeCheckSilentTrackers().catch(() => {});
+
   // ── gpsLocations: the doc the live map reads ─────────────────────────────
   if (!skipWrite) {
     try {
@@ -251,6 +256,9 @@ export const getAllDeviceLocations = async (req, res) => {
       })
       .filter(Boolean);
     });
+
+    // The Live map polls this endpoint — a cheap, throttled moment to run the silent-tracker sweep too.
+    await maybeCheckSilentTrackers();
 
     return res.json({ status: "ok", data });
   } catch (err) {
@@ -469,6 +477,8 @@ export const getCarActiveSession = async (req, res) => {
         codingAlerts:     data.codingAlerts || [],
         codingWarnings:   codingWarningsOut(data.codingWarnings),
         currentPosition:  data.currentPosition || null,
+        // When the car was marked physically dropped off (null until then) — lets the Live Logs panel show it.
+        droppedOffAt:     data.droppedOffTime?.toDate ? data.droppedOffTime.toDate().toISOString() : null,
         pickupLocation:   data.pickupLocation || null,
         dropoffLocation:  data.dropoffLocation || null,
       },

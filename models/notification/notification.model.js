@@ -19,7 +19,7 @@
 export const Notification = {
   type: "",
   //   "cancellation_request" | "new_user" | "geofence_alert" |
-  //   "coding_alert" | "pickup_overdue" | "return_overdue" | "refund_due" |
+  //   "coding_alert" | "tracker_silent" | "pickup_overdue" | "return_overdue" | "refund_due" |
   //   "refund_request" | "license_expiring" | "license_expired" |
   //   "inspection_pickup_needed" | "inspection_return_needed" |
   //   "terms_updated"

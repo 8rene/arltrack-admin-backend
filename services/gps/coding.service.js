@@ -241,10 +241,20 @@ export async function isCodingRestrictedByCity(plateNumber, lat, lng, atInstant 
   if (!digits.length) return { restricted: false, reason: "no-plate-digit" };
   const lastDigit = Number(digits[digits.length - 1]);
 
+  // The holiday lookup is its own step. If it can't run we can't tell whether
+  // coding is suspended today, so we say "unknown" (restricted: null +
+  // holidayUnknown) and the caller leaves the state alone -- instead of falling
+  // back to the fixed rule, which doesn't know about holidays and could raise a
+  // false restriction on a holiday.
+  let holiday;
   try {
-    const holiday = await isHolidayAt(atInstant);
-    if (holiday) return { restricted: false, reason: "holiday-suspended", holiday };
+    holiday = await isHolidayAt(atInstant);
+  } catch (err) {
+    return { restricted: null, reason: `holiday-check-failed:${err.message}`, holidayUnknown: true };
+  }
+  if (holiday) return { restricted: false, reason: "holiday-suspended", holiday };
 
+  try {
     const city = await reverseGeocodeCity(lat, lng);
     if (city === null) return { restricted: null, reason: "geocode-unavailable" };
 
@@ -276,6 +286,8 @@ export async function resolveCodingRestriction(plateNumber, lat, lng, atInstant 
 
   const byCity = await isCodingRestrictedByCity(plateNumber, lat, lng, atInstant);
   if (byCity.restricted !== null) return byCity;
+  // Holiday status unknown -> don't guess with the fixed rule (it ignores holidays).
+  if (byCity.holidayUnknown) return byCity;
 
   const fallback = isCodingRestricted(plateNumber, atInstant, false);
   return { ...fallback, reason: `fallback-fixed-rule:${fallback.reason}` }; // keeps fallback.rule when restricted

@@ -7,7 +7,7 @@
 import admin from "firebase-admin";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getActiveSessionByCarCached } from "../../services/booking/bookingSession.service.js";
-import { checkGeofence } from "./geofence.service.js";
+import { checkGeofence, nextGeofenceFlip } from "./geofence.service.js";
 import { resolveCodingRestriction } from "./coding.service.js";
 import { appendCarPing } from "../sheets/sheets.service.js";
 import { notifyStaff, resolveNotification } from "../notification/notification.service.js";
@@ -34,32 +34,63 @@ const getPlateNumber = async (carID) => {
  *   which date-tab it's routed to) reflect when the ping actually happened, not when the
  *   backlog happened to flush. Defaults to receive time if the caller didn't have one.
  */
+// A ping that reaches the server this long after the tracker recorded it counts as "received late"
+// (typically an offline flush). Alerts raised from it say so, instead of looking like fresh news.
+const DELAYED_PING_MS = 2 * 60 * 1000;
+const fmtManila = (d) =>
+  d.toLocaleString("en-PH", { timeZone: "Asia/Manila", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
 export const processLivePing = async (carID, lat, lng, speed = 0, offline = false, recordedAt = new Date()) => {
   const session = await getActiveSessionByCarCached(carID);
   if (!session) return; // no active trip on this car — nothing more to do
 
   const { ref, data } = session;
   const now = recordedAt;
+  const receivedAt = new Date();
+  const delayed = receivedAt.getTime() - now.getTime() > DELAYED_PING_MS;
+  // Stamped on every alert entry written from this ping: `at` stays the time it HAPPENED (tracker clock),
+  // `receivedAt` is when the server heard about it, `delayed` only appears when the gap is significant.
+  const lateFields = { receivedAt: receivedAt.toISOString(), ...(delayed ? { delayed: true } : {}) };
+  const lateNote = delayed ? ` (happened ${fmtManila(now)}, received late)` : "";
+
   const updates = {
     currentPosition: { lat, lng, date: now.toISOString() },
+    // Server-side "last heard from the tracker" — unlike currentPosition.date (tracker time, can be an old
+    // replayed fix), this is what the silent-tracker check looks at. Same write, no extra cost.
+    lastPingReceivedAt: receivedAt.toISOString(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
+
+  // The tracker is talking again: clear the "tracker silent" flag and its bell entry.
+  if (data.silentAlertedAt) {
+    updates.silentAlertedAt = admin.firestore.FieldValue.delete();
+    resolveNotification("tracker_silent", carID)
+      .catch((err) => console.error("[NOTIF] tracker_silent resolve failed:", err.message));
+  }
 
   // ── Geofence check ──────────────────────────────────────────────
   const geofenceResult = checkGeofence(lat, lng, data.geofenceZones || []);
   const lastGeofenceAlert = (data.geofenceAlerts || [])[data.geofenceAlerts?.length - 1];
   const wasBreached = lastGeofenceAlert?.type === "breach";
-  if (geofenceResult.breached && !wasBreached) {
+  // Two pings in a row must disagree with the logged state before it changes (see geofence.service.js),
+  // so a single bad fix or a car on a zone edge can't raise or clear an alert. The running count lives on
+  // the session and rides in the same write as everything else — no extra read or write.
+  const flip = nextGeofenceFlip({
+    breached: geofenceResult.breached,
+    wasBreached,
+    flipCount: data.geofenceFlipCount,
+  });
+  if (flip.transition && geofenceResult.breached) {
     updates.geofenceAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "breach",
       nearestZone: geofenceResult.nearestZone,
       distanceMeters: geofenceResult.distanceMeters,
       at: now.toISOString(),
+      ...lateFields,
     });
     // Notification is keyed by carID and only fired on the transition, same
     // as the log entry above — one active bell entry per car per breach
-    // episode, not one per ping, so normal GPS jitter near a zone edge
-    // can't spam the bell even though the underlying log can still flicker.
+    // episode, not one per ping.
     // Fanned out to Owner/Admin/Supervisor (notifyStaff), not the driver —
     // drivers don't have access to the tracker/device or a UI to act on
     // this, so notifying them would just be noise.
@@ -68,31 +99,34 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       refID: carID,
       refCollection: "cars",
       title: "Vehicle left its zone",
-      message: `Car is currently outside its allowed zone${geofenceResult.nearestZone ? ` (nearest: ${geofenceResult.nearestZone})` : ""}.`,
+      message: `Car is currently outside its allowed zone${geofenceResult.nearestZone ? ` (nearest: ${geofenceResult.nearestZone})` : ""}.${lateNote}`,
     }).catch((err) => console.error("[NOTIF] geofence_alert create failed:", err.message));
-  } else if (!geofenceResult.breached && wasBreached) {
+  } else if (flip.transition && !geofenceResult.breached) {
     updates.geofenceAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "cleared",
       zone: geofenceResult.nearestZone,
       at: now.toISOString(),
+      ...lateFields,
     });
     resolveNotification("geofence_alert", carID)
       .catch((err) => console.error("[NOTIF] geofence_alert resolve failed:", err.message));
   }
-  // else: state unchanged since the last recorded alert — don't spam an
-  // entry on every single ping, only on breach/clear transitions.
+  // Keep the stored count in step; only touch the field when it actually changes.
+  if ((Number(data.geofenceFlipCount) || 0) !== flip.count) updates.geofenceFlipCount = flip.count;
 
   // ── Coding-restriction check ────────────────────────────────────
-  // Now city-aware: reverse-geocodes this ping's actual (lat, lng) and
-  // checks it against Firestore's codingRules — the same source of truth
-  // the customer backend's booking-time check uses — instead of the old
-  // fixed-schedule-only rule. See coding.service.js's header for the
-  // fallback behavior if the geocode lookup itself fails.
+  // City-aware: reverse-geocodes this ping's actual (lat, lng) and checks it
+  // against Firestore's codingRules (per-rule city, day, time window, plus
+  // holiday suspension). See coding.service.js's header for the fallback
+  // behaviour if the geocode lookup itself fails.
   const plateNumber = await getPlateNumber(carID);
   const codingResult = await resolveCodingRestriction(plateNumber, lat, lng, now, data.codingSuspended === true);
   const lastCodingAlert = (data.codingAlerts || [])[data.codingAlerts?.length - 1];
   const wasRestricted = lastCodingAlert?.type === "restricted";
-  if (codingResult.restricted && !wasRestricted) {
+  if (codingResult.restricted === null) {
+    // Couldn't tell whether today is a holiday — leave the coding state exactly as it is
+    // (no new restriction, no "cleared") rather than guess.
+  } else if (codingResult.restricted && !wasRestricted) {
     updates.codingAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "restricted",
       reason: codingResult.reason,
@@ -102,6 +136,7 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       // Omitted (not undefined — Firestore rejects that) for older callers.
       ...(codingResult.rule ? { rule: codingResult.rule } : {}),
       at: now.toISOString(),
+      ...lateFields,
     });
     // Same reasoning as geofence_alert above — staff-only, driver can't act on it.
     notifyStaff({
@@ -109,12 +144,13 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       refID: carID,
       refCollection: "cars",
       title: "Coding restriction",
-      message: `Car is currently in a number-coding restricted zone${codingResult.city ? ` (${codingResult.city})` : ""}.`,
+      message: `Car is currently in a number-coding restricted zone${codingResult.city ? ` (${codingResult.city})` : ""}.${lateNote}`,
     }).catch((err) => console.error("[NOTIF] coding_alert create failed:", err.message));
   } else if (!codingResult.restricted && wasRestricted) {
     updates.codingAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "cleared",
       at: now.toISOString(),
+      ...lateFields,
     });
     resolveNotification("coding_alert", carID)
       .catch((err) => console.error("[NOTIF] coding_alert resolve failed:", err.message));

@@ -35,6 +35,12 @@ export const BookingSession = {
   geofenceZones:       [],
   geofenceAlerts:      [],
   codingAlerts:        [],
+  // Alert entries written from a live ping also carry `receivedAt` (server time) and, when the ping
+  // reached the server >2 min after the tracker recorded it, `delayed: true`. `at` stays the time it happened.
+  // Written by livePing.service.js / silentTracker.service.js while a trip is active (not set at creation):
+  //   geofenceFlipCount  — consecutive pings disagreeing with the logged geofence state (2 = real change)
+  //   lastPingReceivedAt — ISO time the server last heard from the tracker
+  //   silentAlertedAt    — set when staff were told the tracker went silent; removed on the next ping
   // Number Coding restrictions found for the car's plate BEFORE the booking was
   // made — the list the customer was warned about. FLAT: one entry per matched rule,
   // no nested arrays.

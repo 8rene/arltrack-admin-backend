@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { runMidnightFlush } from "../../jobs/midinghtFlush.job.js";
 import { runExpireSessions } from "../../jobs/expireSessions.job.js";
+import { runSilentTrackerCheck } from "../../services/gps/silentTracker.service.js";
 
 // Vercel Cron hits this over HTTP on schedule (see vercel.json) — it can't
 // call runMidnightFlush() directly, since jobs/ files aren't routes.
@@ -41,6 +42,19 @@ export const registerCronRoutes = (app) => {
       return res.status(200).json({ success: true, result: result || null });
     } catch (err) {
       console.error("[CRON] expire-sessions route error:", err.message);
+      return res.status(200).json({ success: false, message: err.message });
+    }
+  });
+
+  // NOT in vercel.json (the current plan only allows daily crons). The silent-tracker check already runs
+  // on GPS pings and Live-map polls; point an external 5-minute scheduler at this URL (same CRON_SECRET
+  // bearer header) if you also want it to run when nobody is watching and no tracker is reporting.
+  app.get("/api/cron/silent-trackers", verifyCronRequest, async (req, res) => {
+    try {
+      const result = await runSilentTrackerCheck();
+      return res.status(200).json({ success: true, result });
+    } catch (err) {
+      console.error("[CRON] silent-trackers route error:", err.message);
       return res.status(200).json({ success: false, message: err.message });
     }
   });
