@@ -56,6 +56,17 @@ export const getAllActiveSessions = async () => {
 };
 
 /**
+ * Ended / stolen trips whose FINAL history file was never saved (the save at Mark Complete / Stolen failed,
+ * so needsFinalFlush is still set). The nightly job retries these — it used to look only at active sessions,
+ * so a failed final save was never retried. One equality filter on a single field: no composite index, and it
+ * only ever returns the few trips that are actually waiting, not every trip ever ended.
+ */
+export const getSessionsNeedingFinalFlush = async () => {
+  const snap = await SESSIONS().where("needsFinalFlush", "==", true).get();
+  return snap.docs.map((doc) => ({ ref: doc.ref, data: doc.data() }));
+};
+
+/**
  * Every session (any status — active, ended, stolen, cancelled) ever tied to
  * a car, most recent first. Used by Car Tracking's Traceback (find which
  * session(s) cover a given date) and History (list every archived trip) —
@@ -224,6 +235,9 @@ export const markSessionCancelled = async (bookingSessionID) => {
 export const markSessionEnded = async (bookingSessionID) => {
   await SESSIONS().doc(bookingSessionID).update({
     status: "ended",
+    // Cleared by recordArchiveFlush once the FINAL history file for this trip has been saved. If that save
+    // fails, the nightly job finds the session by this flag and retries it (see getSessionsNeedingFinalFlush).
+    needsFinalFlush: true,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 };
@@ -232,6 +246,9 @@ export const markSessionEnded = async (bookingSessionID) => {
 export const markSessionStolen = async (bookingSessionID) => {
   await SESSIONS().doc(bookingSessionID).update({
     status: "stolen",
+    // When it was flagged. Nothing recorded this before, so a stolen trip had no end time at all.
+    stolenAt: admin.firestore.FieldValue.serverTimestamp(),
+    needsFinalFlush: true, // see markSessionEnded
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 };
@@ -257,11 +274,13 @@ export const markDroppedOff = async (bookingSessionID) => {
  * rewritten, so any saved pointCount is now stale — clear it and let
  * getArchivePointCount below recount lazily the next time History loads.
  */
-export const recordArchiveFlush = async (bookingSessionID, archiveUrl) => {
+export const recordArchiveFlush = async (bookingSessionID, archiveUrl, { final = false } = {}) => {
   await SESSIONS().doc(bookingSessionID).update({
     archiveUrl,
     pointCount: admin.firestore.FieldValue.delete(),
     lastArchivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    // `final` = this save happened after the trip ended/was flagged stolen, i.e. it is the last one.
+    ...(final ? { needsFinalFlush: admin.firestore.FieldValue.delete() } : {}),
   });
 };
 

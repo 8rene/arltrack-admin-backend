@@ -12,7 +12,7 @@
 //  fleet from being flushed.
 // ================================
 
-import { getAllActiveSessions } from "../services/booking/bookingSession.service.js";
+import { getAllActiveSessions, getSessionsNeedingFinalFlush } from "../services/booking/bookingSession.service.js";
 import { flushBookingHistory } from "../services/booking/booking.service.js";
 import { db } from "../config/firebaseConnection/firebase.js";
 import { createNotification, notifyStaff, resolveNotification } from "../services/notification/notification.service.js";
@@ -258,7 +258,25 @@ export const runMidnightFlush = async () => {
     }
   }
 
+  // Trips that already ended or were flagged stolen but whose FINAL file never got saved (the save at Mark
+  // Complete / Stolen failed). Only these are retried -- the flag is cleared by a successful save, so a trip
+  // that finished cleanly is never read again.
+  const pendingFinal = await getSessionsNeedingFinalFlush().catch((err) => {
+    console.error("[CRON] ❌ Failed to load trips awaiting a final save:", err.message);
+    return [];
+  });
+  let retried = 0;
+  for (const { data } of pendingFinal) {
+    try {
+      await flushBookingHistory(data.bookingSessionID);
+      retried++;
+    } catch (err) {
+      failed++;
+      console.error(`[CRON] ❌ Retry of final save failed for ${data.bookingSessionID}:`, err.message);
+    }
+  }
+
   console.log(
-    `[CRON] ✅ Midnight archive flush complete — ${succeeded} succeeded, ${failed} failed, ${activeSessions.length} active session(s) total.`
+    `[CRON] ✅ Midnight archive flush complete — ${succeeded} succeeded, ${failed} failed, ${activeSessions.length} active session(s) total, ${retried}/${pendingFinal.length} final save(s) retried.`
   );
 };

@@ -9,6 +9,8 @@ import {
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { maybeCheckSilentTrackers } from "../../services/gps/silentTracker.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
+import { getBookingCompletedAt } from "../../services/booking/booking.service.js";
+import { getHolidaysBetween } from "../../services/gps/coding.service.js";
 import { getSessionsByCar, getActiveSessionByCar, getSessionById, getRecentSessionsByCarUpTo, getArchivePointCount } from "../../services/booking/bookingSession.service.js";
 import { getSessionArchivesByCar, getRecentSessionArchivesByCarUpTo } from "../../services/archives/bookingSessionArchives.service.js";
 import { fetchCarRowsForDate } from "../../services/sheets/sheets.service.js";
@@ -21,6 +23,12 @@ import admin from "firebase-admin";
 // matched rule — { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }. No timestamps
 // inside, so it passes straight through. [] on older sessions.
 const codingWarningsOut = (list) => (Array.isArray(list) ? list : []);
+
+// Firestore Timestamp / Date / string -> ISO string, or null.
+const toIso = (v) => {
+  const d = v?.toDate ? v.toDate() : v ? new Date(v) : null;
+  return d && !isNaN(d.getTime()) ? d.toISOString() : null;
+};
 
 /** POST /api/gps  — GPS device pushes a live location */
 export const receiveLocation = async (req, res) => {
@@ -604,6 +612,9 @@ export const getCarTraceback = async (req, res) => {
     // read-only summary + canEdit check ("today" + status === "active") on
     // the frontend. null when no session covers this date.
     let session = null;
+    // Holidays inside this trip's dates -- the live records carry none, the saved file does, so a trip still in
+    // progress had no holiday box on Traceback. [] when there is no session or the lookup fails.
+    let holidays = [];
     try {
       // A session covers a date from its REAL start (startedAt) to its real
       // end (see sessionEndedAt) or "now" while it's still going. Sessions that
@@ -659,15 +670,25 @@ export const getCarTraceback = async (req, res) => {
           status:           match.data.status || null,
           startedAt:        sessionStartedAt(match.data),
           endedAt:          sessionEndedAt(match.data), // null while still going
+          // Event times for the Traceback bar flags and the Logs panel (ISO or null).
+          droppedOffAt:     toIso(match.data.droppedOffTime),
+          stolenAt:         toIso(match.data.stolenAt),
+          completedAt:      null, // filled just below, only when the trip really ended (one extra read)
           isArchived,
         };
+        if (match.data.status === "ended") session.completedAt = await getBookingCompletedAt(match.data.bookingID);
+        try {
+          holidays = await getHolidaysBetween(sessionStartedAt(match.data), sessionEndedAt(match.data) || new Date());
+        } catch (hErr) {
+          console.error("[GPS] getCarTraceback holidays lookup error:", hErr.message);
+        }
       }
     } catch (lookupErr) {
       console.error("[GPS] getCarTraceback session lookup error:", lookupErr.message);
       // Non-fatal — traceback still returns points, just without zone/alert/session data.
     }
 
-    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts, codingWarnings, session } });
+    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts, codingWarnings, holidays, session } });
   } catch (err) {
     console.error("[GPS] getCarTraceback error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to fetch traceback." });

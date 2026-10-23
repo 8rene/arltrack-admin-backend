@@ -66,3 +66,21 @@ export const nextGeofenceFlip = ({ breached, wasBreached, flipCount = 0, require
   const count = (Number(flipCount) || 0) + 1;
   return count >= required ? { transition: true, count: 0 } : { transition: false, count };
 };
+
+
+/**
+ * The full geofence transition rule for one ping, as one pure function so it can be tested on its own.
+ *  - After drop-off the customer is released: no NEW breach is ever raised. A breach that was still open is
+ *    closed (so the Live badge and the bell clear) and tagged afterDropOff so the log says why.
+ *  - Otherwise the two-ping rule (nextGeofenceFlip) decides when a breach / cleared entry is written.
+ * @returns {{ entry: "breach"|"cleared"|null, afterDropOff?: boolean, count: number }}
+ *   count = value to store back as geofenceFlipCount
+ */
+export const decideGeofence = ({ breached, wasBreached, flipCount = 0, droppedOff = false }) => {
+  if (droppedOff) {
+    return wasBreached ? { entry: "cleared", afterDropOff: true, count: 0 } : { entry: null, count: 0 };
+  }
+  const flip = nextGeofenceFlip({ breached, wasBreached, flipCount });
+  if (flip.transition) return { entry: breached ? "breach" : "cleared", count: 0 };
+  return { entry: null, count: flip.count };
+};

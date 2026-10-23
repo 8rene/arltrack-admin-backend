@@ -7,8 +7,8 @@
 import admin from "firebase-admin";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getActiveSessionByCarCached } from "../../services/booking/bookingSession.service.js";
-import { checkGeofence, nextGeofenceFlip } from "./geofence.service.js";
-import { resolveCodingRestriction } from "./coding.service.js";
+import { checkGeofence, decideGeofence } from "./geofence.service.js";
+import { resolveCodingRestriction, maskPlate } from "./coding.service.js";
 import { appendCarPing } from "../sheets/sheets.service.js";
 import { notifyStaff, resolveNotification } from "../notification/notification.service.js";
 
@@ -72,15 +72,20 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
   const geofenceResult = checkGeofence(lat, lng, data.geofenceZones || []);
   const lastGeofenceAlert = (data.geofenceAlerts || [])[data.geofenceAlerts?.length - 1];
   const wasBreached = lastGeofenceAlert?.type === "breach";
+  // Marked dropped off = the customer is released. The trip stays open (the car may still be driven to
+  // maintenance and keeps being recorded), but geofence alerts are the customer's, so they stop here.
+  // Coding-restriction and silent-tracker alerts keep going: a coding fine is yours whoever is driving.
+  const droppedOff = !!data.droppedOffTime;
   // Two pings in a row must disagree with the logged state before it changes (see geofence.service.js),
   // so a single bad fix or a car on a zone edge can't raise or clear an alert. The running count lives on
   // the session and rides in the same write as everything else — no extra read or write.
-  const flip = nextGeofenceFlip({
+  const decision = decideGeofence({
     breached: geofenceResult.breached,
     wasBreached,
     flipCount: data.geofenceFlipCount,
+    droppedOff,
   });
-  if (flip.transition && geofenceResult.breached) {
+  if (decision.entry === "breach") {
     updates.geofenceAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "breach",
       nearestZone: geofenceResult.nearestZone,
@@ -101,18 +106,20 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       title: "Vehicle left its zone",
       message: `Car is currently outside its allowed zone${geofenceResult.nearestZone ? ` (nearest: ${geofenceResult.nearestZone})` : ""}.${lateNote}`,
     }).catch((err) => console.error("[NOTIF] geofence_alert create failed:", err.message));
-  } else if (flip.transition && !geofenceResult.breached) {
+  } else if (decision.entry === "cleared") {
     updates.geofenceAlerts = admin.firestore.FieldValue.arrayUnion({
       type: "cleared",
       zone: geofenceResult.nearestZone,
       at: now.toISOString(),
+      // Closed because the car was dropped off while it was still outside, not because it came back.
+      ...(decision.afterDropOff ? { afterDropOff: true } : {}),
       ...lateFields,
     });
     resolveNotification("geofence_alert", carID)
       .catch((err) => console.error("[NOTIF] geofence_alert resolve failed:", err.message));
   }
   // Keep the stored count in step; only touch the field when it actually changes.
-  if ((Number(data.geofenceFlipCount) || 0) !== flip.count) updates.geofenceFlipCount = flip.count;
+  if ((Number(data.geofenceFlipCount) || 0) !== decision.count) updates.geofenceFlipCount = decision.count;
 
   // ── Coding-restriction check ────────────────────────────────────
   // City-aware: reverse-geocodes this ping's actual (lat, lng) and checks it
@@ -135,6 +142,11 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       // digits }), so history still shows what applied after rules are edited.
       // Omitted (not undefined — Firestore rejects that) for older callers.
       ...(codingResult.rule ? { rule: codingResult.rule } : {}),
+      // Which plate this applied to, masked ("P*****2"): the rule's digits alone don't say, and the full plate
+      // must not end up in the public history file. A plate corrected later can't change what was recorded.
+      ...(maskPlate(plateNumber) ? { plate: maskPlate(plateNumber) } : {}),
+      // Coding keeps being recorded after drop-off (the fine is yours whoever drives); this tags those entries.
+      ...(droppedOff ? { afterDropOff: true } : {}),
       at: now.toISOString(),
       ...lateFields,
     });

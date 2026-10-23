@@ -292,3 +292,16 @@ export async function resolveCodingRestriction(plateNumber, lat, lng, atInstant 
   const fallback = isCodingRestricted(plateNumber, atInstant, false);
   return { ...fallback, reason: `fallback-fixed-rule:${fallback.reason}` }; // keeps fallback.rule when restricted
 }
+
+
+/**
+ * A plate with the middle hidden, for records that outlive the trip (and for the public history file):
+ * first character, one * per hidden character, last character -- "PAB1232" -> "P*****2". The last digit is what
+ * number coding is decided by, so the record still shows which plate ending the rule applied to. null if the
+ * plate is unknown or too short to mask.
+ */
+export const maskPlate = (plate) => {
+  const p = String(plate || "").replace(/[\s-]/g, "");
+  if (p.length < 2) return null;
+  return p[0] + "*".repeat(Math.max(p.length - 2, 1)) + p[p.length - 1];
+};

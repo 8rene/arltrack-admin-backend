@@ -1,7 +1,7 @@
 import { db, bucket } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionStops } from "../../services/booking/bookingSession.service.js";
-import { toDate, sessionStartedAt } from "../../utils/date/sessionDates.js";
+import { toDate, sessionStartedAt, sessionEndedAt } from "../../utils/date/sessionDates.js";
 import { fetchSessionRows } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
 import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
@@ -1044,6 +1044,15 @@ export const markBookingDroppedOff = async (docID, performedBy = null) => {
     bookingID: bID,
     description: `Marked vehicle dropped off on booking ${bID}.`,
   }).catch((err) => console.error("[AuditLog] Dropoff log failed:", err.message));
+
+  // Save the history file right now so the drop-off time is in it immediately (not only after Return or the
+  // nightly job). This does NOT end the trip: the session stays active, pings keep being recorded, and the
+  // nightly save continues. Same rule as the pickup save: a failure here must never undo the drop-off.
+  try {
+    await flushBookingHistory(session.ref.id);
+  } catch (err) {
+    console.error("[Booking] Drop-off history save failed (drop-off itself was recorded):", err.message);
+  }
   return { id: docID };
 };
 
@@ -1301,6 +1310,26 @@ export const rejectCancellationRequest = async (docID, rejectReason, performedBy
 // now here so booking.service.js owns the whole booking → history flow.)
 // ─────────────────────────────────────────────
 
+/**
+ * When a booking was marked completed (ISO string), or null. Looks the booking up by document id first, then by
+ * its bookingID field. Never throws: callers use it for display/history, so a failed lookup just means "unknown".
+ */
+export const getBookingCompletedAt = async (bID) => {
+  try {
+    if (!bID) return null;
+    let bSnap = await db.collection("bookings").doc(bID).get();
+    if (!bSnap.exists) {
+      const q = await db.collection("bookings").where("bookingID", "==", bID).limit(1).get();
+      bSnap = q.empty ? null : q.docs[0];
+    }
+    const d = toDate(bSnap?.data()?.completedAt);
+    return d && !isNaN(d.getTime()) ? d.toISOString() : null;
+  } catch (err) {
+    console.error("[Booking] couldn't read completedAt:", err.message);
+    return null;
+  }
+};
+
 export const flushBookingHistory = async (bookingSessionID) => {
   const session = await getSessionById(bookingSessionID);
   if (!session) {
@@ -1348,20 +1377,7 @@ export const flushBookingHistory = async (bookingSessionID) => {
   // that fell inside the trip's dates. Gathering them must never block the
   // save itself, so each lookup falls back to null / [].
   const iso = (v) => { const d = toDate(v); return d && !isNaN(d.getTime()) ? d.toISOString() : null; };
-  let completedAt = null;
-  try {
-    const bID = data.bookingID;
-    if (bID) {
-      let bSnap = await db.collection("bookings").doc(bID).get();
-      if (!bSnap.exists) {
-        const q = await db.collection("bookings").where("bookingID", "==", bID).limit(1).get();
-        bSnap = q.empty ? null : q.docs[0];
-      }
-      completedAt = iso(bSnap?.data()?.completedAt);
-    }
-  } catch (err) {
-    console.error("[Booking] flush: couldn't read completedAt:", err.message);
-  }
+  const completedAt = await getBookingCompletedAt(data.bookingID);
   let holidays = [];
   try {
     holidays = await getHolidaysBetween(pickup, end);
@@ -1369,7 +1385,25 @@ export const flushBookingHistory = async (bookingSessionID) => {
     console.error("[Booking] flush: couldn't read holidays:", err.message);
   }
 
+  // `session` makes the file readable on its own: History, Review and the downloaded copy no longer need the
+  // session record to know how the trip ended or when. IDs and times only -- this file is publicly readable,
+  // so no customer or staff names go in. endedAt is the time the trip really ended: completion for a completed
+  // trip, null while it is still going (a drop-off is NOT an end). A stolen car keeps pinging, so it has no end:
+  // stolenAt is its own marker (the time it was flagged), same as sessionEndedAt treats stolen as "still going".
+  const stolenAt = iso(data.stolenAt);
+  const endedAt = data.status === "ended" ? (completedAt || iso(sessionEndedAt(data))) : null;
   const archivePayload = {
+    session: {
+      bookingSessionID,
+      bookingID:    data.bookingID || null,
+      carID:        data.carID || null,
+      status:       data.status || null,
+      startedAt:    iso(sessionStartedAt(data)),
+      droppedOffAt: iso(data.droppedOffTime),
+      completedAt,
+      stolenAt,
+      endedAt,
+    },
     points: fullTrail,
     geofenceZones:  data.geofenceZones  || [],
     geofenceAlerts: data.geofenceAlerts || [],
@@ -1380,14 +1414,16 @@ export const flushBookingHistory = async (bookingSessionID) => {
     holidays,
   };
 
-  await file.save(JSON.stringify(archivePayload, null, 2), {
+  // Compact JSON (no indentation): same data, a fraction of the size for a long GPS trail.
+  await file.save(JSON.stringify(archivePayload), {
     contentType: "application/json",
     metadata: { cacheControl: "no-cache" },
   });
   await file.makePublic();
 
   const archiveUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
-  await recordArchiveFlush(bookingSessionID, archiveUrl);
+  // A save made after the trip ended / was flagged stolen is the final one: it clears the retry flag.
+  await recordArchiveFlush(bookingSessionID, archiveUrl, { final: data.status === "ended" || data.status === "stolen" });
 
   return archiveUrl;
 };

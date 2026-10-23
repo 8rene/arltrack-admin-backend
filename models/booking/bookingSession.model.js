@@ -48,6 +48,13 @@ export const BookingSession = {
   //   geofenceFlipCount  — consecutive pings disagreeing with the logged geofence state (2 = real change)
   //   lastPingReceivedAt — ISO time the server last heard from the tracker
   //   silentAlertedAt    — set when staff were told the tracker went silent; removed on the next ping
+  //   stolenAt           — when the car was flagged stolen (markSessionStolen). A stolen car keeps pinging, so this is
+  //                        a marker, not an end: sessionEndedAt() still treats stolen as "still going".
+  //   needsFinalFlush    — set when the trip ends / is flagged stolen, removed once its final history file is saved;
+  //                        the nightly job retries any session that still has it (getSessionsNeedingFinalFlush).
+  // Alert entries may also carry `afterDropOff: true` (written once droppedOffTime was set: a geofence breach that
+  // was closed by the drop-off, or a coding restriction that happened afterwards) and, for coding "restricted"
+  // entries, `plate` (the plate masked like "P*****2").
   // Number Coding restrictions found for the car's plate BEFORE the booking was
   // made — the list the customer was warned about. FLAT: one entry per matched rule,
   // no nested arrays.
