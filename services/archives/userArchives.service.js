@@ -17,7 +17,6 @@ export const getAllUserArchives = async () => {
       ...data,
       createdAt:  toISO(data.createdAt),
       archivedAt: toISO(data.archivedAt),
-      restoredAt: toISO(data.restoredAt),
     };
   });
 };
@@ -82,7 +81,6 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
   await userActiveRef.set({
     ...originalData,
     status: "active",
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
   // ── 2. Delete the archive record ──

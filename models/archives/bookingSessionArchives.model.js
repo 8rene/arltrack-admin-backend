@@ -32,6 +32,5 @@ export const BookingSessionArchive = {
   archiveDate: null,
   archivedAt: null,
   archivedBy: "",
-  restoredAt: null,
   restoredBy: null,
 };

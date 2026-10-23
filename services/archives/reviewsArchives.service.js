@@ -7,7 +7,6 @@
  */
 
 import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
@@ -28,7 +27,6 @@ export const getAllReviewsArchives = async () => {
       updatedAt  : toISO(data.updatedAt),
       archiveDate: toISO(data.archiveDate),
       archivedAt : toISO(data.archivedAt),
-      restoredAt : toISO(data.restoredAt),
     };
   });
 
@@ -68,15 +66,11 @@ export const restoreReviewsArchive = async (reviewsArchivesID, restoredBy = "adm
     ? db.collection("reviews").doc(originalId)
     : db.collection("reviews").doc();
 
-  await activeRef.set({
-    ...originalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await activeRef.set(originalData);
 
   // Archive doc's job is done once the review is back in the live
   // collection — delete it instead of keeping a "Restored" marker around,
-  // so restored records don't linger in the archive list (and can't pick
-  // up a stale restoredAt if this review is archived again later).
+  // so restored records don't linger in the archive list.
   await archiveRef.delete();
 };
 

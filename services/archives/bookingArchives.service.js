@@ -1,5 +1,4 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
 import { findLinkedBookingSessionArchive } from "./bookingSessionArchives.service.js";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { getAssignmentRefsForBooking } from "../driverAssignments/driverAssignments.service.js";
@@ -63,7 +62,6 @@ export const getAllBookingArchives = async () => {
         endDateTime:   toISO(data.endDateTime),
         createdAt:     toISO(data.createdAt),
         archivedAt:    toISO(data.archivedAt),
-        restoredAt:    toISO(data.restoredAt),
       };
     })
   );
@@ -159,10 +157,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
     ? db.collection("bookings").doc(originalId)
     : db.collection("bookings").doc();
 
-  await bookingActiveRef.set({
-    ...originalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await bookingActiveRef.set(originalData);
 
   // ── 2. Find and restore linked payment archive ──
   const paymentArchiveDoc = await findLinkedPaymentArchive(bookingID);
@@ -179,10 +174,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
       ? db.collection("payments").doc(payOriginalId)
       : db.collection("payments").doc();
 
-    await paymentActiveRef.set({
-      ...payOriginalData,
-      restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    await paymentActiveRef.set(payOriginalData);
   }
 
   // ── 2c. Restore linked bookingSession ──
@@ -199,10 +191,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
       ? db.collection("bookingSessions").doc(sessionOriginalId)
       : db.collection("bookingSessions").doc();
 
-    await sessionActiveRef.set({
-      ...sessionOriginalData,
-      restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    await sessionActiveRef.set(sessionOriginalData);
   }
 
   // ── 3. Find and restore linked reviews archives ──
@@ -215,10 +204,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
       ? db.collection("reviews").doc(revOriginalId)
       : db.collection("reviews").doc();
 
-    await reviewActiveRef.set({
-      ...reviewOriginalData,
-      restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    await reviewActiveRef.set(reviewOriginalData);
   }
 
   // ── 3b. Restore the linked penalties, refund requests, driver assignments, cancellation requests and

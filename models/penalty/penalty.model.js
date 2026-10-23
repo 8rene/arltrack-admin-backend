@@ -45,10 +45,6 @@ export const PENALTY_STATUSES = ["UnderReview", "Confirmed", "Voided", "Waived",
 //                               Voided). scripts/migrate-discarded-penalties.js turns those into status "Discarded".
 export const PENALTY_REVIEW_FIELDS = ["confirmedBy", "confirmedAt", "editedBy", "editedAt", "discardedFromReview"];
 
-// Stamped by the archive restore, never by createPenalty, so it is listed here rather than in createPenaltyPayload
-// (a new penalty must not carry an empty column). Only present on a penalty restored from penaltyArchives.
-export const PENALTY_RESTORE_FIELDS = ["restoredAt"];
-
 // How a confirmed penalty was settled. This list is only the LABELS readers get back (hydratePenalty derives
 // them); nothing here is stored on the penalty document.
 //   "Deposit" / "DepositPartial"  covered by the held deposit (derived: no entry row and paidAmount > 0)

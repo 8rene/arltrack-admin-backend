@@ -27,7 +27,6 @@ export const Booking = {
   createdAt: null,
   updatedAt: null,    // stamped on every admin change (edit, cancel, reject, driver assign / unassign, payment approval, refund cancel)
   completedAt: null,   // stamped once when an ongoing booking is Returned (completed); the late-fee calculation reads it
-  restoredAt: null,   // only on a booking that was restored from bookingArchives
 
   // Who is driving is NOT stored on the booking. A chauffeur booking's current
   // driver is its "assigned" row in driverAssignments (see

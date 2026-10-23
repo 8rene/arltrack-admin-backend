@@ -77,7 +77,6 @@ const RefundRequest = {
   approvalLockedAt: null, // TEMPORARY 2-minute lock: set while an admin approves, so two admins can't approve the same refund and
                         // send duplicate PayMongo refunds (reject is blocked meanwhile). Deleted when the approval ends, so a finished
                         // request carries no such field
-  restoredAt: null,     // only on a request that was restored from refundArchives
   createdAt: null,
   updatedAt: null,
 };

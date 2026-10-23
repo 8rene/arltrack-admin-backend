@@ -1,5 +1,4 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { hydratePaymentsWithArchives } from "./entryArchiveHydrate.service.js";
 import { restoreEntryArchivesBy, restoreLinkedForBooking } from "./linkedArchives.service.js";
@@ -53,7 +52,6 @@ export const getAllPaymentsArchives = async () => {
       createdAt:  toISO(data.createdAt),
       updatedAt:  toISO(data.updatedAt),
       archivedAt: toISO(data.archivedAt),
-      restoredAt: toISO(data.restoredAt),
     };
   });
 
@@ -93,10 +91,7 @@ const restoreLinkedBooking = async (bookingID) => {
     ? db.collection("bookings").doc(originalId)
     : db.collection("bookings").doc();
 
-  await bookingActiveRef.set({
-    ...bookingOriginalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await bookingActiveRef.set(bookingOriginalData);
 
   // Cascade-restoring the booking archive doc too, same as Booking
   // Archive's own restore does, so the two pages never disagree about
@@ -120,10 +115,7 @@ export const restorePaymentsArchive = async (paymentsArchivesId, restoredBy = "a
     ? db.collection("payments").doc(originalId)
     : db.collection("payments").doc();
 
-  await activeRef.set({
-    ...originalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await activeRef.set(originalData);
 
   const restoredBooking = await restoreLinkedBooking(originalData.bookingID);
 

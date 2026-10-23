@@ -1,5 +1,4 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { hydrateRefundRequestsWithArchives } from "./entryArchiveHydrate.service.js";
 import { LINKED, chunk, restoreEntryArchivesBy, restoreLinkedForBooking } from "./linkedArchives.service.js";
@@ -89,7 +88,6 @@ export const getAllRefundArchives = async () => {
       updatedAt:   toISO(data.updatedAt),
       processedAt: toISO(data.processedAt),
       archivedAt:  toISO(data.archivedAt),
-      restoredAt:  toISO(data.restoredAt),
     };
   });
 };
@@ -118,10 +116,7 @@ const restoreLinkedBooking = async (bookingID) => {
     ? db.collection("bookings").doc(originalId)
     : db.collection("bookings").doc();
 
-  await bookingActiveRef.set({
-    ...bookingOriginalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await bookingActiveRef.set(bookingOriginalData);
 
   await bookingArchiveDoc.ref.delete();
   return true;
@@ -145,10 +140,7 @@ const restoreLinkedPayment = async (bookingID) => {
     ? db.collection("payments").doc(originalId)
     : db.collection("payments").doc();
 
-  await paymentActiveRef.set({
-    ...paymentOriginalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await paymentActiveRef.set(paymentOriginalData);
 
   await paymentArchiveDoc.ref.delete();
   return true;
@@ -169,10 +161,7 @@ export const restoreRefundArchive = async (refundArchivesId, restoredBy = "admin
     ? db.collection("refundRequests").doc(originalId)
     : db.collection("refundRequests").doc();
 
-  await activeRef.set({
-    ...originalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await activeRef.set(originalData);
 
   const restoredBooking = await restoreLinkedBooking(originalData.bookingID);
   const restoredPayment = await restoreLinkedPayment(originalData.bookingID);
@@ -203,7 +192,7 @@ export const restoreRefundArchivesForBooking = async (bookingID) => {
     const batch = db.batch();
     batch.set(
       db.collection("refundRequests").doc(data.originalId || d.id),
-      { ...stripArchiveMeta(data), restoredAt: admin.firestore.FieldValue.serverTimestamp() }
+      stripArchiveMeta(data)
     );
     batch.delete(d.ref);
     await batch.commit();

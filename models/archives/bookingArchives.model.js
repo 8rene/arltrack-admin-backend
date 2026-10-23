@@ -39,7 +39,6 @@ export const BookingArchive = {
   createdAt: null,
   updatedAt: null,
   completedAt: null,
-  restoredAt: null,        // present only if the booking had been restored before it was deleted again
 
   // Legacy: older bookings carried these; the live model no longer does (the amount comes from the payment).
   // depositFee, totalFee

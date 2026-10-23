@@ -1,6 +1,5 @@
-  // (live rows, or the rows archived with the booking in paymentEntryArchives).
+// (live rows, or the rows archived with the booking in paymentEntryArchives).
 import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 import { hydratePenaltiesWithArchives } from "./entryArchiveHydrate.service.js";
 import { restoreEntryArchivesBy, restoreLinkedForBooking } from "./linkedArchives.service.js";
@@ -33,7 +32,6 @@ export const getAllPenaltyArchives = async () => {
       confirmedAt: toISO(data.confirmedAt ?? data.createdAt),   // not stored on new penalties: confirmed when created
       paidAt:      toISO(data.paidAt),
       archivedAt:  toISO(data.archivedAt),
-      restoredAt:  toISO(data.restoredAt),
     };
   });
 };
@@ -56,7 +54,7 @@ const restoreLinkedBooking = async (bookingID) => {
   } = archiveDoc.data();
 
   const activeRef = originalId ? db.collection("bookings").doc(originalId) : db.collection("bookings").doc();
-  await activeRef.set({ ...original, restoredAt: admin.firestore.FieldValue.serverTimestamp() });
+  await activeRef.set(original);
   await archiveDoc.ref.delete();
   return true;
 };
@@ -75,7 +73,7 @@ const restoreLinkedPayment = async (bookingID) => {
   } = archiveDoc.data();
 
   const activeRef = originalId ? db.collection("payments").doc(originalId) : db.collection("payments").doc();
-  await activeRef.set({ ...original, restoredAt: admin.firestore.FieldValue.serverTimestamp() });
+  await activeRef.set(original);
   await archiveDoc.ref.delete();
   return true;
 };
@@ -91,7 +89,7 @@ export const restorePenaltyArchive = async (penaltyArchivesId, restoredBy = "adm
   const originalData = stripArchiveMeta(archived);
 
   const activeRef = originalId ? db.collection("penalties").doc(originalId) : db.collection("penalties").doc();
-  await activeRef.set({ ...originalData, restoredAt: admin.firestore.FieldValue.serverTimestamp() });
+  await activeRef.set(originalData);
 
   const restoredBooking = await restoreLinkedBooking(originalData.bookingID);
   const restoredPayment = await restoreLinkedPayment(originalData.bookingID);
@@ -120,7 +118,7 @@ export const restorePenaltyArchivesForBooking = async (bookingID) => {
     const batch = db.batch();
     batch.set(
       db.collection("penalties").doc(data.originalId || d.id),
-      { ...stripArchiveMeta(data), restoredAt: admin.firestore.FieldValue.serverTimestamp() }
+      stripArchiveMeta(data)
     );
     batch.delete(d.ref);
     await batch.commit();

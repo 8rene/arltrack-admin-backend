@@ -22,10 +22,5 @@ export const TransactionLogArchive = {
   archivedBy: "",
   // Restore deletes this doc entirely (see restoreTransactionLogArchive in
   // services/archives/transactionLogArchives.service.js) rather than
-  // marking it. restoredAt can still show up here though, inherited from
-  // the live transaction log doc if it's ever archived again after being
-  // restored. restoredBy was previously written directly to this doc on
-  // restore but that write path no longer exists, so it's been removed
-  // from this model.
-  restoredAt: null,
+  // marking it, and writes no restore stamp onto the live transaction log.
 };

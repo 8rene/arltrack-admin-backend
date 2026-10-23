@@ -11,13 +11,8 @@
 // restoredAt/restoredBy — a restored review's history lives in the audit
 // log instead.
 //
-// restoredAt can still show up here, though: restoring stamps restoredAt
-// onto the *live* review doc, and if that review is later archived again,
-// the archive-write spreads the live doc's fields (including that
-// restoredAt) straight into the new archive doc. restoredBy was previously
-// written directly onto the archive doc via an update() call on restore,
-// but that write path no longer exists — it's fully dead, so it's been
-// left out of this model.
+// Restoring writes no restore stamp (restoredAt/restoredBy) onto the live
+// review doc either, so a re-archived review carries none.
 export const ReviewsArchive = {
   reviewsArchivesID: "", // Firestore doc ID — same as collection name + "ID"
   reviewID: "",          // doc ID from original 'reviews' collection
@@ -33,5 +28,4 @@ export const ReviewsArchive = {
   archiveDate: null,
   archivedAt: null,
   archivedBy: "",
-  restoredAt: null,
 };

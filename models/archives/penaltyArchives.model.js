@@ -18,7 +18,6 @@ export const PenaltyArchive = {
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,
   archivedBy: "",
-  restoredAt: null,        // only present if it was restored, then archived again
   customerName: "",        // resolved on read from userID; not stored on restore
 
   // ---- copied from the penalty document (see penalty.model.js) ----

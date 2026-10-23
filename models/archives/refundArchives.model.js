@@ -21,7 +21,6 @@ export const RefundArchive = {
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,
   archivedBy: "",
-  restoredAt: null,        // only present if it was restored, then archived again
   customerName: "",        // resolved on read from the cancellation row's userID; not stored on restore
 
   // ---- copied from the refund request document (see refundRequest.model.js) ----

@@ -1,24 +1,31 @@
-// Matches the 'sessionLogArchives' collection in Firestore.
-// Primary key: sessionLogArchivesId (Firestore document ID)
-export const SessionLogArchive = {
-  sessionLogArchivesId: "", // Firestore doc ID — same as collection name + "Id"
-  originalId: "",           // doc ID from original 'sessionLogs' collection
-
-  uID: "",
-  username: "",
-  platform: "",
-  status: "",
-  closedReason: null,
-  loginDateTime: null,
-  logoutDateTime: null,
-  sessionDuration: 0,
-  attemptedAt: null,
-  blockedReason: "",
-
+// Matches the 'reviewsArchives' collection in Firestore
+// Primary key: reviewsArchivesID (Firestore document ID)
+//
+// Written from two places with the same shape: archiveReview() in
+// services/booking/bookingDelete.service.js (cascade, when a booking is
+// deleted) and archiveAndDeleteReview() in services/reviews/reviews.service.js
+// (standalone, when a review is deleted directly from the admin Reviews page).
+//
+// NOTE: restore deletes this document entirely (see restoreReviewsArchive in
+// services/archives/reviewsArchives.service.js) rather than marking it
+// restoredAt/restoredBy — a restored review's history lives in the audit
+// log instead.
+//
+// Restoring writes no restore stamp (restoredAt/restoredBy) onto the live
+// review doc either, so a re-archived review carries none.
+export const ReviewsArchive = {
+  reviewsArchivesID: "", // Firestore doc ID — same as collection name + "ID"
+  reviewID: "",          // doc ID from original 'reviews' collection
+  originalId: "",        // same value as reviewID — kept for consistency with other archive models
+  userID: "",            // reviewer's user ID (some older rows may instead have reviewerID)
+  reviewerID: "",
+  bookingID: "",
+  carID: "",
+  rating: 0,
+  comment: "",
+  createdAt: null,
+  updatedAt: null,
+  archiveDate: null,
   archivedAt: null,
-  // Restore deletes this doc entirely (see restoreSessionLogArchive in
-  // services/archives/sessionLogArchives.service.js) rather than marking
-  // it. restoredAt can still show up here though, inherited from the live
-  // session log doc if it's ever archived again after being restored.
-  restoredAt: null,
+  archivedBy: "",
 };

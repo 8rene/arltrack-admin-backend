@@ -16,7 +16,6 @@ export const PaymentsArchive = {
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,
   archivedBy: "",
-  restoredAt: null,
   restoredBy: null,
   customerName: "",        // resolved on read from the booking's userID; not stored on restore
 

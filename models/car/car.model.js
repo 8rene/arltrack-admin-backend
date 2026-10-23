@@ -1,6 +1,7 @@
 // Matches the actual 'cars' collection in Firestore
 export const Car = {
   carID: "",
+  brandID: "",        // references 'brand' collection (written by addCar in fleet.service.js)
   modelID: "",        // references 'model' collection
   bodyType: "",       // e.g. "MPV", "SUV", "Sedan"
   color: "",

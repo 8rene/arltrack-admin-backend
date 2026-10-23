@@ -1,5 +1,4 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -19,7 +18,6 @@ export const getAllSessionLogArchives = async () => {
       logoutDateTime: toISO(data.logoutDateTime),
       attemptedAt:    toISO(data.attemptedAt),
       archivedAt:     toISO(data.archivedAt),
-      restoredAt:     toISO(data.restoredAt),
     };
   });
 };
@@ -44,10 +42,7 @@ export const restoreSessionLogArchive = async (sessionLogArchivesId) => {
     ? db.collection("sessionLogs").doc(originalId)
     : db.collection("sessionLogs").doc();
 
-  await activeRef.set({
-    ...originalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await activeRef.set(originalData);
 
   // Archive doc's job is done once the session log is back in the live
   // collection — delete it instead of keeping a "Restored" marker around.

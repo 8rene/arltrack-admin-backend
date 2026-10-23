@@ -141,7 +141,6 @@ export const getLinkedPaymentArchiveHandler = async (req, res) => {
         ...data,
         createdAt:  toISO(data.createdAt),
         archivedAt: toISO(data.archivedAt),
-        restoredAt: toISO(data.restoredAt),
       },
     });
   } catch (error) {
@@ -202,7 +201,6 @@ export const getLinkedBookingSessionHandler = async (req, res) => {
         createdAt:      toISO(data.createdAt),
         archiveDate:    toISO(data.archiveDate),
         archivedAt:     toISO(data.archivedAt),
-        restoredAt:     toISO(data.restoredAt),
         lastArchivedAt: toISO(data.lastArchivedAt),
       },
     });

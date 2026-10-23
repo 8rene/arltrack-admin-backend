@@ -1,5 +1,4 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import admin from "firebase-admin";
 import { resolveUserNames } from "./resolveUserName.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
@@ -18,7 +17,6 @@ export const getAllAuditLogsArchives = async () => {
       ...data,
       createdAt:  toISO(data.createdAt),
       archivedAt: toISO(data.archivedAt),
-      restoredAt: toISO(data.restoredAt),
     };
   });
 
@@ -50,10 +48,7 @@ export const restoreAuditLogsArchive = async (auditLogsArchivesId, restoredBy = 
     ? db.collection("auditLogs").doc(originalId)
     : db.collection("auditLogs").doc();
 
-  await activeRef.set({
-    ...originalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await activeRef.set(originalData);
 
   // Archive doc's job is done once the audit log is back in the live
   // collection — delete it instead of keeping a "Restored" marker around.

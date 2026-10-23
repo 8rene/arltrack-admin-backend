@@ -29,12 +29,8 @@
 // flags that a customer will need to sign up again, or an admin manually
 // recreates the Auth account with the same uid, before they can log in.
 //
-// restoredAt can still show up here, though: restoring stamps restoredAt
-// onto the *live* user doc, and if that user is deleted (archived) again
-// later, the archive-write spreads the live doc's fields (including that
-// restoredAt) straight into the new archive doc. restoredBy was previously
-// written directly onto the archive doc on restore, but that write path no
-// longer exists — it's fully dead, so it's been left out of this model.
+// Restoring writes no restore stamp onto the live user doc either, so a user
+// who is deleted (archived) again later carries none.
 export const UserArchive = {
   userArchivesId: "",  // Firestore doc ID — same as collection name + "Id"
   originalId: "",       // uid from the original 'user' collection
@@ -56,5 +52,4 @@ export const UserArchive = {
   // ---- bookkeeping ----
   archivedAt: null,
   archivedBy: "",
-  restoredAt: null,
 };

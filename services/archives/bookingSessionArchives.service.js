@@ -1,6 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { stripArchiveMeta } from "./archiveMeta.js";
-import admin from "firebase-admin";
 import { queryRecentByStart, sessionStartedAt } from "../../utils/date/sessionDates.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
@@ -20,7 +19,6 @@ export const getAllBookingSessionArchives = async () => {
       createdAt:      toISO(data.createdAt),
       archiveDate:    toISO(data.archiveDate),
       archivedAt:     toISO(data.archivedAt),
-      restoredAt:     toISO(data.restoredAt),
       lastArchivedAt: toISO(data.lastArchivedAt),
     };
   });
@@ -85,10 +83,7 @@ export const restoreBookingSessionArchive = async (bookingSessionArchivesId, res
     ? db.collection("bookingSessions").doc(originalId)
     : db.collection("bookingSessions").doc();
 
-  await sessionActiveRef.set({
-    ...originalData,
-    restoredAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await sessionActiveRef.set(originalData);
 
   // ── 2. Delete the archive record ──
   await archiveRef.delete();
