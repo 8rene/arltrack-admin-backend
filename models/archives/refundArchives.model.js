@@ -16,7 +16,7 @@
 // Restore (a refund restore, or restoring its booking) puts the request back in `refundRequests` and deletes this document.
 export const RefundArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored (see services/archives/archiveMeta.js) ----
-  refundArchivesId: "",    // Firestore doc ID of this archive document (lowercase "d": the Refund Archive routes use it)
+  refundArchivesID: "",    // Firestore doc ID of this archive document
   originalId: "",          // doc ID of the original 'refundRequests' document, reused on restore
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,

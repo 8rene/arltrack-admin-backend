@@ -1,12 +1,12 @@
 // Matches the 'bookingArchives' collection in Firestore.
-// Primary key: bookingArchivesId (Firestore document ID)
+// Primary key: bookingArchivesID (Firestore document ID)
 //
 // An archive is a COPY of the booking document, taken when the booking is deleted (see
 // services/booking/bookingDelete.service.js), plus the bookkeeping fields below. So it has every column
 // models/booking/booking.model.js has -- keep the two in step.
 export const BookingArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored (see services/archives/archiveMeta.js) ----
-  bookingArchivesId: "",   // Firestore doc ID of this archive document (the delete writes it as bookingArchivesID)
+  bookingArchivesID: "",   // Firestore doc ID of this archive document
   originalId: "",          // doc ID of the original 'bookings' document, reused on restore
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,

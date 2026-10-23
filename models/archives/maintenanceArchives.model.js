@@ -13,7 +13,7 @@
 // The Maintenance Archive page also shows plateNumber / brandName / modelName: resolved on read from carID, not stored.
 export const MaintenanceArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored (see services/archives/archiveMeta.js) ----
-  maintenanceArchivesId: "",  // Firestore doc ID of this archive document (= originalId; lowercase "d" like the penalty / refund archives)
+  maintenanceArchivesID: "",  // Firestore doc ID of this archive document (= originalId)
   originalId: "",             // doc ID of the original 'maintenance' document, reused on restore
   archiveDate: null,          // set when archived (same moment as archivedAt)
   archivedAt: null,

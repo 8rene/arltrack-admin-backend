@@ -35,7 +35,7 @@ export const writeMaintenanceArchives = async (docs = [], archivedBy = "admin") 
   for (const part of chunk(docs, BATCH_WRITES)) {
     const batch = db.batch();
     part.forEach((d) => batch.set(db.collection(ARCHIVE).doc(d.id), {
-      maintenanceArchivesId: d.id, originalId: d.id, archiveDate: stamp(), archivedAt: stamp(), archivedBy, ...d.data(),
+      maintenanceArchivesID: d.id, originalId: d.id, archiveDate: stamp(), archivedAt: stamp(), archivedBy, ...d.data(),
     }));
     await batch.commit();
   }

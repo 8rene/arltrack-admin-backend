@@ -1,7 +1,7 @@
 // Matches the 'bookingSessionArchives' collection in Firestore
-// Primary key: bookingSessionArchivesId (Firestore document ID)
+// Primary key: bookingSessionArchivesID (Firestore document ID)
 export const BookingSessionArchive = {
-  bookingSessionArchivesId: "",  // Firestore doc ID
+  bookingSessionArchivesID: "",  // Firestore doc ID
   originalId: "",                // doc ID from original 'bookingSessions' collection
   bookingSessionID: "",
   bookingID: "",                 // FK back to the (now also archived) booking

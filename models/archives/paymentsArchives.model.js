@@ -11,7 +11,7 @@
 // scripts/clean-leftovers.js.
 export const PaymentsArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored (see services/archives/archiveMeta.js) ----
-  paymentsArchivesID: "",  // Firestore doc ID of this archive document (lowercase "ID")
+  paymentsArchivesID: "",  // Firestore doc ID of this archive document
   originalId: "",          // doc ID of the original 'payments' document, reused on restore
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,

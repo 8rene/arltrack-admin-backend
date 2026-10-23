@@ -13,7 +13,7 @@
 // Restore (a penalty restore, or restoring its booking) puts the penalty back in `penalties` and deletes this document.
 export const PenaltyArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored (see services/archives/archiveMeta.js) ----
-  penaltyArchivesId: "",   // Firestore doc ID of this archive document (lowercase "d": the Penalty Archive routes use it)
+  penaltyArchivesID: "",   // Firestore doc ID of this archive document
   originalId: "",          // doc ID of the original 'penalties' document, reused on restore
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,

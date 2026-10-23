@@ -402,7 +402,7 @@ const archiveRefundRequest = async (refundRequestDocID, refundRequestData, archi
   const archiveRef = db.collection("refundArchives").doc(); // auto-ID
 
   const archiveDoc = {
-    refundArchivesId : archiveRef.id,
+    refundArchivesID : archiveRef.id,
     refundRequestID   : refundRequestData.refundRequestID ?? refundRequestDocID,
     originalId         : refundRequestDocID,
     archiveDate         : admin.firestore.FieldValue.serverTimestamp(),
@@ -422,13 +422,13 @@ const archiveRefundRequest = async (refundRequestDocID, refundRequestData, archi
 
 /**
  * Writes a single penalty archive document (viewer: PenaltyArchivePage).
- * Returns the new penaltyArchivesId.
+ * Returns the new penaltyArchivesID.
  */
 const archivePenalty = async (penaltyDocID, penaltyData, archivedBy = "admin") => {
   const archiveRef = db.collection("penaltyArchives").doc(); // auto-ID
 
   const archiveDoc = {
-    penaltyArchivesId : archiveRef.id,
+    penaltyArchivesID : archiveRef.id,
     penaltyID         : penaltyData.penaltyID ?? penaltyDocID,
     originalId        : penaltyDocID,
     archiveDate       : admin.firestore.FieldValue.serverTimestamp(),
@@ -702,4 +702,3 @@ export const previewBookingDelete = async (bookingDocID) => {
     ...guard,
   };
 };
-
