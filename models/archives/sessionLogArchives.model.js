@@ -1,31 +1,28 @@
-// Matches the 'reviewsArchives' collection in Firestore
-// Primary key: reviewsArchivesID (Firestore document ID)
+// Matches the 'sessionLogArchives' collection in Firestore.
 //
-// Written from two places with the same shape: archiveReview() in
-// services/booking/bookingDelete.service.js (cascade, when a booking is
-// deleted) and archiveAndDeleteReview() in services/reviews/reviews.service.js
-// (standalone, when a review is deleted directly from the admin Reviews page).
+// An archive is a COPY of a sessionLogs row (see models/sessionLogs/sessionLogs.model.js -- keep the two in step). It is made by
+// archiveSessionLog() in services/sessionLogs/sessionLogs.service.js, which spreads the live row, adds originalId and archivedAt,
+// and then deletes the live row.
 //
-// NOTE: restore deletes this document entirely (see restoreReviewsArchive in
-// services/archives/reviewsArchives.service.js) rather than marking it
-// restoredAt/restoredBy — a restored review's history lives in the audit
-// log instead.
+// The archive document's own id is NOT stored on it: services/archives/sessionLogArchives.service.js adds sessionLogArchivesId
+// from doc.id when it lists the archives. Unlike most archive models this one has no archiveDate and no archivedBy.
 //
-// Restoring writes no restore stamp (restoredAt/restoredBy) onto the live
-// review doc either, so a re-archived review carries none.
-export const ReviewsArchive = {
-  reviewsArchivesID: "", // Firestore doc ID — same as collection name + "ID"
-  reviewID: "",          // doc ID from original 'reviews' collection
-  originalId: "",        // same value as reviewID — kept for consistency with other archive models
-  userID: "",            // reviewer's user ID (some older rows may instead have reviewerID)
-  reviewerID: "",
-  bookingID: "",
-  carID: "",
-  rating: 0,
-  comment: "",
-  createdAt: null,
-  updatedAt: null,
-  archiveDate: null,
+// Restore writes the row back into `sessionLogs` under originalId and deletes this document (no restore stamp on the live row).
+export const SessionLogArchive = {
+  // ---- bookkeeping: written by the archive, NEVER restored ----
+  originalId: "",          // doc ID of the original 'sessionLogs' document, reused on restore
   archivedAt: null,
-  archivedBy: "",
+
+  // ---- copied from the sessionLogs document (see sessionLogs.model.js) ----
+  sessionLogsID: "",
+  uID: null,               // userID that logged in; null on a blocked attempt by an unknown user
+  username: "",
+  platform: "",            // "admin_web" | "customer_web"
+  status: "",              // "active" | "logged_out" | "blocked" -- as it was when archived
+  closedReason: null,      // "manual" | "revoked"; null while open
+  loginDateTime: null,
+  logoutDateTime: null,
+  sessionDuration: 0,      // seconds
+  attemptedAt: null,       // blocked attempts only
+  blockedReason: "",
 };

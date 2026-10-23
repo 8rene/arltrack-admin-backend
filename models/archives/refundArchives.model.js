@@ -10,8 +10,10 @@
 // are the "out" rows of paymentEntries, archived with the booking in paymentEntryArchives) or the customer's own
 // userID / reason / notes (those are on the booking's cancellation row, cancellationRequestArchives). The Refund
 // Archive page gets them back through hydrateRefundRequestsWithArchives() and the cancellation rows.
-// Archives made before the normalization may still carry userID, notes, paymongoRefundID, processedAt, rejectReason,
+// Archives made before the normalization may still carry userID, notes, paymongoRefundID, processedAt,
 // amount / grossPaid (old names of toRefundAmount / bookingPaid) and the policyTier / pickupAt snapshot; readers accept both.
+// rejectReason is still written on the live request when an OLD document is rejected (see refundRequest.model.js), so a
+// new archive can carry it too.
 //
 // Restore (a refund restore, or restoring its booking) puts the request back in `refundRequests` and deletes this document.
 export const RefundArchive = {
@@ -37,6 +39,7 @@ export const RefundArchive = {
   status: "",              // Pending | Approved | Refunded | Rejected | Failed (at the time of deletion)
   processedBy: null,
   reason: null,            // the STAFF's reason for the decision
+  rejectReason: null,      // legacy rejections only: the staff's reason on an OLD document whose `reason` holds the customer's words
   refundedAt: null,
   createdAt: null,
   updatedAt: null,

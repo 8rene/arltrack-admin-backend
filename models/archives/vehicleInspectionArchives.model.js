@@ -1,93 +1,29 @@
-// ─────────────────────────────────────────────
-// vehicleDocumentationBeforeTrip collection schema
+// Matches the 'vehicleInspectionArchives' collection in Firestore.
 //
-// Dynamic part fields are NOT listed here — they are built at runtime
-// from the car's inventory parts (carParts collection).
-// Each part name is converted to camelCase + "Url" suffix:
-//   e.g. "Left Mirror" → leftMirrorUrl
-// ─────────────────────────────────────────────
-export const VehicleDocumentationBeforeTrip = {
-  vehicleDocumentationBeforeTripID: "", // Firestore doc ID (auto-set after creation)
-  bookingID: "",                        // links to bookings collection
-  carID: "",
-  frontViewUrl:  "",                    // required
-  sideViewUrl:   "",                    // required
-  backViewUrl:   "",                    // required
-  // [dynamic part fields]              // e.g. leftMirrorUrl, rightHeadlightUrl, …
-  videos: [],                           // optional — see INSPECTION_MEDIA below
-  extraPhotos: [],                      // optional — free pictures, see INSPECTION_MEDIA below
-  recordedAt: null,                     // when the record was saved; the latest one per booking is picked by this
-  // Set once, by "Confirm inspection" (POST /api/vehicle-docs/:phase/confirm) on the booking's latest record of this phase.
-  // Missing = not confirmed yet; a second confirm is refused. Shape:
-  //   { at: Timestamp, by: staff userID, damagedPartCount: parts flagged at that moment,
-  //     notifiedTo: "driver" | "customer" -- who got the "inspection confirmed" notification (absent if nobody) }
-  inspectionConfirmed: null,
-  createdAt: null,
-  updatedAt: null,
-};
-
-// ─────────────────────────────────────────────
-// vehicleDocumentationAfterTrip collection schema
-// ─────────────────────────────────────────────
-export const VehicleDocumentationAfterTrip = {
-  vehicleDocumentationAfterTripID: "", // Firestore doc ID (auto-set after creation)
-  bookingID: "",                       // same bookingID as the before-trip record
-  carID: "",
-  frontViewUrl:  "",                   // required
-  sideViewUrl:   "",                   // required
-  backViewUrl:   "",                   // required
-  // [dynamic part fields]             // e.g. leftMirrorUrl, rightHeadlightUrl, …
-  videos: [],                          // optional — see INSPECTION_MEDIA below
-  extraPhotos: [],                     // optional — free pictures, see INSPECTION_MEDIA below
-  recordedAt: null,                    // when the record was saved; the latest one per booking is picked by this
-  // Set once, by "Confirm inspection" (POST /api/vehicle-docs/:phase/confirm) on the booking's latest record of this phase.
-  // Missing = not confirmed yet; a second confirm is refused. Shape:
-  //   { at: Timestamp, by: staff userID, damagedPartCount: parts flagged at that moment,
-  //     notifiedTo: "driver" | "customer" -- who got the "inspection confirmed" notification (absent if nobody) }
-  inspectionConfirmed: null,
-  createdAt: null,
-  updatedAt: null,
-};
-
-// ─────────────────────────────────────────────
-// Optional free-form media on both docs above.
+// ONE archive document per booking, written when the booking is deleted (writeInspectionArchive() in
+// services/archives/vehicleInspectionArchives.service.js). It keeps the booking's four live inspection collections together:
+//   inventoryBeforeTrip, inventoryAfterTrip                        part condition       (models/inventory/inventory.model.js)
+//   vehicleDocumentationBeforeTrip, vehicleDocumentationAfterTrip  photos and videos    (models/vehicleDocumentation/vehicleDocumentation.model.js)
 //
-//   videos:      [{ url }]
-//   extraPhotos: [{ url, caption? }]   (caption is an optional label, max 60 chars)
+// Unlike the other archive models this is NOT a field-by-field copy of one live document: every live inspection document is
+// nested whole inside `records`, so none of their columns appear at the top level. A booking with no inspection records gets
+// no archive document.
 //
-// They sit beside the fixed front/side/back fields and the per-part fields,
-// never instead of them: the three exterior photos stay required, videos and
-// extra photos are always optional. uploadedAt is an ISO string (not a
-// Firestore Timestamp) so it survives being copied into/out of the archive.
-// Files are uploaded straight to Firebase Storage by the browser; the backend
-// only ever receives the resulting URL (Vercel's request-body limit is far too
-// small for video).
-// ─────────────────────────────────────────────
-export const INSPECTION_MEDIA = {
-  videos:      { field: "videos",      max: 3,  label: "video" },
-  extraPhotos: { field: "extraPhotos", max: 20, label: "additional photo" },
-};
-// Hard limits for a single video file — also enforce these in Storage rules.
-export const MAX_VIDEO_BYTES = 250 * 1024 * 1024; // 250 MB
-export const MAX_VIDEO_SECONDS = 180;             // 3 minutes
-export const MAX_EXTRA_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
+// The archive document id IS the bookingID. The photo URLs inside `records` keep pointing at Firebase Storage (the files
+// are never moved; only a permanent delete removes them). Restore puts every record back under its own collection and id
+// (bookkeeping stripped, see services/archives/archiveMeta.js), deletes this document, then refreshes the car's live part
+// condition. The restored records get no restoredAt.
+export const VehicleInspectionArchive = {
+  // ---- bookkeeping: written by the archive, NEVER restored ----
+  vehicleInspectionArchivesId: "",  // = the bookingID = the Firestore doc ID of this archive document
+  originalId: "",          // the bookingID again, kept for consistency with the other archive models
+  archiveDate: null,       // set when archived (same moment as archivedAt)
+  archivedAt: null,
+  archivedBy: "",          // staff uid, or "admin" when the caller passed none
 
-// ─────────────────────────────────────────────
-// Helper: convert a part name string to its URL field key
-//   "Left Mirror"      → "leftMirrorUrl"
-//   "Right Headlight"  → "rightHeadlightUrl"
-//   "Front Bumper"     → "frontBumperUrl"
-// ─────────────────────────────────────────────
-export const partNameToFieldKey = (partName = "") => {
-  const camel = partName
-    .replace(/[^a-zA-Z0-9 ]/g, "")
-    .trim()
-    .split(/\s+/)
-    .map((word, i) =>
-      i === 0
-        ? word.toLowerCase()
-        : word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-    )
-    .join("");
-  return camel ? `${camel}Url` : "";
+  // ---- the booking's inspection records ----
+  bookingID: "",
+  carID: null,             // taken from the first record that has one; null when none do
+  records: [],             // [{ collection, id, data }] -- collection is one of the four above, id the live doc id, data the live
+                           // document exactly as it was (every field, including the dynamic part-photo fields)
 };
