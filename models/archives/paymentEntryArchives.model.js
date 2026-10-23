@@ -1,116 +1,79 @@
-// paymentEntries/{paymentEntryID}
+// notifications/{id}
 //
-// ONE ROW PER MONEY MOVEMENT against a payment, penalty or refund. This is the
-// normalized replacement for everything that used to be embedded:
-//   - payments.paymongoTransactions[]                  (deposit / balance attempts)
-//   - payments.*PaymongoPaymentID / *PaymongoFee / paymongoChannel /
-//     paidAt / balancePaidAt / confirmedBy / confirmedAt / balanceMethod /
-//     balanceCollectedBy / balanceCollectedAt          (scattered per-phase facts)
-//   - penalties.paymentMethod / referenceNumber / paidAt  (overwritten on every payment)
-//   - refundRequests.parts[] / manualRefund            (STEP 2 -- direction "out")
+// Single, consistent shape for every admin-facing notification. Replaces
+// the old pattern of querying live "bookings"/"carParts" collections
+// directly and treating the results as fake notifications — every real
+// alert is now an actual doc here.
 //
-// NOTE: the PayMongo checkout session id lives HERE (sessionID), not on payments. The webhook finds the payment
-// through the row (sessionID -> paymentID), and a payment's deposit, balance and penalty checkouts each keep
-// their own id. hydratePayment() derives payments.paymongoSessionID from the latest deposit / balance row for the
-// readers that still ask for it. payments.checkoutUrl STAYS on payments: it is the URL of the one checkout open
-// right now.
+// refID + refCollection together are what make a notification clickable
+// to the EXACT record (not just the page) — see components/Header.jsx's
+// click handler and each page's `?open=` param reader.
 //
-// payments, penalties and refundRequests stay as the parent documents (totals,
-// workflow, review). paymentEntries only holds the money movements.
-//
-// Money in  -> direction "in"  (customer paid)
-// Money out -> direction "out" (a refund)
-//     <refundRequestID>_part<n>          one PayMongo refund        (source "online",    referenceNumber = re_...)
-//     <refundRequestID>_manual           staff hand-back in person  (source "in_person") -- cash taken in person ONLY
-//     <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: status "unrefundable", with
-//                                        transactionErrorNote "Payment ID does not exist". It is reported, never
-//                                        handed back.
-//     (auto ID)                          money handed back for a staff discount that exceeded what was owed:
-//                                        phase "discount", refundReqID null (no refund request exists for it).
-//                                        In person: written by markRefundIssued() in the same batch as
-//                                        payments.refundIssued. Online: written by applyDiscount() (pending
-//                                        until PayMongo confirms).
-//     (auto ID)                          the security deposit handed back at settlement: phase "deposit_return", source
-//                                        "in_person", refundReqID null. One row each time settleBooking() returns money
-//                                        (net > 0), written in the same transaction as payments.depositReturned.
-// The "out" rows ARE the source of truth for a refund: refundRequests no longer stores parts[] / manualRefund /
-// unrefundable[] (writeRefundEntries commits them with the status change; hydrateRefundRequests rebuilds the
-// old shape for readers). A request that still carries those fields (not yet cleaned up) wins in hydrate.
-//
-// The row is the source of truth for "did this money move, how, and what is its
-// external reference". Anything totalling entries MUST filter on direction.
-//
-// Deposit offsets (penalties covered by the held security deposit) are NOT entries: no money moves, they are
-// adjustments and stay on payments (depositSettled / depositStatus ...).
-//
-// Staff discounts ARE written as rows. Four are direction "internal": no cash is received or released, value just moves
-// between the discount's parts. One row per real event:
-//     (auto ID)  discount_applied_balance   a discount given while the payment is still partial; it came off the
-//                                           remaining balance. Nothing is owed back.
-//     (auto ID)  discount_credit            a discount given on a FULLY PAID booking. The customer has already paid
-//                                           it, so it is held and returned when the trip is settled.
-//     (auto ID)  discount_in_refund         the held credit went back INSIDE a cancellation refund (a refund request was
-//                                           approved, or staff cancelled and refunded). The credit is money the customer
-//                                           paid, so the refund plan counts it; the cash is in that refund's own "out" rows,
-//                                           and this row (refundReqID is set) only closes the credit in the ledger.
-//     (auto ID)  discount_applied_penalty   part of the held credit that covered a penalty the deposit could not
-//                                           (penaltyID is set).
-// The fourth is real money, direction "out":
-//     (auto ID)  discount_return            the held credit paid back to the customer at settlement. Its OWN payout,
-//                                           separate from the deposit's deposit_return row: same way of returning (in
-//                                           store -> success now; online -> pending until PayMongo confirms, with its own
-//                                           refund id), same retry and in-store hand-back, a newer row supersedes a failed one.
-// "internal" rows are never counted in paid-in / refunded-out totals: those filter on "in" and "out" only.
-// discount_return counts in refundedOut like the legacy "discount" refund did (the money did leave).
-//     (deterministic ID)  deposit_forfeited  the security deposit was KEPT by the business (a late / no-show refund, or a
-//                                           cancellation with no refund). direction "internal": nothing moves, the business just
-//                                           keeps what it already holds. ID = "<paymentID>_deposit_forfeited"; reason = why.
-// Legacy discounts (phase "discount", direction "out") are untouched: they were refunded on the spot.
+// userID: who this specific copy belongs to. Types that need to reach
+// more than one person (e.g. cancellation_request going to every
+// Owner/Admin/Supervisor) write one doc PER PERSON, each with their own
+// userID — so isRead/dismiss is personal to that person, not shared.
+// resolveNotification() already matches by type+refID with no userID
+// filter, so approving/rejecting the underlying event clears every
+// fan-out copy at once, for free.
+export const Notification = {
+  type: "",
+  //   Staff-facing (fan-out to Owner/Admin/Supervisor, or Owners only):
+  //   "cancellation_request" | "new_user" | "geofence_alert" | "coding_alert" | "tracker_silent" |
+  //   "pickup_overdue" | "return_overdue" | "refund_due" | "refund_request" | "license_expiring" |
+  //   "license_expired" | "inspection_pickup_needed" | "inspection_return_needed" | "id_resubmit_request" |
+  //   "discount_applied" | "penalty_created" | "penalty_review" | "maintenance_created" | "booking_cancelled"
+  //   Customer / driver-facing (one doc for that person):
+  //   "terms_updated" | "inspection_confirmed" | "discount_applied" | "discount_edited" |
+  //   "refund_approved" | "refund_rejected" | "refund_failed" | "refund_completed" |
+  //   "deposit_return_processing" | "booking_cancelled" |
+  //   "PenaltyConfirmed" | "PenaltyWaived" | "PenaltyVoided"   (penalty customer notices keep their old PascalCase names)
+  //   (booking_cancelled: one to the assigned driver, and one to every other Owner/Admin/Supervisor when an admin
+  //   cancels a booking; see services/refundRequest/refundRequest.service.js)
+  //   (refund_failed / refund_completed: the customer's security deposit and/or discount credit return was delayed /
+  //   handed back in store; refund_due is the STAFF follow-up for the same payout; see
+  //   services/depositReturn/depositReturn.service.js)
+  //   (terms_updated: sent to EVERY account in `user` whenever a new Terms &
+  //   Conditions version is published — refCollection "terms", refID is the
+  //   new termsVersionID, `version` is stored alongside; see notifyAllUsers()
+  //   in services/notification/notification.service.js)
+  //   (inspection_pickup_needed / inspection_return_needed: a driver hit "Remind Staff" — extra fields carID,
+  //   phase and bookingKey are stored alongside, see
+  //   services/inspectionReminders/inspectionReminders.service.js)
+  //   (inspection_confirmed: staff finished a before / after inspection; goes to the booking's driver, or to the
+  //   customer when no driver is assigned. carID and phase are stored alongside and phase is also the dedupeKey)
 
-export const ENTRY_COLLECTION = "paymentEntries";
+  userID: "",            // which staff account this specific copy belongs to
+  refID: "",              // doc ID of the record this notification is about
+  refCollection: "",      // which collection refID lives in: "bookings" | "user" | "cars" | "terms" |
+                          // "penalties" | "maintenance"
 
-export const ENTRY_DIRECTIONS = ["in", "out", "internal"];   // "internal" = no cash moved (a discount changing buckets)
-export const ENTRY_PHASES     = ["deposit", "balance", "penalty", "deposit_return", "discount",
-                                 "discount_credit", "discount_applied_balance", "discount_applied_penalty", "discount_return", "discount_in_refund", "deposit_forfeited"];
-export const ENTRY_SOURCES    = ["online", "in_person"];            // PayMongo | staff collected / handed back
-export const ENTRY_METHODS    = ["gcash", "maya", "qrph", "cash", "bank_transfer"];   // customers can only pay online via gcash / maya / qrph
-// "unrefundable" is only used by direction "out" rows (an amount with no PayMongo payment id).
-export const ENTRY_STATUSES   = ["pending", "success", "failed", "cancelled", "unrefundable"];
+  title: "",
+  message: "",
 
-export const PaymentEntry = {
-  paymentEntryID: "",       // same as the Firestore doc ID. Deposit/balance rows: "<paymentID>_deposit" | "<paymentID>_balance"
-                            // (same key the transaction-log idempotency already uses). Penalty / later attempts: auto ID.
-  paymentID:   null,        // FK -> payments.paymentID (every row)
-  bookingID:   null,        // FK -> bookings.bookingID
-  userID:      null,        // FK -> user (the customer)
-  refundReqID: null,        // FK -> refundRequests.refundRequestID. Set on a refund's "out" rows only.
-  penaltyID:   null,        // FK -> penalties.penaltyID. Set on "penalty" phase rows only.
-  direction:   "in",        // "in" | "out" | "internal"
-  phase:       "deposit",   // "deposit" | "balance" | "penalty" | "deposit_return" | "discount" | "discount_credit" | "discount_applied_balance" | "discount_applied_penalty" | "discount_return" | "discount_in_refund"   (for "out": the phase being refunded)
-  source:      "online",    // "online" | "in_person"
-  method:      null,        // gcash | maya | qrph | cash | bank_transfer | null (online, channel unknown)
-  amount:      0,           // pesos moved by THIS entry
-  status:      "pending",   // pending | success | failed | cancelled | unrefundable
-  referenceNumber: null,    // the external id of this movement: pay_... (online), re_... (online refund),
-                            // receipt / bank code (in person). null if none. Never "N/A" / "—" / "".
-  sessionID:   null,        // PayMongo checkout session (online "in" rows) -- webhook lookup key
-  transactionFee: null,     // PayMongo's actual fee for this charge (NOT payments.gatewayFee, which is
-                            // what the customer was charged from system settings)
-  processedBy: null,        // staff uid who confirmed / handed back (in person). null for online + webhooks
-  processedAt: null,
-  settledAt:   null,        // when the money actually moved
-  groupID:     null,        // rows created by ONE payment that covered several penalties share this
-  reason: null,               // why: the reason staff gave for a discount (required) or for a forfeited deposit; null on other rows
-  transactionErrorNote: null, // why a movement failed / could not happen (a failed refund part's error,
-                            // "Payment ID does not exist"). null when nothing went wrong.
-  createdAt:   null,
-  updatedAt:   null,
+  // ---- optional fields: only some notification types carry them (passed as `extra` / `dedupeKey` to
+  //      createNotification() in services/notification/notification.service.js; absent on every other type) ----
+  dedupeKey: null,        // makes events that share one refID separate notifications. Without it createNotification() treats an
+                          // active doc with the same type + refID + userID as a duplicate and drops the new one. With it, only a doc
+                          // carrying the SAME key counts as a duplicate (checked in memory, so no extra Firestore index). Values used:
+                          //   inspection_confirmed:   the phase ("before" | "after")
+                          //   refund_failed:          "payout_delayed:<bookingID>"
+                          //   refund_completed:       "in_store:<bookingID>:<d|c|dc>"  (d = deposit, c = discount credit)
+                          //   PenaltyConfirmed / PenaltyWaived / PenaltyVoided: the penaltyID (refID is the booking)
+  carID: null,            // inspection_pickup_needed, inspection_return_needed, inspection_confirmed, maintenance_created:
+                          // lets the bell open that car's page
+  phase: null,            // inspection_*: "before" | "after"
+  bookingKey: null,       // inspection_pickup_needed / inspection_return_needed: the booking's key, used to resolve the reminder
+                          // once staff finish the inspection
+  version: null,          // terms_updated: the Terms & Conditions version number
+
+  isRead: false,
+  status: "active",      // "active" | "resolved" — auto-resolved notifications
+                          // (geofence/coding/overdue) get cleared automatically
+                          // when the underlying condition clears; the manually
+                          // dismissable ones (cancellation_request, new_user)
+                          // just get deleted on click-to-dismiss.
+
+  createdAt: null,
+  resolvedAt: null,
 };
-
-// Indexes the app relies on (Firestore creates single-field ones automatically):
-//   paymentID + phase           list a payment's entries
-//   refundReqID                 list a refund's "out" rows (queried `in` [...] and `==`)
-//   penaltyID                   list a penalty's payments (queried `in` [...])
-//   referenceNumber + direction webhook lookup (STEP 2)
-//   sessionID                   webhook lookup
-//   bookingID                   permanent-delete cleanup
