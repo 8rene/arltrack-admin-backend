@@ -1,32 +1,41 @@
-import { db, bucket } from "../../config/firebaseConnection/firebase.js";
+import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionStops } from "../../services/booking/bookingSession.service.js";
-import { toDate, sessionStartedAt } from "../../utils/date/sessionDates.js";
-import { fetchSessionRows } from "../../services/sheets/sheets.service.js";
-import { datesBetweenPHT } from "../../utils/date/phtDate.js";
-import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
-import { resolveInspectionReminders } from "../../services/inspectionReminders/inspectionReminders.service.js";
-import { computeAmounts, derivePaymentStage } from "../../services/payments/payments.service.js";
-import { resolveNotification } from "../../services/notification/notification.service.js";
-import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
-import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
-import { planOnlineDepositReturn, sendOnlineReturns, onlineDepositReturnOption, getDepositReturnForBooking, notifyCustomerReturnedInStore } from "../../services/depositReturn/depositReturn.service.js";
-import { getDepositView } from "../payments/paymentHelpers.js";
-import { getDiscountFigures } from "../payments/discountLedger.js";
-import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
-import { getHolidaysBetween } from "../gps/coding.service.js";
+import { ROLES, resolveRoleID } from "../../utils/roles/role.util.js";
+import { updateBooking, markBookingDroppedOff, resolvePaymentInfo as resolveBookingPaymentInfo } from "../../services/booking/booking.service.js";
+import { getSessionByBookingID } from "../../services/booking/bookingSession.service.js";
+import { getPhaseChecklist, getVehicleDocsByBooking } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
+import { getReminderCooldowns, sendInspectionReminder } from "../../services/inspectionReminders/inspectionReminders.service.js";
+import { createNotification } from "../../services/notification/notification.service.js";
+import { createAuditLog } from "../auditLogs/auditLogs.service.js";
+import { createPenalty, listPenaltiesForDriver, editPenaltyAsDriver } from "../penalty/penalty.service.js";
+import { sessionStartedAt } from "../../utils/date/sessionDates.js";
+import { getTermsVersion } from "../terms/terms.service.js";
 import {
-  bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
-} from "../../services/driverAssignments/driverAssignments.service.js";
-import { assertAssignedDriverFreeForNewDates } from "../driverDispatch/driverConflict.service.js";
+  ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getCompletedAssignment,
+  getAssignmentsForDriver, getBookingsByKeys, createAssignment, endActiveAssignment,
+  legacyDriverFieldsPatch,
+} from "../driverAssignments/driverAssignments.service.js";
 import {
-  REQUEST_STATUS, getPendingRequest, getAllPendingRequests, getRequestsByBookingKeys, resolveRequest, recordDirectCancellation,
-} from "../../services/cancellationRequests/cancellationRequests.service.js";
+  OVERRIDE_REASON_MIN_LENGTH, effectiveEnd, evaluateDriverSchedule, getDriverBufferMinutes,
+  getDriverLiveBookings, describeConflict,
+} from "./driverConflict.service.js";
+
 // ─────────────────────────────────────────────
-// Helpers
+// Helpers (deliberately self-contained rather than importing from
+// booking.service.js — those helpers aren't exported, and duplicating
+// small resolvers like this per-module is the existing convention here,
+// see booking.service.js vs payments.service.js both having their own
+// resolveVehicleName/resolveUserInfo).
 // ─────────────────────────────────────────────
 
-export const resolveVehicleName = async (carID) => {
+const toJSDate = (val) => {
+  if (!val) return null;
+  if (val.toDate) return val.toDate();
+  const d = new Date(val);
+  return isNaN(d) ? null : d;
+};
+
+const resolveVehicleName = async (carID) => {
   if (!carID) return "—";
   try {
     const carDoc = await db.collection("cars").doc(carID).get();
@@ -42,117 +51,32 @@ export const resolveVehicleName = async (carID) => {
   } catch { return "—"; }
 };
 
-// bookingID → { paymentMethod, totalFee, rentalFee, serviceFee,
-// extraFee, amountPaid, balance, payType, paymentStatus } from payments
-// collection. totalFee comes from payments.amount; the fee breakdown comes
-// straight off the same doc. amountPaid/balance/payType are derived via the
-// shared computeAmounts() (same logic payments.service.js uses for
-// /api/payments), so these numbers can't drift between Bookings, Car
-// Tracking, and driver-facing screens. paymentStatus mirrors the "Paid" →
-// "Approved" normalization getAllPayments() applies, so badge styling in
-// PaymentStatusModal lines up regardless of which endpoint fed it; a
-// cancelled *booking* still forces "Cancelled" (applied by the caller,
-// which has b.status handy — see getAllBookings below).
-const EMPTY_PAYMENT_INFO = {
-  paymentMethod: "—", totalFee: 0, rentalFee: 0, serviceFee: 0, extraFee: 0,
-  driversFee: 0, gatewayFee: 0, securityDeposit: 0, deposit: null,
-  amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentStage: "—", discountAmount: 0,
-  refundDue: 0, refundIssued: false,
-  // Deposit / penalty breakdown — same "what should actually come back to
-  // the customer" math as settleBooking() in penalty.service.js (deposit
-  // held minus every unpaid Confirmed penalty, still-negative-allowed).
-  // Read-only here, just a live preview for staff before Return actually
-  // runs settlement — mirrors the same fields the driver's My Trips
-  // Payments button already gets via driverDispatch.service.js, so a
-  // supervisor confirming/collecting payment on Car Tracking while a
-  // booking is still ongoing can see the rightful return amount instead
-  // of only finding out once Return triggers the real deduction.
+// bookingID → { totalFee, amountPaid, balance, payType, paymentStatus } —
+// same computeAmounts() logic booking.service.js and payments.service.js
+// use, so the driver's My Trips payment modal matches the admin side
+// exactly instead of being derived a third, different way (or not at all,
+// which is what was happening here before).
+const EMPTY_PAYMENT = {
+  totalFee: 0, amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—",
+  discountAmount: 0, refundDue: 0, refundIssued: false,
+  // Deposit / penalty breakdown — populated for the ongoing-trip Payments
+  // button; 0/false for a trip with no payment doc yet.
   depositAmount: 0, depositStatus: "—", confirmedPenaltyTotal: 0, amountToReturn: 0,
   depositSettled: false, depositDeducted: 0,
 };
-export const resolvePaymentInfo = async (bookingID) => {
-  if (!bookingID) return EMPTY_PAYMENT_INFO;
-  try {
-    const snap = await db.collection("payments")
-      .where("bookingID", "==", bookingID)
-      .limit(1)
-      .get();
-    if (snap.empty) return EMPTY_PAYMENT_INFO;
-    // Hydrated so paymentMethod / referenceNumber etc. still resolve once the
-    // moved fields are cleaned off the payment doc (they live in paymentEntries).
-    const data = await hydratePaymentData(snap.docs[0].data(), snap.docs[0].id);
-    const { amountPaid, balance, payType, refundDue } = computeAmounts(data);
-    let paymentStatus = data.status || "Pending";
-    if (paymentStatus.toLowerCase() === "paid") paymentStatus = "Approved";
-
-    const penalties = await listPenaltiesForBooking(bookingID);
-    const confirmedPenaltyTotal = penalties
-      .filter((p) => p.status === "Confirmed")
-      .reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
-    // null = never recorded; same view for flat and old nested storage. The unpaid total is the live shortfall.
-    const deposit = getDepositView(data, { unpaid: confirmedPenaltyTotal });
-    const depositAmount = deposit?.amount || 0;
-    const depositStatus = deposit?.status || "—";
-    // Before settlement this is a live preview: deposit minus every unpaid
-    // Confirmed penalty, still-negative-allowed (same as settleBooking()'s
-    // `net`). AFTER settlement the deposit has already paid those penalties
-    // out, so they now read as paid and the unpaid total falls to 0 —
-    // recomputing would show the FULL deposit as "to return" again. So once
-    // settled, report what actually happened instead: anything still unpaid
-    // right now is owed by the customer (negative), otherwise it's the
-    // amount that was handed back (depositReturned).
-    const settlement = deposit?.settlement || null;
-    const depositSettled = !!settlement;
-    const depositDeducted = deposit?.deducted || 0;
-    const appliedToPenalties = !settlement ? (deposit?.applied || 0) : 0;   // taken from the held deposit already
-    // Discount credit held for the customer (a discount given on a fully paid booking): it covers penalties the deposit
-    // can't, and what is left goes back WITH the deposit, so it is part of the amount to return.
-    const discountFigures = getDiscountFigures(data);
-    const heldCredit = !settlement && deposit?.status === "Held" ? discountFigures.credit : 0;
-    const amountToReturn = settlement
-      ? (confirmedPenaltyTotal > 0 ? -confirmedPenaltyTotal : Math.max(0, (deposit.returnedAmount || 0) + discountFigures.returned))
-      : depositAmount - appliedToPenalties - confirmedPenaltyTotal + heldCredit;
-
-    return {
-      paymentMethod: data.paymentMethod || "—",
-      totalFee:      data.amount        ?? 0,
-      rentalFee:     data.rentalFee     ?? 0,
-      serviceFee:    data.serviceFee    ?? 0,
-      extraFee:      data.extraFee      ?? 0,
-      driversFee:    data.driversFee    ?? 0,
-      gatewayFee:    data.gatewayFee    ?? 0,
-      // Refundable deposit charged as part of `amount` (0 on older bookings).
-      securityDeposit: Number(data.securityDeposit) || 0,
-      // The REAL security deposit (depositStatus & co on the payment, written by
-      // penalty.service.js's waiveDeposit/settleBooking) — a light read-only
-      // summary (no Firestore timestamps). null = never recorded yet. Not the
-      // legacy depositFee. The API shape is unchanged from when it was a nested object.
-      deposit: deposit ? {
-        amount:         deposit.amount,
-        status:         deposit.status,
-        returnedAmount: deposit.returnedAmount,
-      } : null,
-      amountPaid,
-      balance,
-      payType,
-      paymentStatus,
-      // Pending / Partial / Completed / Failed / Refunded — the vocabulary staff
-      // see. getAllBookings layers "Cancelled" and "For Refund" on top (it knows
-      // the booking's status and any open refund request).
-      paymentStage: derivePaymentStage(data),
-      discountAmount: Number(data.discountAmount) || 0,
-      refundDue,
-      refundIssued: !!data.refundIssued,
-      depositAmount, depositStatus, amountToReturn,
-      discountCredit: heldCredit,   // held discount credit that goes back with the deposit
-      confirmedPenaltyTotal: confirmedPenaltyTotal + appliedToPenalties,
-      depositSettled, depositDeducted: depositDeducted || appliedToPenalties,
-    };
-  } catch { return EMPTY_PAYMENT_INFO; }
+const EMPTY_CHECKLIST = { photos: false, parts: false, complete: false };
+// The payment / deposit / penalty read is the SAME one the Bookings list uses
+// (booking.service.js's resolvePaymentInfo), trimmed to the fields the driver app
+// shows. It used to be a second copy of that logic here (including its own
+// penalties query), which had to be kept in step by hand.
+const resolvePaymentInfo = async (bookingID) => {
+  if (!bookingID) return EMPTY_PAYMENT;
+  const info = await resolveBookingPaymentInfo(bookingID);
+  return Object.fromEntries(Object.keys(EMPTY_PAYMENT).map((k) => [k, info[k] ?? EMPTY_PAYMENT[k]]));
 };
 
 const resolveUserInfo = async (userID) => {
-  if (!userID) return { customerName: "—", phone: "—" };
+  if (!userID) return { name: "—", phone: "—" };
   try {
     const [detailDoc, userDoc] = await Promise.all([
       db.collection("userDetails").doc(userID).get(),
@@ -161,1233 +85,994 @@ const resolveUserInfo = async (userID) => {
     const { firstName = "", lastName = "" } = detailDoc.exists ? detailDoc.data() : {};
     const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
     const { phone = "—", username = "", email = "" } = userDoc.exists ? userDoc.data() : {};
-    const customerName = fullName || username || email || "—";
-    return { customerName, phone };
-  } catch { return { customerName: "—", phone: "—" }; }
+    return { name: fullName || username || email || "—", phone };
+  } catch { return { name: "—", phone: "—" }; }
 };
 
-const resolveServiceType = async (serviceTypeID) => {
-  if (!serviceTypeID) return "—";
-  try {
-    const doc = await db.collection("serviceType").doc(serviceTypeID).get();
-    if (!doc.exists) return "—";
-    // The serviceType collection's actual field is `serviceType` (see
-    // customer-backend/controllers/services/services.controller.js, which
-    // creates/reads this same shape) — not serviceTypeName/name.
-    return doc.data().serviceType || "—";
-  } catch { return "—"; }
+// userID -> "First Last" from userDetails (where names live; the user doc has no
+// first/last name). One query per 30 ids instead of two reads per person.
+const resolveDisplayNames = async (userIDs) => {
+  const map = new Map();
+  const ids = [...new Set((userIDs || []).filter(Boolean))];
+  for (let i = 0; i < ids.length; i += 30) {
+    const snap = await db.collection("userDetails")
+      .where(admin.firestore.FieldPath.documentId(), "in", ids.slice(i, i + 30))
+      .get();
+    snap.forEach((doc) => {
+      const { firstName = "", lastName = "" } = doc.data();
+      const full = [firstName, lastName].filter(Boolean).join(" ").trim();
+      if (full) map.set(doc.id, full);
+    });
+  }
+  return map;
 };
 
-// bookingID → { hasHistory, bookingSessionID, lastArchivedAt } — powers the
-// "Trip History" row in the Bookings page's detail view, and the deep-link
-// into Car Tracking's History tab (see routes/booking/booking.routes.js
-// callers). hasHistory is true only once flushBookingHistory (below) has
-// actually flushed a trail to Storage (archiveUrl set) — a session that
-// exists but never got flushed still reports false, same as "no session at
-// all", since either way there's nothing in History to show yet.
-const EMPTY_HISTORY_INFO = {
-  hasHistory: false, bookingSessionID: null, lastArchivedAt: null, startedAt: null, droppedOffTime: null,
-  // { address, lat, lng } | null — set by the customer backend at booking
-  // time (see bookingsession.model.js). geofenceZones carries any extra
-  // stops the customer selected beyond pickup/dropoff (same field
-  // CarTracking's live map and BookingInfoPanel already read) — surfaced
-  // here too so Bookings.jsx's detail view can plot every stop on a map,
-  // not just the two endpoints.
-  pickupLocation: null, dropoffLocation: null, geofenceZones: [],
-  // Booking-time Number Coding warnings from the customer app ([] on older bookings).
-  codingWarnings: [],
+// Statuses considered "live" for dispatch purposes — a booking that's
+// upcoming or already picked up (ongoing) can hold/need a driver.
+// completed/cancelled/cancellation_request/stolen bookings are excluded
+// entirely: nothing to dispatch, nothing to keep assigned.
+const DISPATCHABLE_STATUSES = ["upcoming", "ongoing"];
+
+// ─────────────────────────────────────────────
+// Driver's-license status — used to WARN when assigning a driver, not to
+// block or lock anyone. (Auto-locking an expired driver also locked them out
+// of the very page they need to upload a renewed license, so expiry is now
+// surfaced here + on the dashboard + in the bell instead.)
+// ─────────────────────────────────────────────
+const LICENSE_WARNING_DAYS = 14; // same threshold as the dashboard + nightly job
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const fmtDay = (d) =>
+  d.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" });
+
+// Exact-moment rule (same as the nightly job): expired the instant it passes.
+const licenseStatusOf = (expiry, now = Date.now()) => {
+  if (!expiry) return { status: "none", daysLeft: null };
+  const msLeft = expiry.getTime() - now;
+  const daysLeft = Math.ceil(msLeft / DAY_MS);
+  if (msLeft < 0) return { status: "expired", daysLeft };
+  return { status: daysLeft <= LICENSE_WARNING_DAYS ? "expiring" : "ok", daysLeft };
 };
-// Booking-time Number Coding warnings (session.codingWarnings): a FLAT array, one entry per
-// matched rule — { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }. No timestamps
-// inside, so it passes straight through. [] on older sessions.
-const codingWarningsOut = (list) => (Array.isArray(list) ? list : []);
-const resolveHistoryInfo = async (bookingID) => {
-  if (!bookingID) return EMPTY_HISTORY_INFO;
-  try {
-    const snap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
-    if (snap.empty) return EMPTY_HISTORY_INFO;
-    const data = snap.docs[0].data();
-    return {
-      hasHistory:       !!data.archiveUrl,
-      bookingSessionID: data.bookingSessionID || null,
-      lastArchivedAt:   data.lastArchivedAt || null,
-      // Surfaced here (rather than a separate fetch) since this query
-      // already reads the session doc for hasHistory/bookingSessionID —
-      // Car Tracking's "Current trip" panel and Bookings.jsx need both to
-      // show the Dropped Off marker without an extra round trip per booking.
-      startedAt:        sessionStartedAt(data),
-      droppedOffTime:   data.droppedOffTime || null,
-      pickupLocation:   data.pickupLocation || null,
-      dropoffLocation:  data.dropoffLocation || null,
-      geofenceZones:    data.geofenceZones || [],
-      codingWarnings:   codingWarningsOut(data.codingWarnings),
-    };
-  } catch { return EMPTY_HISTORY_INFO; }
+
+// userID -> current license expiry (Date). A person can have more than one
+// userDocument record (old data, re-uploads), so the LATEST expiry wins.
+const resolveLicenseExpiries = async (userIDs) => {
+  const map = new Map();
+  for (let i = 0; i < userIDs.length; i += 30) { // Firestore "in" allows 30 values
+    const snap = await db.collection("userDocument").where("userID", "in", userIDs.slice(i, i + 30)).get();
+    snap.forEach((doc) => {
+      const data = doc.data();
+      const expiry = toJSDate(data.driverLicenseExpiry);
+      if (!expiry) return;
+      const prev = map.get(data.userID);
+      if (!prev || expiry > prev) map.set(data.userID, expiry);
+    });
+  }
+  return map;
 };
 
 // ─────────────────────────────────────────────
-// Main service functions
+// GET the full dispatch board: every active Driver, their current
+// assignments, and every chauffeur booking still waiting for one.
 // ─────────────────────────────────────────────
+export const getDispatchBoard = async () => {
+  const driverRoleID = await resolveRoleID(ROLES.DRIVER);
+  if (!driverRoleID) throw new Error("Could not resolve the Driver role ID.");
 
-// The T&C number (1.00, 1.01 …) a booking agreed to. The booking only stores the immutable
-// termsVersions doc ID, so the number is read from that doc. null if it can't be found.
-const resolveTermsVersionNumber = async (id) => {
-  try {
-    const doc = await db.collection("termsVersions").doc(String(id)).get();
-    return doc.exists ? (doc.data().version ?? null) : null;
-  } catch {
-    return null;
-  }
-};
-
-export const getAllBookings = async (statusFilter) => {
-  const filter = statusFilter?.toLowerCase();
-
-  let rows = [];
-  const seen = new Set();
-  const addSnap = (snap) => snap.forEach((doc) => {
-    if (seen.has(doc.id)) return;
-    seen.add(doc.id);
-    rows.push({ id: doc.id, ...doc.data() });
-  });
-
-  if (!filter || filter === "all") {
-    // "to pay" = created but the deposit hasn't cleared yet. Shown (read-only, badge
-    // in the UI) so staff can see what's pending and that the car is spoken for.
-    const statuses = ["to pay", "upcoming", "ongoing", "completed", "cancelled", "stolen"];
-    const snaps = await Promise.all(
-      statuses.map((st) => db.collection("bookings").where("status", "==", st).get())
-    );
-    snaps.forEach(addSnap);
-  } else if (filter === "cancellation_request") {
-    // Pending requests live in the cancellationRequests collection.
-    const pending = await getAllPendingRequests();
-    (await getBookingsByKeys([...new Set(pending.map((r) => r.bookingID))])).forEach((b) => {
-      if (seen.has(b.id)) return;
-      seen.add(b.id);
-      rows.push(b);
-    });
-  } else {
-    addSnap(await db.collection("bookings").where("status", "==", filter).get());
-  }
-
-  // Every booking carries its cancellation request history (newest first) and
-  // the latest one as `cancellationRequest`, so the detail view can show WHY the
-  // customer asked. A booking with a PENDING request is still PRESENTED as
-  // "cancellation_request" (the value the Bookings page already knows how to
-  // show and act on) while its real status is kept as actualStatus.
-  // Only the rows of THESE bookings are read (not the whole collection).
-  const requestMap = await getRequestsByBookingKeys(rows.map((b) => bookingKeyOf(b.id, b)));
-  rows = rows.map((b) => {
-    const all     = requestMap.get(bookingKeyOf(b.id, b)) || [];
-    const reqs    = all.filter((r) => !r.cancelledBy && !r.refundRequestID);          // real customer requests only
-    const latest  = reqs[0] || null;
-    const pending = reqs.some((r) => r.status === REQUEST_STATUS.PENDING);
-    // Why the booking was cancelled: the direct-cancellation row, else the approved request's reason.
-    const reasonRow = all.find((r) => r.cancelledBy) || all.find((r) => r.status === REQUEST_STATUS.APPROVED && r.reason);
-    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs, cancellationReason: reasonRow?.reason || "" };
-    return pending && (b.status || "").toLowerCase() !== "cancelled"
-      ? { ...out, actualStatus: b.status, status: "cancellation_request" }
-      : out;
-  });
-  // Show WHO handled a request, not just a uid.
-  const staffIDs = [...new Set(rows.map((b) => b.cancellationRequest?.processedBy).filter(Boolean))];
-  if (staffIDs.length) {
-    const staffMap = Object.fromEntries(await Promise.all(staffIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))));
-    rows.forEach((b) => {
-      const pb = b.cancellationRequest?.processedBy;
-      if (pb) b.cancellationRequest = { ...b.cancellationRequest, processedByName: staffMap[pb]?.customerName || null };
-    });
-  }
-  if (filter && filter !== "all") rows = rows.filter((b) => (b.status || "").toLowerCase() === filter);
-
-  rows.sort((a, b) => {
-    const ta = a.updatedAt?.toMillis?.() ?? 0;
-    const tb = b.updatedAt?.toMillis?.() ?? 0;
-    return tb - ta;
-  });
-
-  // Current driver comes from driverAssignments now (see attachCurrentDrivers).
-  await attachCurrentDrivers(rows);
-
-  // Bookings that have a refund request in flight → shown as "For Refund".
-  const openRefundSnap = await db.collection("refundRequests").where("status", "in", ["Pending", "Approved"]).get();
-  const bookingsWithOpenRefund = new Set(openRefundSnap.docs.map((d) => d.data().bookingID));
-
-  const carIDs         = [...new Set(rows.map((b) => b.carID).filter(Boolean))];
-  const bookingIDs     = [...new Set(rows.map((b) => b.bookingID || b.id).filter(Boolean))];
-  const userIDs        = [...new Set(rows.map((b) => b.userID).filter(Boolean))];
-  const serviceTypeIDs = [...new Set(rows.map((b) => b.serviceTypeID).filter(Boolean))];
-  // The current driver is the booking's "assigned" row in driverAssignments
-  // (attachCurrentDrivers above puts it on each row as a read-only view). It is
-  // resolved the same way as the customer (userDetails + user collections) so
-  // Bookings.jsx can show who's actually driving, or that no one's assigned yet,
-  // without a separate Driver Dispatch lookup.
-  const driverIDs      = [...new Set(rows.map((b) => b.driverID).filter(Boolean))];
-
-  const [vehicleEntries, paymentEntries, userEntries, driverEntries, serviceTypeEntries, historyEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
-    Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
-    Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
-    Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
-    Promise.all(driverIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
-    Promise.all(serviceTypeIDs.map((id) => resolveServiceType(id).then((s) => [id, s]))),
-    Promise.all(bookingIDs.map((id) => resolveHistoryInfo(id).then((h) => [id, h]))),
-    Promise.all(bookingIDs.map((id) => getPhaseChecklist(id, "before").then((v) => [id, v]))),
-    Promise.all(bookingIDs.map((id) => getPhaseChecklist(id, "after").then((v) => [id, v]))),
+  const [driverSnap, bookingSnaps] = await Promise.all([
+    db.collection("user").where("roleID", "==", driverRoleID).get(),
+    Promise.all(
+      DISPATCHABLE_STATUSES.map((s) => db.collection("bookings").where("status", "==", s).get())
+    ),
   ]);
 
-  const vehicleMap     = Object.fromEntries(vehicleEntries);
-  const paymentMap     = Object.fromEntries(paymentEntries);
-  const userMap        = Object.fromEntries(userEntries);
-  const driverMap      = Object.fromEntries(driverEntries);
-  const serviceTypeMap = Object.fromEntries(serviceTypeEntries);
-  const historyMap     = Object.fromEntries(historyEntries);
-  const beforeDocsMap  = Object.fromEntries(beforeDocsEntries);
-  const afterDocsMap   = Object.fromEntries(afterDocsEntries);
-  // Which T&C version each booking agreed to — one read per DISTINCT termsVersionID.
-  const termsIDs = [...new Set(rows.map((b) => b.termsVersionID).filter(Boolean))];
-  const termsMap = Object.fromEntries(
-    await Promise.all(termsIDs.map((id) => resolveTermsVersionNumber(id).then((v) => [id, v])))
+  // Only chauffeur bookings matter here — self-drive never needs a driver.
+  let bookings = [];
+  bookingSnaps.forEach((snap) =>
+    snap.forEach((doc) => {
+      const data = doc.data();
+      if (data.modeOfDriving === "With Chauffeur") bookings.push({ id: doc.id, ...data });
+    })
   );
 
-  return rows.map((b) => {
-    const bID     = b.bookingID || b.id;
-    const payInfo = paymentMap[bID] || EMPTY_PAYMENT_INFO;
-    const histInfo = historyMap[bID] || { hasHistory: false, bookingSessionID: null, lastArchivedAt: null, startedAt: null, droppedOffTime: null };
-    // A cancelled booking always shows "Cancelled" payment status, matching
-    // getAllPayments()'s override — the underlying payment doc's own status
-    // (e.g. still "Pending") isn't what matters once the trip itself is off.
-    // …EXCEPT a payment that was actually refunded: that stays "Refunded" (it used
-    // to be hidden behind "Cancelled", losing the fact that the money went back).
-    const isCancelled = (b.status || "").toLowerCase() === "cancelled";
-    const paymentStatus = isCancelled && payInfo.paymentStatus !== "Refunded" ? "Cancelled" : payInfo.paymentStatus;
-    let paymentStage = payInfo.paymentStage;
-    if (paymentStage !== "Refunded") {
-      if (bookingsWithOpenRefund.has(bID)) paymentStage = "For Refund";
-      else if (isCancelled) paymentStage = "Cancelled";
-    }
+  // The current driver now lives in driverAssignments, not on the booking.
+  await attachCurrentDrivers(bookings);
+
+  const carIDs  = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
+  const userIDs = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
+
+  const [vehicleEntries, userEntries] = await Promise.all([
+    Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
+    Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
+  ]);
+  const vehicleMap = Object.fromEntries(vehicleEntries);
+  const userMap    = Object.fromEntries(userEntries);
+
+  const shapedBookings = bookings
+    .map((b) => ({
+      id:            b.id,
+      bookingID:     b.bookingID || b.id,
+      status:        b.status,
+      startDateTime: toJSDate(b.startDateTime),
+      endDateTime:   toJSDate(b.endDateTime),
+      location:      b.location || "—",
+      vehicleName:   vehicleMap[b.carID] || "—",
+      customerName:  userMap[b.userID]?.name || "—",
+      customerPhone: userMap[b.userID]?.phone || "—",
+      driverID:      b.driverID || null,
+    }))
+    .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
+
+  // Per the decided scope: "unassigned" = upcoming only. An "ongoing"
+  // chauffeur booking with no driver is a data problem, not a queue item —
+  // surface it separately so it isn't silently missed.
+  const unassigned = shapedBookings.filter((b) => !b.driverID && b.status === "upcoming");
+  const missingWhileOngoing = shapedBookings.filter((b) => !b.driverID && b.status === "ongoing");
+
+  const driverIDs = driverSnap.docs.map((d) => d.id);
+  const [licenseMap, driverNames] = await Promise.all([
+    resolveLicenseExpiries(driverIDs),
+    resolveDisplayNames(driverIDs),
+  ]);
+
+  const drivers = driverSnap.docs.map((d) => {
+    const data = d.data();
+    const licenseExpiry = licenseMap.get(d.id) || null;
+    const lic = licenseStatusOf(licenseExpiry);
+    const assignments = shapedBookings
+      .filter((b) => b.driverID === d.id)
+      .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
     return {
-      ...b,
-      vehicleName:      vehicleMap[b.carID] || "—",
-      paymentMethod:    payInfo.paymentMethod,
-      totalFee:         payInfo.totalFee,        // from payments.amount
-      rentalFee:        payInfo.rentalFee,
-      serviceFee:       payInfo.serviceFee,
-      extraFee:         payInfo.extraFee,
-      driversFee:       payInfo.driversFee,
-      gatewayFee:       payInfo.gatewayFee,
-      deposit:          payInfo.deposit,
-      securityDeposit:  payInfo.securityDeposit,
-      amountPaid:       payInfo.amountPaid,
-      balance:          payInfo.balance,
-      payType:          payInfo.payType,
-      discountAmount:   payInfo.discountAmount,
-      paymentStatus,
-      paymentStage,
-      refundDue:        payInfo.refundDue,
-      refundIssued:     payInfo.refundIssued,
-      depositAmount:         payInfo.depositAmount,
-      depositStatus:         payInfo.depositStatus,
-      confirmedPenaltyTotal: payInfo.confirmedPenaltyTotal,
-      amountToReturn:        payInfo.amountToReturn,
-      depositSettled:        payInfo.depositSettled,
-      depositDeducted:       payInfo.depositDeducted,
-      customerName:     userMap[b.userID]?.customerName || "—",
-      phone:            userMap[b.userID]?.phone || "—",
-      // No driverID at all (e.g. self-drive, or a chauffeur booking not yet
-      // assigned) → driverName stays null so the UI can say "No driver
-      // assigned" instead of a misleading "—".
-      driverID:         b.driverID || null,
-      driverName:       b.driverID ? (driverMap[b.driverID]?.customerName || "—") : null,
-      driverPhone:      b.driverID ? (driverMap[b.driverID]?.phone || "—") : null,
-      serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
-      // T&C the customer agreed to. termsVersionID + termsAcceptedAt are already on `b`.
-      // termsViewID is what /terms?version=<id> opens: the termsVersions doc ID.
-      // termsVersionNumber is the readable 1.00 / 1.01.
-      termsViewID:        b.termsVersionID || null,
-      termsVersionNumber: b.termsVersionID ? (termsMap[b.termsVersionID] ?? null) : null,
-      hasHistory:       histInfo.hasHistory,
-      bookingSessionID: histInfo.bookingSessionID,
-      lastArchivedAt:   histInfo.lastArchivedAt,
-      startedAt:            histInfo.startedAt,
-      droppedOffTime:       histInfo.droppedOffTime,
-      // Every stop for this booking's trip — pickup, dropoff, and any
-      // extra stops selected at booking time — so the detail view can
-      // plot them on a map instead of just printing the address string.
-      pickupLocation:   histInfo.pickupLocation,
-      dropoffLocation:  histInfo.dropoffLocation,
-      geofenceZones:    histInfo.geofenceZones,
-      codingWarnings:   histInfo.codingWarnings || [],
-      // "Complete" now means photos AND the parts-condition record — see
-      // getPhaseChecklist in vehicleDocumentation.service.js. The
-      // per-half breakdown is included for UIs that want to say which half
-      // is still missing.
-      beforeDocsComplete: beforeDocsMap[bID]?.complete ?? false,
-      afterDocsComplete:  afterDocsMap[bID]?.complete ?? false,
-      beforeInspection:   beforeDocsMap[bID] ?? { photos: false, parts: false, complete: false },
-      afterInspection:    afterDocsMap[bID] ?? { photos: false, parts: false, complete: false },
+      driverID:  d.id,
+      name:      driverNames.get(d.id) || [data.firstName, data.lastName].filter(Boolean).join(" ").trim() || data.username || data.email || "—",
+      phone:     data.phone || "—",
+      profileImage: data.profileImage || null, // avatar URL (Firebase Storage); the UI falls back to an icon
+      status:    data.status || "Active", // matches Users.jsx directory convention
+      license: {
+        status:   lic.status, // "expired" | "expiring" | "ok" | "none"
+        daysLeft: lic.daysLeft,
+        expiry:   licenseExpiry ? licenseExpiry.toISOString() : null,
+      },
+      assignments,
     };
+  });
+
+  return { drivers, unassigned, missingWhileOngoing };
+};
+
+// ─────────────────────────────────────────────
+// Overlap check: does `driverID` already have a live (upcoming/ongoing)
+// booking whose window overlaps [startDateTime, endDateTime]?
+// Excludes the booking being assigned itself (for reassignment).
+// ─────────────────────────────────────────────
+// A driver's bookings (as { id, ...data }) in the given statuses, from driverAssignments.
+// The current assignment always wins, so a booking reassigned to someone else drops out.
+//   * live statuses (upcoming/ongoing) only need the driver's "assigned" rows;
+//   * history statuses also need the "completed" ones.
+// Only driverAssignments is read: no booking.driverID query (and so no composite index for it).
+const getDriverBookings = async (driverID, statuses) => {
+  const liveOnly = statuses.every((s) => DISPATCHABLE_STATUSES.includes(s));
+  const assignments = await getAssignmentsForDriver(
+    driverID,
+    liveOnly ? [ASSIGNMENT_STATUS.ASSIGNED] : [ASSIGNMENT_STATUS.ASSIGNED, ASSIGNMENT_STATUS.COMPLETED],
+  );
+
+  const byId = new Map();
+  (await getBookingsByKeys(assignments.map((a) => a.bookingID))).forEach((b) => {
+    if (statuses.includes(b.status)) byId.set(b.id, b);
+  });
+
+  const rows = [...byId.values()];
+  await attachCurrentDrivers(rows);
+
+  // attachCurrentDrivers only knows "assigned" rows. Once a trip is over, its row flips to "completed", so the
+  // booking would come back with no driver and be filtered out below -- which emptied the driver's History tab.
+  // A finished trip still belongs to the driver whose own (completed) row it is, so keep that link.
+  const rowByKey = new Map(assignments.map((a) => [a.bookingID, a]));
+  rows.forEach((b) => {
+    if (b.driverID) return;
+    const a = rowByKey.get(bookingKeyOf(b.id, b));
+    if (a && a.status === ASSIGNMENT_STATUS.COMPLETED && a.driverID === driverID) {
+      b.driverID         = a.driverID;
+      b.driverAssignedAt = a.assignedAt || null;
+      b.driverAssignedBy = a.assignedBy || null;
+    }
+  });
+
+  return rows.filter((b) => b.driverID === driverID);
+};
+
+// One driver's schedule against one booking: free, "tight" (gap shorter than the buffer) or "overlap".
+// The rules live in driverConflict.service.js; this only picks the window to test. A late ongoing trip
+// is busy until now, so a booking that is itself running late is tested with that later end.
+// Pass a Firestore transaction `t` to make the reads part of it.
+const findDriverConflicts = async (driverID, booking, bookingDocID, bufferMinutes, t = null) => {
+  const start = toJSDate(booking.startDateTime);
+  if (!start) return { worst: null, all: [] };
+  const end = effectiveEnd(booking) || start;
+  const others = await getDriverLiveBookings(driverID, t);
+  return evaluateDriverSchedule(others, {
+    start, end, bufferMs: bufferMinutes * 60 * 1000, excludeDocID: bookingDocID,
   });
 };
 
+const conflictSummary = (c, bufferMinutes) => c && ({
+  id: c.id, bookingID: c.bookingID, type: c.type,
+  startDateTime: c.startDateTime, endDateTime: c.endDateTime, gapMinutes: c.gapMinutes,
+  message: describeConflict(c, bufferMinutes),
+});
+
 // ─────────────────────────────────────────────
-// Deposit/penalty position for a booking, read-only. Shared by the Return
-// gate, settleDeposit and the Return checklist so both always agree.
-//   unpaidTotal            confirmed penalties not yet paid
-//   depositAvailable       the held deposit, only while it is unsettled
-//   creditAvailable        discount credit held for the customer (a discount given on a fully paid booking)
-//   outstandingAfterDeposit what the customer would still owe after the
-//                          deposit AND the held credit are applied (0 = fully covered)
-//   amountToReturn         signed: deposit + held credit minus penalties (negative = owed)
+// ASSIGN a driver to a chauffeur booking.
+//
+// What the caller can run into (all reported together, so one "Assign Anyway" is an informed decision):
+//   * expired license            warning  -> force=true overrides
+//   * "tight" gap (shorter than  warning  -> force=true overrides
+//     the buffer, incl. trips
+//     that only touch)
+//   * real overlap               needs force=true AND an overrideReason (min OVERRIDE_REASON_MIN_LENGTH
+//                                chars), which is written to the audit log
+// Every one of these throws with conflict: true (HTTP 409 in the controller). The check and the write are
+// ONE transaction (createAssignment's guard). There is no per-driver lock, so two admins assigning the same
+// driver to overlapping trips at the exact same moment could both pass (accepted risk).
 // ─────────────────────────────────────────────
-const getDepositPosition = async (bID) => {
-  const [paymentSnap, penalties] = await Promise.all([
-    db.collection("payments").where("bookingID", "==", bID).limit(1).get(),
-    listPenaltiesForBooking(bID),
-  ]);
-  const paymentData = paymentSnap.empty
-    ? null
-    : await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
-  const confirmed = penalties.filter((p) => p.status === "Confirmed");
-  const unpaidTotal = confirmed.reduce((sum, p) => sum + Math.max(0, (p.amount || 0) - (p.paidAmount || 0)), 0);
-  const confirmedTotal = confirmed.reduce((sum, p) => sum + (p.amount || 0), 0);   // all Confirmed penalties, paid or not
-  const deposit = getDepositView(paymentData, { unpaid: unpaidTotal });
-  const alreadySettled = !!deposit?.settlement;
-  const held = deposit?.status === "Held" && !alreadySettled;
-  const applied = held ? (deposit.applied || 0) : 0;   // already used for penalties when they were confirmed
-  const depositAvailable = held ? Math.max(0, (deposit.amount || 0) - applied) : 0;
-  // Discount credit held for the customer: pays what the deposit can't cover, and the rest goes back with the deposit.
-  const figures = getDiscountFigures(paymentData);
-  const creditAvailable = held ? figures.credit : 0;
-  const creditUsed = Math.min(creditAvailable, Math.max(0, unpaidTotal - depositAvailable));
-  return {
-    penalties, deposit, unpaidTotal, confirmedTotal, alreadySettled, applied,
-    depositStatus: deposit?.status || "—",
-    depositAvailable,
-    creditAvailable,                                   // discount credit still held
-    creditUsed,                                        // the part of it settling would use on penalties
-    creditReturn: creditAvailable - creditUsed,        // the part of it that would go back
-    discountReturned: figures.returned,                // credit already returned (after settlement)
-    outstandingAfterDeposit: Math.max(0, unpaidTotal - depositAvailable - creditAvailable),
-    amountToReturn: depositAvailable + creditAvailable - unpaidTotal,
+export const assignDriver = async (bookingDocID, driverID, assignedBy, force = false, editedBy = null, overrideReason = "") => {
+  if (!bookingDocID) throw new Error("bookingDocID is required.");
+  if (!driverID) throw new Error("driverID is required.");
+
+  const bookingRef = db.collection("bookings").doc(bookingDocID);
+  const bookingDoc = await bookingRef.get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+
+  if (booking.modeOfDriving !== "With Chauffeur") {
+    throw new Error("This booking is Self Drive and does not need a driver.");
+  }
+  if (!DISPATCHABLE_STATUSES.includes(booking.status)) {
+    throw new Error(`Cannot assign a driver to a booking with status "${booking.status}".`);
+  }
+
+  const driverDoc = await db.collection("user").doc(driverID).get();
+  if (!driverDoc.exists) throw new Error("Driver not found.");
+  const driverRoleID = await resolveRoleID(ROLES.DRIVER);
+  if (driverDoc.data().roleID !== driverRoleID) throw new Error("Selected user is not a Driver.");
+
+  const reason = String(overrideReason || "").trim();
+  const licenseExpiry  = (await resolveLicenseExpiries([driverID])).get(driverID) || null;
+  const licenseExpired = licenseStatusOf(licenseExpiry).status === "expired";
+  const bufferMinutes  = await getDriverBufferMinutes();
+
+  const refuse = (message, { worst, overlap }) => {
+    const err = new Error(message);
+    err.conflict = true; // the frontend turns this into a warning + "Assign Anyway"
+    err.conflictBooking = worst ? { id: worst.id, bookingID: worst.bookingID, startDateTime: worst.startDateTime, endDateTime: worst.endDateTime } : null;
+    err.conflictType = worst?.type || null; // "overlap" | "tight" | null
+    err.requiresReason = !!overlap;         // true: resend with force + overrideReason
+    err.licenseExpired = licenseExpired;
+    err.bufferMinutes = bufferMinutes;
+    return err;
   };
+
+  // Set by the guard on every run (Firestore may retry the transaction), used afterwards for the audit log.
+  let found = { worst: null, all: [] };
+
+  // Runs INSIDE the assignment transaction, so the check and the write are one step.
+  const guard = async (t) => {
+    found = await findDriverConflicts(driverID, booking, bookingDocID, bufferMinutes, t);
+
+    const { worst, all } = found;
+    const overlap = all.find((c) => c.type === "overlap") || null;
+    if (!licenseExpired && !all.length) return;
+
+    const parts = [];
+    if (licenseExpired) parts.push(`This driver's license expired on ${fmtDay(licenseExpiry)}.`);
+    if (worst) {
+      parts.push(describeConflict(worst, bufferMinutes));
+      if (all.length > 1) parts.push(`(${all.length - 1} more trip${all.length - 1 === 1 ? "" : "s"} also clash.)`);
+    }
+
+    if (!force) throw refuse(parts.join(" "), { worst, overlap });
+    if (overlap && reason.length < OVERRIDE_REASON_MIN_LENGTH) {
+      parts.push(`Assigning over a real overlap needs a reason (at least ${OVERRIDE_REASON_MIN_LENGTH} characters).`);
+      throw refuse(parts.join(" "), { worst, overlap });
+    }
+  };
+
+  // The booking's ONE assignment row is updated in place (a different driver replaces the previous one).
+  // The three old fields on the booking are dropped in the SAME transaction, so the
+  // table is the only source of truth and the two writes cannot half-succeed.
+  await createAssignment({
+    bookingKey: bookingKeyOf(bookingDocID, booking), driverID, assignedBy,
+    bookingRef, bookingPatch: legacyDriverFieldsPatch(),
+    guard,
+  });
+
+  // Personal notification to the driver themselves.
+  createNotification({
+    type: "driver_assigned",
+    refID: bookingDocID,
+    refCollection: "bookings",
+    title: "New trip assigned",
+    message: `You've been assigned to booking ${booking.bookingID || bookingDocID}.`,
+    userID: driverID,
+  }).catch((err) => console.error("[NOTIF] driver_assigned create failed:", err.message));
+
+  const driverInfo = await resolveUserInfo(driverID);
+  const driverName = driverInfo.name !== "—" ? driverInfo.name : driverID;
+  const overlapped = found.all.some((c) => c.type === "overlap");
+  const tightOnly  = !overlapped && found.all.length > 0;
+  const overrides = [
+    licenseExpired && "expired license",
+    overlapped && `overlapping trip - reason: ${reason}`,
+    tightOnly && "tight gap between trips",
+  ].filter(Boolean);
+  createAuditLog({
+    action: "update",
+    bookingID: booking.bookingID || bookingDocID, // links the entry (and an override reason) to the booking
+    description: `Driver ${driverName} assigned to booking ${booking.bookingID || bookingDocID}` +
+      `${force && overrides.length ? ` (override — ${overrides.join(", ")})` : ""}.`,
+    userID: editedBy,
+  }).catch((err) => console.error("[AUDIT] driver assign log failed:", err.message));
+
+  return { id: bookingDocID, driverID };
 };
 
-// The deposit actions are opened from more than one screen: Car Tracking knows the booking's document id, the Payments
-// page only knows the booking's bookingID field. Accept either, so the same endpoints serve both.
-const resolveBookingDocID = async (idOrBookingID) => {
-  const direct = await db.collection("bookings").doc(idOrBookingID).get();
-  if (direct.exists) return idOrBookingID;
-  const q = await db.collection("bookings").where("bookingID", "==", idOrBookingID).limit(1).get();
-  return q.empty ? idOrBookingID : q.docs[0].id;
+// ─────────────────────────────────────────────
+// AVAILABILITY for one booking: every Driver as "free" | "tight" | "busy" for THAT booking's window, so the
+// picker can show it before an admin clicks. "busy" = a real overlap, "tight" = a gap shorter than the buffer.
+// Read-only; assignDriver still re-checks inside its transaction.
+// ─────────────────────────────────────────────
+export const getDriverAvailabilityForBooking = async (bookingDocID) => {
+  if (!bookingDocID) throw new Error("bookingID is required.");
+
+  const bookingDoc = await db.collection("bookings").doc(bookingDocID).get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+
+  const driverRoleID = await resolveRoleID(ROLES.DRIVER);
+  if (!driverRoleID) throw new Error("Could not resolve the Driver role ID.");
+
+  const [driverSnap, bufferMinutes] = await Promise.all([
+    db.collection("user").where("roleID", "==", driverRoleID).get(),
+    getDriverBufferMinutes(),
+  ]);
+  const licenseMap = await resolveLicenseExpiries(driverSnap.docs.map((d) => d.id));
+
+  const drivers = await Promise.all(driverSnap.docs.map(async (d) => {
+    const { worst, all } = await findDriverConflicts(d.id, booking, bookingDocID, bufferMinutes);
+    const status = all.some((c) => c.type === "overlap") ? "busy" : all.length ? "tight" : "free";
+    return {
+      driverID: d.id,
+      status,
+      conflict: conflictSummary(worst, bufferMinutes),
+      conflictCount: all.length,
+      licenseExpired: licenseStatusOf(licenseMap.get(d.id) || null).status === "expired",
+    };
+  }));
+
+  return { bookingID: booking.bookingID || bookingDocID, bufferMinutes, drivers };
+};
+
+// ─────────────────────────────────────────────
+// UNASSIGN — clears the driver, returning the booking to the queue
+// (if it's still "upcoming") or just freeing the driver (if "ongoing").
+// ─────────────────────────────────────────────
+export const unassignDriver = async (bookingDocID, editedBy = null) => {
+  if (!bookingDocID) throw new Error("bookingDocID is required.");
+
+  const bookingRef = db.collection("bookings").doc(bookingDocID);
+  const bookingDoc = await bookingRef.get();
+  if (!bookingDoc.exists) throw new Error("Booking not found.");
+  const booking = bookingDoc.data();
+
+  if (!DISPATCHABLE_STATUSES.includes(booking.status)) {
+    throw new Error(`Cannot unassign a driver from a booking with status "${booking.status}".`);
+  }
+
+  // Closing the row and dropping the legacy booking fields commit together.
+  const ended = await endActiveAssignment(bookingKeyOf(bookingDocID, booking), {
+    status: ASSIGNMENT_STATUS.UNASSIGNED,
+    bookingRef,
+    bookingPatch: legacyDriverFieldsPatch(),
+  });
+  const previousDriverID = ended?.driverID || null;
+
+  // Same gap assignDriver's own notification fixed, just missed on this
+  // side: without this, a driver only finds out they were unassigned
+  // because the trip silently disappears from their list.
+  if (previousDriverID) {
+    createNotification({
+      type: "driver_unassigned",
+      refID: bookingDocID,
+      refCollection: "bookings",
+      title: "Trip unassigned",
+      message: `You've been removed from booking ${booking.bookingID || bookingDocID}.`,
+      userID: previousDriverID,
+    }).catch((err) => console.error("[NOTIF] driver_unassigned create failed:", err.message));
+  }
+
+  let driverName = previousDriverID || "a driver";
+  if (previousDriverID) {
+    const info = await resolveUserInfo(previousDriverID); // userDetails first, falls back to username/email
+    if (info.name !== "—") driverName = info.name;
+  }
+  createAuditLog({
+    action: "update",
+    bookingID: booking.bookingID || bookingDocID,
+    description: `Driver ${driverName} unassigned from booking ${booking.bookingID || bookingDocID}.`,
+    userID: editedBy,
+  }).catch((err) => console.error("[AUDIT] driver unassign log failed:", err.message));
+
+  return { id: bookingDocID };
+};
+
+// ─────────────────────────────────────────────
+// DRIVER SELF-SERVICE — scoped to the logged-in driver's own uid.
+// Deliberately separate from getDispatchBoard/assignDriver/unassignDriver
+// above (which are Owner/Admin/Supervisor tools over every driver and
+// every car) — a Driver hitting these should only ever see or touch their
+// own assignments, enforced here via assertOwnsBooking, not just hidden
+// in the UI.
+// ─────────────────────────────────────────────
+
+const assertOwnsBooking = async (bookingDocID, driverID) => {
+  const doc = await db.collection("bookings").doc(bookingDocID).get();
+  if (!doc.exists) throw new Error("Booking not found.");
+  const currentDriverID = await resolveCurrentDriverID(doc.data(), doc.id);
+  if (currentDriverID !== driverID) {
+    const err = new Error("This booking is not assigned to you.");
+    err.status = 403;
+    throw err;
+  }
+  return doc.data();
+};
+
+// Read-only variant: also lets a driver open a trip he already FINISHED (his assignment row is "completed", so he is no
+// longer the booking's current driver). Used only by the read-only views (inspection, terms) the History tab needs;
+// every action (pickup, dropoff, remind...) still uses assertOwnsBooking above.
+const assertOwnsOrFinishedBooking = async (bookingDocID, driverID) => {
+  const doc = await db.collection("bookings").doc(bookingDocID).get();
+  if (!doc.exists) throw new Error("Booking not found.");
+  const currentDriverID = await resolveCurrentDriverID(doc.data(), doc.id);
+  if (currentDriverID !== driverID) {
+    const finished = await getCompletedAssignment(bookingKeyOf(doc.id, doc.data()), driverID);
+    if (!finished) {
+      const err = new Error("This booking is not assigned to you.");
+      err.status = 403;
+      throw err;
+    }
+  }
+  return doc.data();
+};
+
+// ─────────────────────────────────────────────
+// Read-only inspection proof for the driver's own booking.
+//
+// Drivers still can't read or write /api/vehicle-docs (staff only) — this is
+// a separate, ownership-checked, read-only view of the same records. Only
+// what a driver needs to see is returned: exterior photo URLs, videos and
+// additional photos (with their captions). NOT the parts condition (which parts
+// are Good / damaged) and NOT the per-part photos (a close-up can show a serial
+// number) -- those are for staff. No audit/edit info, no staff fields, no
+// document ids.
+// ─────────────────────────────────────────────
+const EXTERIOR_FIELDS = [
+  ["frontViewUrl", "Front view"],
+  ["sideViewUrl",  "Side view"],
+  ["backViewUrl",  "Back view"],
+];
+const humanizeFieldKey = (k) =>
+  k.replace(/Url$/, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
+const isHttpUrl = (v) => typeof v === "string" && /^https?:\/\//i.test(v);
+
+const shapeInspectionForDriver = (doc) => {
+  const exterior = EXTERIOR_FIELDS
+    .filter(([k]) => isHttpUrl(doc?.[k]))
+    .map(([k, label]) => ({ key: k, label, url: doc[k] }));
+  const videos = (Array.isArray(doc?.videos) ? doc.videos : [])
+    .filter((v) => isHttpUrl(v?.url))
+    .map((v) => ({ url: v.url }));
+  const extraPhotos = (Array.isArray(doc?.extraPhotos) ? doc.extraPhotos : [])
+    .filter((p) => isHttpUrl(p?.url))
+    .map((p) => ({ url: p.url, ...(p.caption ? { caption: p.caption } : {}) }));
+  return { exterior, videos, extraPhotos };
+};
+
+/** Before + after inspection proof for one of THIS driver's bookings (read-only). */
+export const getMyTripInspection = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsOrFinishedBooking(bookingDocID, driverID);
+  // Records may have been saved under the business bookingID or the doc id.
+  const keys = [...new Set([booking.bookingID, bookingDocID].filter(Boolean))];
+  const docResults = await Promise.all(keys.map((k) => getVehicleDocsByBooking(k)));
+  const firstOf = (list, phase) => list.map((r) => r?.[phase]).find(Boolean) || null;
+  return {
+    before: shapeInspectionForDriver(firstOf(docResults, "before")),
+    after:  shapeInspectionForDriver(firstOf(docResults, "after")),
+  };
 };
 
 /**
- * Settle the security deposit once the booking is completed: deducts every confirmed unpaid
- * penalty from the held deposit (oldest first) and records the handback of
- * whatever is left, in one transaction (see settleBooking). Callable by the
- * driver (own trip) or a supervisor once the vehicle is dropped off — the
- * point is that whoever is physically with the customer can close out the
- * deposit without waiting for the after-trip inspection. A penalty raised
- * after this stays a normal unpaid penalty.
+ * The Terms & Conditions the customer agreed to for THIS booking (read-only, ownership-checked).
+ * Returns the exact version the booking points to, not the current Terms, so a later edit of the
+ * Terms never changes what the driver sees.
+ * available:false when the booking has no recorded agreement.
  */
-export const settleDeposit = async (docID, { method, referenceNumber = "", online = false, completeBooking = false } = {}, performedBy = null) => {
-  docID = await resolveBookingDocID(docID);
-  const bookingDoc = await db.collection("bookings").doc(docID).get();
-  if (!bookingDoc.exists) throw new Error("Booking not found.");
-  let booking = bookingDoc.data();
-  const bID = booking.bookingID || docID;
-
-  // A booking flagged stolen is never completed (updateBooking refuses to touch it), so its deposit can't be returned here.
-  if (String(booking.status || "").toLowerCase() === "stolen") {
-    throw new Error("This booking was flagged as stolen, so it can't be completed and its deposit can't be returned here.");
-  }
-
-  // Payments can return the deposit of a booking that is still ongoing, on one condition: the booking is COMPLETED first,
-  // in the same step. The Car Tracking completion gates (vehicle dropped off, after-trip inspection, GPS unassigned) are
-  // skipped here -- they are only warnings on this screen. Everything the settlement itself needs (held deposit, no penalty
-  // waiting for review, a valid way to return the money) is still checked BEFORE completing, so a refusal there never
-  // leaves the booking completed with the deposit still held.
-  if (completeBooking === true && String(booking.status || "").toLowerCase() === "ongoing") {
-    const pre = await getDepositPosition(bID);
-    if (!pre.deposit || pre.deposit.status !== "Held") {
-      throw new Error(`There is no held security deposit to settle (deposit status: ${pre.depositStatus}).`);
-    }
-    if (pre.alreadySettled) throw new Error("This booking's deposit has already been settled.");
-    const waiting = (pre.penalties || []).filter((p) => p.status === "UnderReview").length;
-    if (waiting > 0) {
-      throw new Error(`${waiting} penalt${waiting === 1 ? "y is" : "ies are"} still waiting for a supervisor's review. Confirm or discard ${waiting === 1 ? "it" : "them"} on the Penalties page first.`);
-    }
-    const preOnline = online === true || online === "true";
-    if (preOnline) {
-      if (!(pre.amountToReturn > 0)) throw new Error("There is nothing to return to the customer, so there is nothing to refund online.");
-      const payDoc = await db.collection("payments").where("bookingID", "==", bID).limit(1).get();
-      if (payDoc.empty) throw new Error("This booking has no payment record.");
-      const payment = await hydratePaymentData(payDoc.docs[0].data(), payDoc.docs[0].id);
-      const plan = planOnlineDepositReturn(payment, pre.amountToReturn);
-      if (!plan.ok) throw new Error(plan.reason);
-    } else if (pre.amountToReturn > 0 && !method) {
-      throw new Error("Choose how the deposit is being returned to the customer.");
-    }
-    await updateBooking(docID, { status: "completed" }, performedBy, { skipReturnGates: true });
-    booking = (await db.collection("bookings").doc(docID).get()).data();
-  }
-
-  // The deposit is returned only AFTER the booking is completed (Car Tracking step 3: drop-off, inspection and the GPS
-  // trail are all done by then, so the penalties are final). Completing no longer waits for the deposit -- see the note
-  // in updateBooking.
-  if (String(booking.status || "").toLowerCase() !== "completed") {
-    throw new Error(`Cannot settle the deposit yet: booking status is "${booking.status}". Complete the booking first, then return the deposit.`);
-  }
-  // No drop-off requirement any more: a completed booking is enough. Payments can complete an ongoing trip and return the
-  // deposit in one step; the screen warns about whatever Car Tracking hasn't finished.
-
-  const pos = await getDepositPosition(bID);
-  if (!pos.deposit || pos.deposit.status !== "Held") {
-    throw new Error(`There is no held security deposit to settle (deposit status: ${pos.depositStatus}).`);
-  }
-  if (pos.alreadySettled) throw new Error("This booking's deposit has already been settled.");
-  const goOnline = online === true || online === "true";
-  if (goOnline) {
-    if (!(pos.amountToReturn > 0)) throw new Error("There is nothing to return to the customer, so there is nothing to refund online.");
-  } else if (pos.amountToReturn > 0 && !method) {
-    throw new Error("Choose how the deposit is being returned to the customer.");
-  }
-
-  // Online: check up front that PayMongo can take this refund. Nothing is saved if it can't.
-  let onlinePlan = null;
-  let customerUserID = null;
-  if (goOnline) {
-    const payDoc = await db.collection("payments").where("bookingID", "==", bID).limit(1).get();
-    if (payDoc.empty) throw new Error("This booking has no payment record.");
-    const payment = await hydratePaymentData(payDoc.docs[0].data(), payDoc.docs[0].id);
-    onlinePlan = planOnlineDepositReturn(payment, pos.amountToReturn);
-    if (!onlinePlan.ok) throw new Error(onlinePlan.reason);
-    customerUserID = payment.userID || booking.userID || null;
-  }
-
-  // Settles the deposit and saves the payout rows in one transaction: the deposit's (deposit_return) and the discount
-  // credit's (discount_return), separate rows. Online, they are "pending" -- the claim that makes a second click or a
-  // retry fail here, before any money is sent.
-  const res = await settleBooking({
-    bookingID: bID, actorUid: performedBy,
-    returnMethod: goOnline ? null : (method || null), returnReferenceNumber: referenceNumber,
-    onlineReturn: goOnline,
-  });
-  if (res?.error) throw new Error(res.error);
-
-  // Only now is PayMongo called (never inside the transaction). sendOnlineReturns never throws: the deposit is already
-  // settled, so a refusal is reported back and that return waits for a retry or an in-store hand-back. The deposit and the
-  // discount credit are two separate PayMongo refunds, each with its own outcome.
-  let onlineResult = null;
-  if (goOnline && (res.returnEntryID || res.creditEntryID)) {
-    onlineResult = await sendOnlineReturns({
-      bookingID: bID, paymentID: res.paymentID,
-      deposit: res.returnEntryID ? { entryID: res.returnEntryID, amount: res.depositReturn } : null,
-      credit: res.creditEntryID ? { entryID: res.creditEntryID, amount: res.creditReturn } : null,
-      paymongoPaymentID: onlinePlan.paymongoPaymentID, performedBy, customerUserID: customerUserID || res.userID || null,
-    });
-  }
-
-  // In store the money is already in the customer's hands, so tell them (the online path tells them in sendOnlineReturns).
-  if (!goOnline && res.net > 0) {
-    notifyCustomerReturnedInStore(res.userID || booking.userID || null, bID, { deposit: res.depositReturn, credit: res.creditReturn });
-  }
-
-  createAuditLog({
-    action: "update", userID: performedBy, bookingID: bID,
-    description: res.net > 0
-      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} ${res.creditReturn > 0 ? `(₱${res.depositReturn} deposit + ₱${res.creditReturn} discount credit, as separate returns) ` : ""}${goOnline ? `being returned online through PayMongo (${onlineResult?.state === "failed" ? "PayMongo refused it — needs follow-up" : onlineResult?.state === "partial" ? "one of the two was refused — needs follow-up" : "waiting for PayMongo"})` : `returned via ${method}`}.`
-      : `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ${res.outstandingAfterDeposit > 0 ? `₱${res.outstandingAfterDeposit} still owed by the customer` : "nothing to return"}.`,
-  }).catch((err) => console.error("[AuditLog] Deposit settle log failed:", err.message));
-
-  return onlineResult ? { ...res, online: onlineResult } : res;
+export const getMyTripTerms = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsOrFinishedBooking(bookingDocID, driverID);
+  const id = booking.termsVersionID || null;
+  if (!id) return { available: false };
+  const terms = await getTermsVersion(id);
+  if (!terms) return { available: false };
+  const at = booking.termsAcceptedAt;
+  return {
+    available: true,
+    version: terms.version ?? null,
+    acceptedAt: at?.toDate ? at.toDate().toISOString() : (at ?? null),
+    content: terms.content || "",
+  };
 };
 
-// skipReturnGates: only the Payments "Return deposit" flow passes it. Completing from there no longer waits for the
-// drop-off / after-trip inspection / GPS unassign checks: staff are warned on screen and confirm anyway.
-export const updateBooking = async (docID, updates, performedBy = null, { skipReturnGates = false } = {}) => {
-  const doc = await db.collection("bookings").doc(docID).get();
-  if (!doc.exists) throw new Error("Booking not found");
+// ─────────────────────────────────────────────
+// "On my way" — the chauffeur is driving to the customer's pickup location.
+//
+// NOT Start Pickup: Start Pickup means the customer has already been received
+// (booking -> ongoing, trip tracking starts). This is the step before it. It
+// stamps booking.enRouteAt, which (1) tells the customer's app the driver is
+// coming (notification -> the temporary arrival page) and (2) opens the short
+// window in which the customer may see the car's position and plate number.
+// The window closes by itself at Start Pickup (the customer app only serves it
+// while the booking is still "upcoming"). Same readiness gate as pickup, since
+// the car leaves the lot here.
+// ─────────────────────────────────────────────
+const firstNameOf = async (userID) => {
+  try {
+    const d = await db.collection("userDetails").doc(userID).get();
+    return (d.exists && (d.data().firstName || "").trim()) || "";
+  } catch { return ""; }
+};
 
-  const bookingData = doc.data();
-  const { status: oldStatus, userID, carID, bookingID } = bookingData;
+export const driverOnMyWay = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
 
-  const nonEditable = ["completed", "cancelled", "stolen"]; // once flagged stolen, no further edits through this endpoint
-  if (nonEditable.includes(oldStatus?.toLowerCase())) {
-    throw new Error(`Cannot edit a booking with status: ${oldStatus}`);
+  if ((booking.status || "").toLowerCase() !== "upcoming") {
+    throw driverErr(400, "You can only head out for a trip that is still upcoming.");
   }
+  if (booking.modeOfDriving !== "With Chauffeur") {
+    throw driverErr(400, "This booking is not a chauffeur booking.");
+  }
+  if (booking.enRouteAt) return { id: bookingDocID, alreadyOnTheWay: true };
 
-  // "location" (free text) is deliberately not editable: the name always comes from a map pick (stopEdits below),
-  // so the text and the geofence pin can never drift apart.
-  const allowed = ["startDateTime", "endDateTime", "notesAdmin", "notesUser", "status"];
-  const filtered = {};
-  allowed.forEach((k) => {
-    if (updates[k] !== undefined && !(k === "status" && !updates[k])) { // "" status = "no change"
-      filtered[k] = k === "status" ? updates[k].toLowerCase() : updates[k];
+  // Same readiness gate as Start Pickup (payment settled + before-trip inspection complete).
+  const docKeys = [...new Set([booking.bookingID, bookingDocID].filter(Boolean))];
+  const [pay, checklist] = await Promise.all([resolvePaymentInfo(bID), getPhaseChecklist(docKeys, "before")]);
+  const paymentReady = ["approved", "paid"].includes((pay.paymentStatus || "").toLowerCase()) && (pay.balance ?? 0) <= 0;
+  if (!paymentReady) throw driverErr(400, "Payment still needs to be settled before you head out.");
+  if (!checklist.complete) throw driverErr(400, "The vehicle inspection must be complete before you head out.");
+
+  const firstName = await firstNameOf(driverID);
+  const ref = db.collection("bookings").doc(bookingDocID);
+  let alreadyOnTheWay = false;
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.data()?.enRouteAt) { alreadyOnTheWay = true; return; } // two quick taps land as one
+    tx.update(ref, {
+      enRouteAt:              admin.firestore.Timestamp.now(),
+      enRouteDriverID:        driverID,
+      enRouteDriverFirstName: firstName,
+    });
+  });
+  if (alreadyOnTheWay) return { id: bookingDocID, alreadyOnTheWay: true };
+
+  if (booking.userID) {
+    try {
+      await createNotification({
+        type: "driver_en_route",
+        refID: bID,
+        refCollection: "bookings",
+        userID: booking.userID,
+        title: "Your driver is on the way",
+        message: `${firstName || "Your driver"} is heading to your pickup location now. Tap to see the car, its plate number and where it is.`,
+      });
+    } catch (err) {
+      console.error("[DRIVER DISPATCH] driver_en_route notify failed:", err.message);
     }
+  }
+  return { id: bookingDocID };
+};
+
+// ─────────────────────────────────────────────
+// "Remind customer" — a driver blocked at Pickup by an unpaid balance can't
+// fix it (staff collect it), but the customer can: this rings their bell.
+// 10-minute cooldown enforced here on the server (balanceReminders/{bookingKey}).
+// ─────────────────────────────────────────────
+const pesoText = (n) => `₱${Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const startText = (d) => {
+  const dt = toJSDate(d);
+  return dt ? dt.toLocaleString("en-PH", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }) : "";
+};
+
+export const driverRemindBalance = async (bookingDocID, driverID) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+
+  if ((booking.status || "").toLowerCase() !== "upcoming") {
+    throw driverErr(400, "A balance reminder can only be sent while the trip is still upcoming.");
+  }
+  if (!booking.userID) throw driverErr(400, "This booking has no customer account to notify.");
+
+  const pay = await resolvePaymentInfo(bID);
+  const balance = Number(pay.balance) || 0;
+  if (balance <= 0) throw driverErr(400, "There is no balance remaining on this booking.");
+
+  // Reserve the cooldown slot first (transactionally), THEN notify; hand the slot back if notifying fails.
+  const ref   = db.collection(BALANCE_REMINDERS).doc(bID);
+  const nowTs = admin.firestore.Timestamp.now();
+  let previous = null;
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    previous = snap.exists ? snap.data() : null;
+    const left = previous ? balanceSecondsLeft(tsToMs(previous.lastRemindedAt), nowTs.toMillis()) : 0;
+    if (left > 0) throw driverErr(429, "The customer was already reminded recently.", { retryAfterSeconds: left });
+    tx.set(ref, { bookingKey: bID, bookingDocID, driverID, lastRemindedAt: nowTs, count: (previous?.count || 0) + 1 });
   });
 
-  // Only a booking that has NOT started can be cancelled here ("to pay" / "upcoming"). An ongoing trip is never cancelled:
-  // the car is out, the security deposit is held, and a cancellation would leave that deposit (and any held discount
-  // credit) with no way to be returned, because settlement only runs on a completed booking.
-  if (filtered.status === "cancelled" && !["to pay", "upcoming"].includes(String(oldStatus || "").toLowerCase())) {
-    throw new Error(
-      `Cannot cancel booking ${bookingID || docID}: it is "${oldStatus}". A trip that has already started can't be cancelled -- ` +
-      "reject the request instead, or drop the car off and complete the trip, then return the deposit."
-    );
-  }
-
-  // ── Changing the dates of a booking that already has a driver must not give that driver a real
-  // overlap. (A tight gap is allowed, same as everywhere else it is only a warning.) A booking
-  // that is being cancelled/completed in the same edit is skipped. ──
-  if ((filtered.startDateTime !== undefined || filtered.endDateTime !== undefined)
-      && !["cancelled", "completed", "stolen"].includes(filtered.status)) {
-    await assertAssignedDriverFreeForNewDates({
-      docID, bookingData, newStart: filtered.startDateTime, newEnd: filtered.endDateTime,
+  try {
+    const when = startText(booking.startDateTime);
+    await createNotification({
+      type: "balance_reminder",
+      refID: bID,
+      refCollection: "bookings",
+      userID: booking.userID,
+      title: "Balance remaining on your booking",
+      message: `You still have a balance of ${pesoText(balance)} on your booking${when ? ` starting ${when}` : ""}. Please pay it online from your booking page before pickup.`,
+      renotify: true, // a second reminder rings the bell again instead of being swallowed
     });
-  }
-
-  // ── Stolen only makes sense for a trip that is out on the road: the booking must be
-  // ongoing and the car not yet marked dropped off (a dropped-off car is back). The Car
-  // Tracking button already hides this; this stops a direct API call from skipping it. ──
-  if (filtered.status === "stolen" && oldStatus?.toLowerCase() !== "stolen") {
-    if (oldStatus?.toLowerCase() !== "ongoing") {
-      throw new Error(`Cannot flag as stolen: booking status is "${oldStatus}", not "ongoing".`);
-    }
-    const stolenSession = await getSessionByBookingID(bookingID || docID);
-    if (stolenSession?.data?.droppedOffTime) {
-      throw new Error("Cannot flag as stolen: the car was already marked dropped off.");
-    }
-  }
-
-  // ── Map-picked stops: a booking can have several locations (destination + extra
-  // stops), so the admin sends stopEdits = [{ zoneIndex, oldLabel, address, lat, lng }],
-  // one per stop they moved. The zones on the session move; if one of them is the
-  // booking's destination, bookings.location follows its new address. ──
-  let stopEdits = [];
-  if (updates.stopEdits !== undefined) {
-    if (!Array.isArray(updates.stopEdits)) throw new Error("stopEdits must be an array.");
-    stopEdits = updates.stopEdits.map((e) => {
-      const lat = Number(e?.lat), lng = Number(e?.lng);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
-        throw new Error("Invalid map coordinates for location.");
-      }
-      const address = String(e?.address || "").trim();
-      if (!address) throw new Error("A location address is required.");
-      const zoneIndex = Number.isInteger(e?.zoneIndex) && e.zoneIndex >= 0 ? e.zoneIndex : null;
-      return { zoneIndex, oldLabel: String(e?.oldLabel || ""), address, lat, lng };
-    });
-    const seen = new Set();
-    for (const e of stopEdits) {
-      if (e.zoneIndex === null) continue;
-      if (seen.has(e.zoneIndex)) throw new Error("The same stop was edited twice.");
-      seen.add(e.zoneIndex);
-    }
-    const normLabel = (x) => (x || "").trim().toLowerCase();
-    const destEdit = stopEdits.find((e) => normLabel(e.oldLabel) && normLabel(e.oldLabel) === normLabel(bookingData.location));
-    if (destEdit) filtered.location = destEdit.address;
-  }
-
-  // ── Payment validation: cannot mark picked-up/ongoing if payment is not yet approved/paid ──
-  if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
-    const bID = bookingID || docID;
-    const paySnap = await db.collection("payments")
-      .where("bookingID", "==", bID)
-      .limit(1)
-      .get();
-
-    if (paySnap.empty) {
-      throw new Error("Cannot approve booking: no payment record found for this booking.");
-    }
-
-    const paymentData = await hydratePaymentData(paySnap.docs[0].data(), paySnap.docs[0].id);
-    const payStatus   = paymentData.status || "";
-    const approvedStatuses = ["approved", "paid"];
-
-    if (!approvedStatuses.includes(payStatus.toLowerCase())) {
-      throw new Error(
-        `Cannot approve booking: payment is still "${payStatus}". ` +
-        `Please approve the payment first in the Payments page.`
-      );
-    }
-
-    // Balance must also be fully settled — this is a stricter rule than
-    // before. Previously an approved deposit with balance > 0 was enough
-    // to reach "ongoing"; now Pickup is blocked until the full balance is
-    // collected (discounts included — applying a discount lowers this
-    // balance the same way a payment does).
-    const { balance } = computeAmounts(paymentData);
-    if (balance > 0) {
-      throw new Error(
-        `Cannot approve booking: payment still requires action — ₱${balance.toLocaleString()} remaining. ` +
-        `Collect or apply a discount for the remaining balance first.`
-      );
-    }
-  }
-
-  // ── Vehicle inspection validation: cannot mark picked-up/ongoing until
-  // the before-trip inspection is complete — the 3 exterior photos AND the
-  // parts-condition record, both entered by staff (drivers can't write
-  // either, see vehicleDocumentation.routes.js). This is the real gate the
-  // driver's Start Pickup goes through; the My Trips button state is just a
-  // convenience mirror of it. ──
-  if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
-    const bID = bookingID || docID;
-    const checklist = await getPhaseChecklist(bID, "before");
-    if (!checklist.complete) {
-      throw new Error(
-        `Cannot mark picked up: the before-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
-        "A supervisor needs to complete it in Vehicle Inspections first."
-      );
-    }
-  }
-
-  // ── Vehicle inspection validation: cannot mark completed until
-  // the after-trip inspection is complete (photos AND parts condition).
-  // Mirrors the before-trip guard above so Return can't skip the
-  // inspection the same way Pickup can't. ──
-  if (!skipReturnGates && filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    const bID = bookingID || docID;
-    const checklist = await getPhaseChecklist(bID, "after");
-    if (!checklist.complete) {
-      throw new Error(
-        `Cannot mark complete: the after-trip vehicle inspection is incomplete — still missing ${describeMissingInspection(checklist)}. ` +
-        "A supervisor needs to complete it in Vehicle Inspections first."
-      );
-    }
-  }
-
-  // ── Vehicle drop-off validation: cannot mark completed until
-  // someone (the assigned driver, or a supervisor/staff for a no-driver
-  // booking) has marked the vehicle itself physically dropped off. This is
-  // the checkpoint that unblocks the after-trip inspection in the first
-  // place — a supervisor can't meaningfully inspect a car that, per the
-  // system, hasn't arrived yet. ──
-  if (!skipReturnGates && filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    const bID = bookingID || docID;
-    const session = await getSessionByBookingID(bID);
-    if (!session?.data?.droppedOffTime) {
-      throw new Error(
-        "Cannot mark complete: the vehicle hasn't been marked dropped off yet. " +
-        "Mark it dropped off first, then complete the after-trip inspection."
-      );
-    }
-  }
-
-  // ── GPS gate: cannot mark completed while a GPS device is still
-  // assigned to this car. Unassign it first on the GPS Setup page. ──
-  if (!skipReturnGates && filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    const stillAssigned = await getDevicesStillAssigned(bookingData.carID);
-    if (stillAssigned.length > 0) {
-      throw new Error(
-        `Cannot mark complete: GPS device ${describeAssignedDevices(stillAssigned)} is still assigned to this car. ` +
-        "Unassign it on the GPS Setup page first."
-      );
-    }
-  }
-
-  // No deposit gate here: a booking can be completed while its security deposit is still held. The deposit is
-  // returned afterwards from Payments, which can also complete an ongoing booking and return the deposit in one step
-  // (settleDeposit with completeBooking: it comes back through this same function, so the gates above still apply).
-
-  // Stamp the actual return moment, once, at the exact instant Return is
-  // clicked (ongoing -> completed). This is deliberately a server
-  // timestamp on THIS transition only — never editable afterward (this
-  // endpoint already blocks further edits to a "completed" booking via
-  // the nonEditable guard above) and never derived from GPS. Note this is
-  // NOT the same moment as droppedOffTime above — the vehicle can sit
-  // dropped-off for a while going through inspection/penalty/device-check
-  // before Return is actually confirmed.
-  if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    filtered.completedAt = admin.firestore.FieldValue.serverTimestamp();
-  }
-
-  filtered.updatedAt = admin.firestore.FieldValue.serverTimestamp();
-
-  // Move the destination geofence zone BEFORE saving the booking, so a failure here
-  // surfaces to the admin instead of leaving the text and the pin out of sync.
-  if (stopEdits.length) {
-    await updateSessionStops(bookingID || docID, stopEdits);
-  }
-
-  const bookingRef = db.collection("bookings").doc(docID);
-  if (filtered.status === "cancelled") {
-    // A cancellation is a booking update PLUS a cancellationRequests row (the reason no
-    // longer lives on the booking). Both commit together:
-    //   * a customer request is still pending  -> it is the row; mark it approved
-    //   * otherwise                            -> write the "direct" row
-    // ("admin", not "staff": cancelledBy "staff" is what Fleet uses to find the bookings
-    // it cancelled itself, so this manual edit must not be mistaken for that.)
-    const bookingKey = bookingKeyOf(docID, bookingData);
-    const pendingRequest = await getPendingRequest(bookingKey);
-    const cancelBatch = db.batch();
-    cancelBatch.update(bookingRef, filtered);
-    if (pendingRequest) {
-      resolveRequest(pendingRequest, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, cancelBatch);
-    } else {
-      const reason = String(updates.cancellationReason ?? updates.reason ?? "").trim();
-      recordDirectCancellation(bookingKey, {
-        userID: userID || null,
-        reason: reason || "Cancelled by admin.",
-        cancelledBy: performedBy ? "admin" : "unknown",
-        processedBy: performedBy,
-      }, cancelBatch);
-    }
-    await cancelBatch.commit();
-    if (pendingRequest) {
-      resolveNotification("cancellation_request", docID).catch((err) =>
-        console.error("[Booking] Failed to resolve cancellation_request notification:", err.message)
-      );
-    }
-  } else {
-    await bookingRef.update(filtered);
-  }
-
-  if (stopEdits.length) {
-    const changes = stopEdits
-      .map((e) => `"${e.oldLabel || "—"}" → "${e.address}"`)
-      .join(", ");
-    createAuditLog({
-      action: "update",
-      userID: performedBy,
-      bookingID: bookingID || docID,
-      description: `Moved ${stopEdits.length === 1 ? "a stop" : `${stopEdits.length} stops`} on booking ${bookingID || docID} (pin moved on map): ${changes}.`,
-    }).catch((err) => console.error("[AuditLog] Location edit log failed:", err.message));
-  }
-
-  // The booking has moved on, so any "driver is waiting on the inspection"
-  // reminder for it is stale: pickup clears the pickup one, and once the
-  // trip is completed/cancelled/stolen nothing is left to remind about.
-  // Best-effort — never blocks the status change itself.
-  if (filtered.status && filtered.status !== oldStatus?.toLowerCase()) {
-    const reminderKey = bookingID || docID;
-    const stalePhases =
-      filtered.status === "ongoing" ? ["before"]
-      : ["completed", "cancelled", "stolen"].includes(filtered.status) ? ["before", "after"]
-      : [];
-    if (stalePhases.length) {
-      resolveInspectionReminders(reminderKey, stalePhases).catch((err) =>
-        console.error("[Booking] Failed to resolve inspection reminders:", err.message)
-      );
-    }
-  }
-
-  // ── Link booking status transitions to the GPS session lifecycle ──
-  // "ongoing" = pickup happened, car is now actually on the trip. This is
-  // the one place that status-vocabulary decision actually takes effect —
-  // flagging it here rather than silently assuming it, since it was still
-  // an open question. Session activation/ending is best-effort: a failure
-  // here must never block the booking status update itself, since staff
-  // still need to be able to mark a car picked up/returned even if the
-  // Firestore session link is temporarily unavailable.
-  if (filtered.status === "ongoing" && oldStatus?.toLowerCase() !== "ongoing") {
-    const bID = bookingID || docID;
-    createAuditLog({
-      action: "update",
-      userID: performedBy,
-      bookingID: bID,
-      description: `Marked pickup complete on booking ${bID}.`,
-    }).catch((err) => console.error("[AuditLog] Pickup log failed:", err.message));
+  } catch (err) {
+    // Give the slot back so a failed send doesn't lock the driver out for 10 minutes.
     try {
-      const bID = bookingID || docID;
-      const session = await getSessionByBookingID(bID);
-      if (session) {
-        await markSessionActive(session.data.bookingSessionID, carID);
-        // Flush right away too — mostly just so a file actually shows up in
-        // Storage the moment tracking starts, as reassurance the pipeline is
-        // wired correctly, rather than only ever appearing at Return or
-        // whenever tonight's cron happens to run. It'll be near-empty at
-        // this exact instant (no GPS pings have landed yet), and gets
-        // overwritten with the real trail as the trip progresses and again
-        // at Return — this first flush is just an early proof-of-life, not
-        // the final archive.
-        try {
-          await flushBookingHistory(session.data.bookingSessionID);
-        } catch (flushErr) {
-          console.error("[Booking] Pickup flush failed (session still marked active, cron will retry tonight):", flushErr.message);
-        }
-      } else {
-        console.warn(`[Booking] No bookingSession found for booking ${bID} — GPS tracking won't start for this trip.`);
-      }
-    } catch (err) {
-      console.error("[Booking] Failed to activate GPS session:", err.message);
-    }
-  } else if (filtered.status === "completed" && oldStatus?.toLowerCase() === "ongoing") {
-    const bID = bookingID || docID;
-    createAuditLog({
-      action: "update",
-      userID: performedBy,
-      bookingID: bID,
-      description: `Marked complete on booking ${bID}.`,
-    }).catch((err) => console.error("[AuditLog] Return log failed:", err.message));
-    try {
-      const bID = bookingID || docID;
-      const session = await getSessionByBookingID(bID);
-      if (session) {
-        await markSessionEnded(session.data.bookingSessionID);
-        // Flush the full trail to Storage right now — this is the "Return"
-        // action, no reason to make the history file wait for tonight's
-        // cron when the trip is already over.
-        try {
-          await flushBookingHistory(session.data.bookingSessionID);
-        } catch (flushErr) {
-          console.error("[Booking] Return flush failed (session still marked ended, cron will retry tonight):", flushErr.message);
-        }
-      }
-    } catch (err) {
-      console.error("[Booking] Failed to end GPS session:", err.message);
-    }
-  } else if (filtered.status === "cancelled" && oldStatus?.toLowerCase() !== "cancelled") {
-    try {
-      const bID = bookingID || docID;
-      const session = await getSessionByBookingID(bID);
-      if (session) {
-        await markSessionCancelled(session.data.bookingSessionID);
-      } else {
-        console.warn(`[Booking] No bookingSession found for booking ${bID} — nothing to cancel.`);
-      }
-    } catch (err) {
-      console.error("[Booking] Failed to cancel GPS session:", err.message);
-    }
-  } else if (filtered.status === "stolen" && oldStatus?.toLowerCase() !== "stolen") {
-    // Manual only — set by staff hitting "Stolen" on the car card. No
-    // auto-trigger off geofence breach.
-    try {
-      const bID = bookingID || docID;
-      const session = await getSessionByBookingID(bID);
-      if (session) {
-        await markSessionStolen(session.data.bookingSessionID);
-        // Same as Return — flush the trail immediately for documentation
-        // rather than waiting for the nightly cron. This is manual/admin-
-        // triggered, so there's no reason to delay the record.
-        try {
-          await flushBookingHistory(session.data.bookingSessionID);
-        } catch (flushErr) {
-          console.error("[Booking] Stolen flush failed (session still marked stolen, cron will retry tonight):", flushErr.message);
-        }
-      } else {
-        console.warn(`[Booking] No bookingSession found for booking ${bID} — cannot flag session stolen.`);
-      }
-    } catch (err) {
-      console.error("[Booking] Failed to flag session stolen:", err.message);
-    }
+      if (previous) await ref.set(previous); else await ref.delete();
+    } catch { /* best effort */ }
+    throw err;
   }
-
-  // -- Trip over -> close the driver's assignment row (best effort) --
-  if (["completed", "cancelled", "stolen"].includes(filtered.status)) {
-    completeActiveAssignment(bookingID || docID).catch((err) =>
-      console.error("[Booking] Failed to close driver assignment:", err.message)
-    );
-  }
-
-  // ── Auto-delete the "new booking" notification once the booking is handled ──
-  const newStatus = filtered.status;
-  const activeStatuses = ["upcoming", "cancellation_request"];
-  const resolvedStatuses = ["upcoming", "ongoing", "completed", "cancelled", "stolen"];
-  if (
-    newStatus &&
-    newStatus !== oldStatus?.toLowerCase() &&
-    activeStatuses.includes(oldStatus?.toLowerCase()) &&
-    resolvedStatuses.includes(newStatus)
-  ) {
-    // The "new booking" notification is no longer actionable, so remove it
-    try {
-      const bID = bookingID || docID;
-      const notifSnap = await db.collection("notifications")
-        .where("bookingID", "==", bID)
-        .where("type", "==", "new_booking")
-        .get();
-      if (!notifSnap.empty) {
-        const batch = db.batch();
-        notifSnap.docs.forEach(d => batch.delete(d.ref));
-        await batch.commit();
-        console.log(`[NOTIF] Auto-deleted ${notifSnap.size} new_booking notif(s) for booking: ${bID}`);
-      }
-    } catch (err) {
-      console.error("[NOTIF] Failed to delete booking notifications:", err.message);
-    }
-  }
-
-  return { success: true };
+  return { id: bookingDocID, balance };
 };
 
-// ─────────────────────────────────────────────
-// Mark the vehicle itself physically dropped off — every booking type,
-// not just chauffeur. Distinct from Return: the session stays "active",
-// only the timestamp changes, and Return itself stays blocked until
-// inspection/penalties/device-check are also cleared (see updateBooking's
-// "completed" gates above). See bookingsession.model.js for why this is
-// never auto-filled/backfilled.
-// ─────────────────────────────────────────────
-export const markBookingDroppedOff = async (docID, performedBy = null) => {
-  const bookingRef = db.collection("bookings").doc(docID);
-  const bookingDoc = await bookingRef.get();
-  if (!bookingDoc.exists) throw new Error("Booking not found.");
-  const booking = bookingDoc.data();
+/** A driver's own live trips (upcoming + ongoing), same shape as getDispatchBoard's per-booking entries. */
+export const getMyTrips = async (driverID) => {
+  if (!driverID) throw new Error("driverID is required.");
 
-  if (booking.status?.toLowerCase() !== "ongoing") {
-    throw new Error(`Cannot mark dropped off: booking status is "${booking.status}", not "ongoing" (has it been picked up yet?).`);
-  }
+  const bookings = await getDriverBookings(driverID, DISPATCHABLE_STATUSES);
 
-  const bID = booking.bookingID || docID;
-  const session = await getSessionByBookingID(bID);
-  if (!session) throw new Error("No active trip session found for this booking.");
-  if (session.data.droppedOffTime) {
-    throw new Error("Already marked dropped off — this can't be re-triggered or edited.");
-  }
-
-  await markDroppedOff(session.ref.id);
-  createAuditLog({
-    action: "update",
-    userID: performedBy,
-    bookingID: bID,
-    description: `Marked vehicle dropped off on booking ${bID}.`,
-  }).catch((err) => console.error("[AuditLog] Dropoff log failed:", err.message));
-  return { id: docID };
+  // withDocs: MyTrips needs to know whether staff have finished the
+  // before/after vehicle inspection (photos + parts condition) so Start
+  // Pickup / Return can show what's still outstanding. History rows don't
+  // need it (skipped there).
+  return shapeTripsForDriver(bookings, { withDocs: true, driverID });
 };
 
-// ─────────────────────────────────────────────
-// GPS-unassigned requirement at Return. Before a booking can be marked
-// returned, the tracker must have been detached from the car (GPS Setup
-// page → Unassign). Returns the gpsDevice docs still assigned to this
-// car — an empty array means the car is clear to return. The `assigned`
-// filter is done in JS so this needs no composite Firestore index.
-// ─────────────────────────────────────────────
-const getDevicesStillAssigned = async (carID) => {
-  if (!carID) return [];
-  const snap = await db.collection("gpsDevice").where("carID", "==", carID).get();
-  return snap.docs.map((d) => d.data()).filter((d) => d.assigned === true);
+/** A driver's past trips — completed/cancelled/stolen — most recent first. Simple, no pagination (per-driver volume is small). */
+export const getMyTripHistory = async (driverID) => {
+  if (!driverID) throw new Error("driverID is required.");
+
+  const bookings = await getDriverBookings(driverID, ["completed", "cancelled", "stolen"]);
+
+  const shaped = await shapeTripsForDriver(bookings, { driverID });
+  return shaped.sort((a, b) => (b.startDateTime?.getTime() ?? 0) - (a.startDateTime?.getTime() ?? 0));
 };
 
-const describeAssignedDevices = (devices) =>
-  devices.map((d) => d.gpsName || d.gpsDeviceID).join(", ");
+// Shared shaping for the two driver-facing lists above — same vehicle/
+// customer resolution as getDispatchBoard, plus each booking's session
+// (for startedAt/droppedOffTime display) plus the booking's own completedAt.
+// "Remind customer" (balance) cooldown — same 10 minutes and same server-side
+// rule as Remind Staff, kept per booking in balanceReminders/{bookingKey}.
+const BALANCE_REMINDER_COOLDOWN_SECONDS = 10 * 60;
+const BALANCE_REMINDERS = "balanceReminders";
 
-// ─────────────────────────────────────────────
-// Read-only pre-return checklist — never blocks anything, just reports
-// where a booking stands against every Return requirement, so the
-// frontend can show a "here's what's still missing" panel instead of a
-// disabled/greyed-out button. The actual enforcement lives in
-// updateBooking's "completed" gates above; this is purely a mirror of
-// those same checks for display purposes.
-// ─────────────────────────────────────────────
-export const getReturnChecklist = async (docID) => {
-  docID = await resolveBookingDocID(docID);
-  const bookingRef = db.collection("bookings").doc(docID);
-  const bookingDoc = await bookingRef.get();
-  if (!bookingDoc.exists) throw new Error("Booking not found.");
-  const booking = bookingDoc.data();
-  const bID = booking.bookingID || docID;
+const driverErr = (status, message, extra = {}) => Object.assign(new Error(message), { status, ...extra });
+const tsToMs = (ts) => {
+  if (!ts) return null;
+  if (typeof ts.toMillis === "function") return ts.toMillis();
+  const t = new Date(ts).getTime();
+  return Number.isNaN(t) ? null : t;
+};
+const balanceSecondsLeft = (lastMs, nowMs = Date.now()) =>
+  lastMs == null ? 0 : Math.max(0, Math.ceil((BALANCE_REMINDER_COOLDOWN_SECONDS * 1000 - (nowMs - lastMs)) / 1000));
 
-  const [session, afterChecklist, pos, assignedDevices] = await Promise.all([
-    getSessionByBookingID(bID),
-    getPhaseChecklist(bID, "after"),
-    getDepositPosition(bID),
-    getDevicesStillAssigned(booking.carID),
+/** { [bookingKey]: secondsLeft } — never throws; a failure just shows the button as available (server still enforces). */
+const getBalanceReminderCooldowns = async (bookingKeys = []) => {
+  const keys = [...new Set(bookingKeys.filter(Boolean))];
+  const out = {};
+  if (!keys.length) return out;
+  try {
+    const snaps = await db.getAll(...keys.map((k) => db.collection(BALANCE_REMINDERS).doc(k)));
+    const now = Date.now();
+    keys.forEach((k, i) => { out[k] = snaps[i].exists ? balanceSecondsLeft(tsToMs(snaps[i].data().lastRemindedAt), now) : 0; });
+  } catch (err) {
+    console.error("[BALANCE REMINDER] cooldown lookup failed:", err.message);
+  }
+  return out;
+};
+
+const shapeTripsForDriver = async (bookings, { withDocs = false, driverID = null } = {}) => {
+  const carIDs      = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
+  const userIDs     = [...new Set(bookings.map((b) => b.userID).filter(Boolean))];
+  const bookingIDs  = [...new Set(bookings.map((b) => b.bookingID || b.id).filter(Boolean))];
+  // Inspection records may have been saved under the booking's business
+  // bookingID or its doc id — check both.
+  const docKeys = {};
+  bookings.forEach((b) => { docKeys[b.bookingID || b.id] = [...new Set([b.bookingID, b.id].filter(Boolean))]; });
+
+  const [vehicleEntries, userEntries, sessions, paymentEntries, beforeDocsEntries, afterDocsEntries, reminderCooldowns, balanceCooldowns, penaltiesByBooking] = await Promise.all([
+    Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
+    Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
+    Promise.all(bookings.map((b) => getSessionByBookingID(b.bookingID || b.id).catch(() => null))),
+    Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
+    // Same helper + same key (bookingID || doc id) as booking.service.js's
+    // getAllBookings, so Car Tracking and My Trips agree on "inspection done".
+    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(docKeys[id] || id, "before") : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
+    Promise.all(bookingIDs.map((id) => (withDocs ? getPhaseChecklist(docKeys[id] || id, "after")  : Promise.resolve(EMPTY_CHECKLIST)).then((v) => [id, v]))),
+    // Remaining "Remind Staff" cooldown per booking/phase (seconds, so the
+    // driver's own clock can't skew the countdown).
+    withDocs ? getReminderCooldowns(bookingIDs) : Promise.resolve({}),
+    withDocs ? getBalanceReminderCooldowns(bookingIDs) : Promise.resolve({}),
+    // The driver's view of the penalties on each trip (what was noted + where it stands with staff; no money owed).
+    listPenaltiesForDriver(bookingIDs, driverID),
+  ]);
+  const vehicleMap = Object.fromEntries(vehicleEntries);
+  const userMap    = Object.fromEntries(userEntries);
+  const paymentMap = Object.fromEntries(paymentEntries);
+  const beforeDocsMap = Object.fromEntries(beforeDocsEntries);
+  const afterDocsMap  = Object.fromEntries(afterDocsEntries);
+
+  return bookings
+    .map((b, i) => {
+      const bID = b.bookingID || b.id;
+      // A cancelled booking always shows "Cancelled" payment status,
+      // matching booking.service.js/payments.service.js's same override.
+      const payInfo = paymentMap[bID] || EMPTY_PAYMENT;
+      const paymentStatus = (b.status || "").toLowerCase() === "cancelled" ? "Cancelled" : payInfo.paymentStatus;
+      return {
+        id:                   b.id,
+        bookingID:            bID,
+        status:               b.status,
+        modeOfDriving:        b.modeOfDriving,
+        startDateTime:        toJSDate(b.startDateTime),
+        endDateTime:          toJSDate(b.endDateTime),
+        location:             b.location || "—",
+        vehicleName:          vehicleMap[b.carID] || "—",
+        carID:                b.carID || null,
+        customerName:         userMap[b.userID]?.name || "—",
+        customerPhone:        userMap[b.userID]?.phone || "—",
+        startedAt:            toJSDate(sessionStartedAt(sessions[i]?.data)),
+        droppedOffTime:       toJSDate(sessions[i]?.data?.droppedOffTime),
+        // ACTUAL return — stamped on the booking when Return is confirmed.
+        completedAt:           toJSDate(b.completedAt),
+        // Set by the customer backend at booking time (see bookingsession.model.js).
+        // Null when a session hasn't been created yet / doesn't have coords geocoded.
+        pickupLocation:       sessions[i]?.data?.pickupLocation || null,
+        dropoffLocation:      sessions[i]?.data?.dropoffLocation || null,
+        // Extra stops the customer selected at booking time, beyond
+        // pickup/dropoff (same field CarTracking's live map and
+        // BookingInfoPanel already read off the session doc). Without
+        // this, MyTrips.jsx's tripStops() always saw an empty/undefined
+        // list here and could only ever plot the two endpoints — this is
+        // what was missing.
+        geofenceZones:        sessions[i]?.data?.geofenceZones || [],
+        // Number Coding restrictions the customer was warned about when booking (flat array saved
+        // on the session by the customer backend) — shown on the driver's trip card so the route
+        // can be planned around them. [] for older sessions.
+        codingWarnings:       Array.isArray(sessions[i]?.data?.codingWarnings) ? sessions[i].data.codingWarnings : [],
+        // Nested to match PaymentStatusModal's `payment` prop shape exactly
+        // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
+        payment: { ...payInfo, paymentStatus },
+        // Inspection state — consumed by MyTrips.jsx. "Complete" = the 3
+        // exterior photos AND the parts-condition record, both entered by
+        // staff; the per-half breakdown drives the checklist on the card.
+        beforeDocsComplete:   beforeDocsMap[bID]?.complete ?? false,
+        afterDocsComplete:    afterDocsMap[bID]?.complete ?? false,
+        beforeInspection:     beforeDocsMap[bID] ?? EMPTY_CHECKLIST,
+        afterInspection:      afterDocsMap[bID]  ?? EMPTY_CHECKLIST,
+        inspectionReminder:   reminderCooldowns[bID] ?? { before: { retryAfterSeconds: 0 }, after: { retryAfterSeconds: 0 } },
+        // Set when the driver tapped "On my way" (heading to the customer's pickup location).
+        enRouteAt:            toJSDate(b.enRouteAt),
+        // Seconds left before the driver can send another balance reminder to the customer.
+        balanceReminder:      { retryAfterSeconds: balanceCooldowns[bID] ?? 0 },
+        // Penalties on this trip, trimmed for the driver: Under review / Accepted / Rejected / Removed, no payment details.
+        penalties:            penaltiesByBooking[bID] || [],
+      };
+    })
+    .sort((a, b) => (a.startDateTime?.getTime() ?? 0) - (b.startDateTime?.getTime() ?? 0));
+};
+
+/** Driver-triggered pickup — ownership-checked, then reuses the same gated updateBooking staff already use (payment + completed before-trip inspection checks included — the driver can't fill the inspection in themselves, so it must already be done by staff). */
+export const driverPickup = async (bookingDocID, driverID) => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  await updateBooking(bookingDocID, { status: "ongoing" });
+  return { id: bookingDocID };
+};
+
+/**
+ * Driver tapping "Remind Staff" on a trip whose before/after inspection
+ * isn't done yet — notifies Owner/Admin/Supervisor. Ownership-checked like
+ * every other driver action; the 10-minute cooldown is enforced inside
+ * sendInspectionReminder.
+ */
+export const driverRemindInspection = async (bookingDocID, driverID, phase) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+
+  // Pickup needs payment settled too. If payment is what's really blocking
+  // the trip, an inspection reminder would only send staff chasing the
+  // wrong thing — so say so instead.
+  if (phase === "before") {
+    const pay = await resolvePaymentInfo(bID);
+    const paymentReady = ["approved", "paid"].includes((pay.paymentStatus || "").toLowerCase()) && (pay.balance ?? 0) <= 0;
+    if (!paymentReady) {
+      const err = new Error("Payment still needs to be settled before pickup — sort that out first.");
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  const [vehicleName, driverInfo] = await Promise.all([
+    resolveVehicleName(booking.carID),
+    resolveUserInfo(driverID),
   ]);
 
-  const droppedOff = !!session?.data?.droppedOffTime;
-  const holdsDeposit = pos.deposit?.status === "Held" && !pos.alreadySettled;
-  // Penalties a driver noted that no supervisor has confirmed yet: settling now would return the whole deposit and
-  // leave them as money owed later, so the server refuses (see settleBooking) and the screen says why up front.
-  const underReviewCount = (pos.penalties || []).filter((p) => p.status === "UnderReview").length;
-  const isCompleted = String(booking.status || "").toLowerCase() === "completed";
-  const isOngoing = String(booking.status || "").toLowerCase() === "ongoing";
-  const settlement = pos.deposit?.settlement || null;
-  // Can the deposit go back through PayMongo? Only while it is still to be returned, and only for GCash / Maya.
-  const onlineOption = holdsDeposit && pos.amountToReturn > 0
-    ? await onlineDepositReturnOption(bID, pos.amountToReturn)
-    : { available: false, reason: null };
+  return sendInspectionReminder({
+    booking, bookingDocID, phase, driverID,
+    driverName: driverInfo.name,
+    vehicleName,
+  });
+};
 
-  const items = [
-    {
-      key: "droppedOff",
-      label: "Vehicle dropped off",
-      complete: droppedOff,
-      detail: droppedOff ? null : "Nobody has marked the vehicle physically dropped off yet.",
-    },
-    {
-      key: "inspection",
-      label: "After-trip vehicle inspection",
-      complete: !!afterChecklist.complete,
-      detail: afterChecklist.complete ? null : `Still missing ${describeMissingInspection(afterChecklist)}.`,
-    },
-    {
-      key: "gpsUnassigned",
-      label: "GPS device unassigned",
-      complete: assignedDevices.length === 0,
-      detail: assignedDevices.length === 0
-        ? null
-        : `${describeAssignedDevices(assignedDevices)} is still assigned to this car. Unassign it on the GPS Setup page first.`,
-    },
-  ];
+/** Driver-triggered drop-off — ownership-checked, then the same rules as the staff dropoff endpoint. */
+export const driverDropoff = async (bookingDocID, driverID) => {
+  await assertOwnsBooking(bookingDocID, driverID);
+  await markBookingDroppedOff(bookingDocID, driverID);
+  return { id: bookingDocID };
+};
+
+/**
+ * Driver noting a penalty on their own trip. Same createPenalty staff use,
+ * but saved UnderReview: the customer is NOT notified and it isn't charged
+ * until a supervisor confirms it on the Penalties page (staff are notified
+ * that it needs review). Also does the ownership check, so a driver can't
+ * note one on a booking that isn't theirs through the general
+ * POST /api/penalties route's reach.
+ * bookingID here is the booking DOC id from the URL, resolved to the
+ * business bookingID the penalty service keys on.
+ */
+const penaltySignature = (items) =>
+  (Array.isArray(items) ? items : [])
+    .map((i) => `${String(i?.description || "").trim().toLowerCase()}|${(Math.round((Number(i?.amount) || 0) * 100) / 100).toFixed(2)}`)
+    .sort()
+    .join(";");
+
+export const driverCreatePenalty = async (bookingDocID, driverID, body = {}) => {
+  const booking = await assertOwnsBooking(bookingDocID, driverID);
+  const bID = booking.bookingID || bookingDocID;
+
+  // A driver notes a penalty during the trip (the button only shows on an ongoing trip; this is the same rule on the server).
+  if ((booking.status || "").toLowerCase() !== "ongoing") {
+    return { error: "You can only note a penalty while the trip is ongoing." };
+  }
+  // The same charge, noted again by this driver while the first is still waiting for review, is almost always a double tap.
+  const existing = await db.collection("penalties").where("bookingID", "==", bID).get();
+  const wanted = penaltySignature(body.lineItems);
+  const duplicate = existing.docs.some((d) => {
+    const p = d.data();
+    return p.status === "UnderReview" && p.createdBy === driverID && penaltySignature(p.lineItems) === wanted;
+  });
+  if (duplicate) return { error: "You already noted this penalty — it's waiting for a supervisor's review." };
+
+  return createPenalty({
+    bookingID: bID,
+    lineItems: body.lineItems,
+    computedAmount: body.computedAmount ?? 0,
+    amount: body.amount,
+    overrideReason: body.overrideReason || "",
+    createdBy: driverID,
+    needsReview: true,
+  });
+};
+
+/**
+ * Driver correcting a penalty they noted, while it is still Under review (see editPenaltyAsDriver). It is the penalty's
+ * creator who is checked, not the trip: the trip may well be over by the time a supervisor gets to it.
+ */
+export const driverEditPenalty = async (penaltyID, driverID, body = {}) => {
+  return editPenaltyAsDriver(penaltyID, driverID, {
+    lineItems: body.lineItems,
+    amount: body.amount,
+    overrideReason: body.overrideReason || "",
+  });
+};
+
+// ─────────────────────────────────────────────
+// ACTIVITY for ONE driver — Users > Driver > Activity tab. Staff-facing and read-only.
+//   current: the driver's upcoming / ongoing trips
+//   history: completed trips that have this driver on them, newest first
+// Built straight from the driver's driverAssignments rows. getDriverBookings() is not used here: it
+// keeps only bookings whose CURRENT assignment is "assigned", so it would drop every finished trip
+// (its row flips to "completed"). A booking that was archived since is looked up in bookingArchives,
+// so a finished trip does not vanish from the history when staff archive it.
+// ─────────────────────────────────────────────
+const lookupArchivedBookings = async (keys) => {
+  const byKey = new Map();
+  const add = (doc) => {
+    const data = doc.data();
+    const key = data.bookingID || data.originalId || doc.id;
+    if (!byKey.has(key)) byKey.set(key, { ...data, id: data.originalId || doc.id, archived: true });
+  };
+  for (let i = 0; i < keys.length; i += 30) {
+    const part = keys.slice(i, i + 30);
+    const snap = await db.collection("bookingArchives").where("bookingID", "in", part).get();
+    snap.forEach(add);
+  }
+  // Very old bookings have no bookingID field and were keyed by their doc id.
+  const stillMissing = keys.filter((k) => !byKey.has(k));
+  for (let i = 0; i < stillMissing.length; i += 30) {
+    const snap = await db.collection("bookingArchives").where("originalId", "in", stillMissing.slice(i, i + 30)).get();
+    snap.forEach(add);
+  }
+  return byKey;
+};
+
+export const getDriverActivity = async (driverID) => {
+  if (!driverID) throw new Error("driverID is required.");
+
+  const driverDoc = await db.collection("user").doc(driverID).get();
+  if (!driverDoc.exists) throw new Error("Driver not found.");
+  const driverRoleID = await resolveRoleID(ROLES.DRIVER);
+  if (driverDoc.data().roleID !== driverRoleID) throw new Error("This user is not a Driver.");
+
+  const assignments = await getAssignmentsForDriver(driverID, [ASSIGNMENT_STATUS.ASSIGNED, ASSIGNMENT_STATUS.COMPLETED]);
+  const rowByKey = new Map(assignments.map((a) => [a.bookingID, a]));
+  const keys = [...rowByKey.keys()].filter(Boolean);
+  if (!keys.length) return { current: [], history: [] };
+
+  const trips = new Map(); // booking key -> { ...booking, archived }
+  (await getBookingsByKeys(keys)).forEach((b) => trips.set(bookingKeyOf(b.id, b), { ...b, archived: false }));
+  const missing = keys.filter((k) => !trips.has(k));
+  if (missing.length) (await lookupArchivedBookings(missing)).forEach((b, k) => trips.set(k, b));
+
+  const current = [];
+  const history = [];
+  trips.forEach((b, key) => {
+    const status = String(b.status || "").toLowerCase();
+    const row = rowByKey.get(key);
+    if (!b.archived && DISPATCHABLE_STATUSES.includes(status) && row?.status === ASSIGNMENT_STATUS.ASSIGNED) current.push(b);
+    else if (status === "completed") history.push(b);
+  });
+
+  const all = [...current, ...history];
+  const carIDs  = [...new Set(all.map((b) => b.carID).filter(Boolean))];
+  const userIDs = [...new Set(all.map((b) => b.userID).filter(Boolean))];
+  const [vehicleEntries, userEntries] = await Promise.all([
+    Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
+    Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
+  ]);
+  const vehicleMap = Object.fromEntries(vehicleEntries);
+  const userMap    = Object.fromEntries(userEntries);
+
+  const shape = (b) => ({
+    id:            b.id,
+    bookingID:     b.bookingID || b.id,
+    status:        b.status,
+    startDateTime: toJSDate(b.startDateTime),
+    endDateTime:   toJSDate(b.endDateTime),
+    completedAt:   toJSDate(b.completedAt),
+    location:      b.location || "—",
+    vehicleName:   vehicleMap[b.carID] || "—",
+    customerName:  (b.archived && b.customerName) || userMap[b.userID]?.name || "—",
+    archived:      !!b.archived, // archived trips have no live booking to open
+  });
+  const time = (d) => d?.getTime() ?? 0;
 
   return {
-    bookingID: bID,
-    canReturn: items.every((i) => i.complete),
-    canSettle: isCompleted && droppedOff && holdsDeposit && underReviewCount === 0,
-    // Payments can complete an ongoing booking and return its deposit in one step. Unmet Return requirements (items) are only shown as a warning.
-    canCompleteAndSettle: isOngoing && holdsDeposit && underReviewCount === 0,
-    bookingStatus: booking.status || null,
-    underReviewCount,
-    onlineReturn: onlineOption,   // { available, channel? , reason? }
-    items,
-    driverID: await resolveCurrentDriverID(booking, docID),
-    depositStatus: pos.depositStatus,
-    depositHeld: pos.deposit?.amount ?? null,
-    depositSettled: !!settlement,
-    // Pesos of the deposit used for penalties: what is already deducted + what settling would still take (capped at the deposit).
-    depositDeducted: settlement ? (pos.deposit.deducted || 0) : Math.min(pos.deposit?.amount || 0, (pos.applied || 0) + pos.unpaidTotal),
-    // Before settlement: deposit minus penalties (negative = customer owes).
-    // After settlement: what was actually returned (depositReturned) / is still owed (the unpaid penalties, live).
-    penaltyTotal: settlement ? pos.confirmedTotal : pos.unpaidTotal + (pos.applied || 0),
-    amountToReturn: settlement ? (pos.unpaidTotal > 0 ? -pos.unpaidTotal : (pos.deposit.returnedAmount || 0) + (pos.discountReturned || 0)) : pos.amountToReturn,
-    // The discount credit held for the customer, as the part of that amount that is NOT the deposit. creditUsed would pay
-    // penalties the deposit can't; creditReturn goes back with the deposit. Both are 0 when no discount credit is held.
-    discountCredit: pos.creditAvailable,
-    discountCreditUsed: pos.creditUsed,
-    discountCreditReturn: settlement ? (pos.discountReturned || 0) : pos.creditReturn,
-    // Still-unpaid penalty money right now (includes penalties raised after settling).
-    stillOwed: pos.outstandingAfterDeposit,
-    outstandingAfterDeposit: pos.outstandingAfterDeposit,
-    penalties: pos.penalties,
-    depositReturn: await getDepositReturnForBooking(bID),   // how/whether the deposit went back: in store, or PayMongo (processing / failed / refunded)
+    current: current.map(shape).sort((a, b) => time(a.startDateTime) - time(b.startDateTime)),
+    history: history.map(shape).sort((a, b) => time(b.completedAt || b.endDateTime || b.startDateTime) - time(a.completedAt || a.endDateTime || a.startDateTime)),
   };
-};
-
-// ─────────────────────────────────────────────
-// Approve / reject a pending cancellation_request — the customer-side
-// counterpart of this lives in customer-backend's requestCancellation()
-// (bookings.controller.js), which is the only thing that ever sets a
-// booking to "cancellation_request" in the first place. bookingWatcher.js
-// used to auto-resolve the notification when status left that state;
-// now that the watcher is gone, these two actions resolve it directly,
-// same pattern as every other direct-write notification in this codebase.
-// ─────────────────────────────────────────────
-
-// A pending request is a row in cancellationRequests.
-const findPendingCancellation = async (docID, booking) => {
-  const request = await getPendingRequest(bookingKeyOf(docID, booking));
-  return { request, pending: !!request };
-};
-
-// A cancellation request is only honoured while the booking has NOT started ("to pay" / "upcoming"). Once the trip is
-// ongoing the car is out, the security deposit is held and the rental is in use: cancelling it would move no money and
-// leave the deposit (and any held discount credit) unreturnable, because settlement only runs on a COMPLETED booking.
-// Staff reject the request, or complete the trip (drop-off, inspection) and return the deposit as usual.
-const assertCancellableStatus = (status, label) => {
-  const s = String(status || "").toLowerCase();
-  if (!["to pay", "upcoming"].includes(s)) {
-    throw new Error(
-      `Cannot approve: booking ${label} is "${status}". A trip that has already started can't be cancelled -- ` +
-      "reject the request instead, or drop the car off and complete the trip, then return the deposit."
-    );
-  }
-};
-
-export const approveCancellationRequest = async (docID, performedBy = null) => {
-  const bookingRef = db.collection("bookings").doc(docID);
-  const bookingDoc = await bookingRef.get();
-  if (!bookingDoc.exists) throw new Error("Booking not found.");
-  const booking = bookingDoc.data();
-
-  const { request, pending } = await findPendingCancellation(docID, booking);
-  if (!pending) {
-    throw new Error(`Cannot approve: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
-  }
-  assertCancellableStatus(booking.status, booking.bookingID || docID);
-
-  const now = new Date();
-  // One transaction: the request is marked approved and the booking cancelled together,
-  // and both are re-read inside it, so two staff approving at once (or approving a request
-  // someone just rejected, or a trip that already ended) cannot both go through.
-  // The customer's own words stay on the request row; the booking list reads the
-  // cancellation reason from there.
-  await db.runTransaction(async (t) => {
-    const [reqSnap, bookingSnap] = await Promise.all([t.get(request.ref), t.get(bookingRef)]);
-    if (!reqSnap.exists || reqSnap.data().status !== REQUEST_STATUS.PENDING) {
-      throw new Error(`Cannot approve: the cancellation request for booking ${docID} was already handled.`);
-    }
-    const current = String(bookingSnap.data()?.status || "").toLowerCase();
-    if (["cancelled", "completed", "stolen"].includes(current)) {
-      throw new Error(`Cannot approve: booking ${docID} is already ${current}.`);
-    }
-    assertCancellableStatus(current, booking.bookingID || docID);   // re-checked inside the transaction: the trip may have started since
-    resolveRequest(request, { status: REQUEST_STATUS.APPROVED, processedBy: performedBy }, t);
-    t.update(bookingRef, { status: "cancelled", updatedAt: now });
-  });
-
-  // Mirror onto the session doc, same as the customer's own instant-cancel
-  // path already does for "upcoming" bookings.
-  try {
-    const bID = booking.bookingID || docID;
-    const session = await getSessionByBookingID(bID);
-    if (session) {
-      await markSessionCancelled(session.ref.id);
-    }
-  } catch (err) {
-    console.error("[BOOKINGS] approveCancellationRequest: failed to sync bookingSession:", err.message);
-  }
-
-  completeActiveAssignment(booking.bookingID || docID).catch((err) =>
-    console.error("[BOOKINGS] approveCancellationRequest: failed to close driver assignment:", err.message)
-  );
-
-  // Resolves every Owner/Admin/Supervisor's own copy of this notification
-  // at once -- see notification.service.js's resolveNotification() header
-  // comment for why no userID filter is needed here.
-  await resolveNotification("cancellation_request", docID).catch((err) =>
-    console.error("[BOOKINGS] approveCancellationRequest: failed to resolve notification:", err.message)
-  );
-
-  auditSafe({
-    action: "update",
-    description: `Cancellation request for booking ${booking.bookingID || docID} APPROVED -- booking cancelled.`,
-    userID: performedBy,
-    bookingID: booking.bookingID || docID,
-  });
-
-  return { id: docID, status: "cancelled" };
-};
-
-export const rejectCancellationRequest = async (docID, rejectReason, performedBy = null) => {
-  const bookingRef = db.collection("bookings").doc(docID);
-  const bookingDoc = await bookingRef.get();
-  if (!bookingDoc.exists) throw new Error("Booking not found.");
-  const booking = bookingDoc.data();
-
-  const { request, pending } = await findPendingCancellation(docID, booking);
-  if (!pending) {
-    throw new Error(`Cannot reject: booking ${docID} has no pending cancellation request (status is "${booking.status}").`);
-  }
-
-  // The booking's status never changed while the request was pending, so there is
-  // nothing to restore; only the request row is resolved.
-  const revertTo = booking.status;
-
-  const now = new Date();
-  await db.runTransaction(async (t) => {
-    const reqSnap = await t.get(request.ref);
-    if (!reqSnap.exists || reqSnap.data().status !== REQUEST_STATUS.PENDING) {
-      throw new Error(`Cannot reject: the cancellation request for booking ${docID} was already handled.`);
-    }
-    resolveRequest(request, { status: REQUEST_STATUS.REJECTED, processedBy: performedBy, rejectReason }, t);
-    t.update(bookingRef, { updatedAt: now });
-  });
-
-  await resolveNotification("cancellation_request", docID).catch((err) =>
-    console.error("[BOOKINGS] rejectCancellationRequest: failed to resolve notification:", err.message)
-  );
-
-  auditSafe({
-    action: "update",
-    description: `Cancellation request for booking ${booking.bookingID || docID} REJECTED${rejectReason ? `: ${rejectReason}` : ""}.`,
-    userID: performedBy,
-    bookingID: booking.bookingID || docID,
-  });
-
-  return { id: docID, status: revertTo };
-};
-
-// ─────────────────────────────────────────────
-// History flush
-//
-// Compiles a session's full GPS trail into one permanent JSON file in
-// Firebase Storage under bookingHistory/. The trail is read from Google
-// Sheets (one tab per PHT date, shared by every car — see
-// services/sheets/sheets.service.js) across every PHT date the session
-// spans; it no longer comes from a Firestore archive/{date} sub-collection.
-// (Lived in services/storage/bookingHistory.service.js, then bookingSession.service.js;
-// now here so booking.service.js owns the whole booking → history flow.)
-// ─────────────────────────────────────────────
-
-export const flushBookingHistory = async (bookingSessionID) => {
-  const session = await getSessionById(bookingSessionID);
-  if (!session) {
-    throw new Error(`Booking session not found: ${bookingSessionID}`);
-  }
-  const { data } = session;
-
-  // Start of the range = the REAL start of the trip (startedAt, stamped at
-  // pickup), not the booking's scheduled date — so an early pickup (a booking
-  // for Oct 23 handed over on Sep 28) reads the right Sheets date-tabs instead
-  // of coming back empty. For sessions from before startedAt existed we also
-  // look at droppedOffTime / lastArchivedAt / last ping and take the earliest
-  // known real moment. If nothing is known at all (never started), start = now,
-  // i.e. just today's tab.
-  const realMoments = [sessionStartedAt(data), toDate(data.droppedOffTime), toDate(data.lastArchivedAt), toDate(data.currentPosition?.date)]
-    .filter((d) => d && !isNaN(d.getTime()));
-  const pickup = realMoments.length
-    ? new Date(Math.min(...realMoments.map((d) => d.getTime())))
-    : new Date();
-  // Flushing always happens at or after the real event, and no ping can be
-  // dated in the future — so "now" is the true upper bound (no wasted reads of
-  // Sheets tabs that don't exist yet).
-  const end = new Date();
-  const dateStrings = datesBetweenPHT(pickup, end);
-
-  const rows = await fetchSessionRows(data.carID, bookingSessionID, dateStrings);
-  const fullTrail = rows
-    .filter((r) => typeof r.lat === "number" && typeof r.lng === "number" && r.at)
-    .map((r) => ({ lat: r.lat, lng: r.lng, at: r.at, speed: r.speed ?? 0, offline: r.offline === true }))
-    .sort((a, b) => new Date(a.at) - new Date(b.at));
-
-  const filePath = `bookingHistory/${bookingSessionID}.json`;
-  const file = bucket.file(filePath);
-
-  // Shape changed from a bare points array to an object carrying this trip's
-  // geofence zones + alert timeline (and coding-restriction alerts) alongside
-  // the trail, so History → Review can reconstruct breach state on playback
-  // instead of only showing the dots. Older archive files already in Storage
-  // stay as bare arrays — the frontend handles both shapes.
-  //
-  // droppedOffAt / completedAt / holidays are extra review details so a saved
-  // trip can be read later without the live records: when the car was marked
-  // dropped off, when the booking was marked completed (null until then — this
-  // file is also written at pickup and by the nightly cron), and the holidays
-  // that fell inside the trip's dates. Gathering them must never block the
-  // save itself, so each lookup falls back to null / [].
-  const iso = (v) => { const d = toDate(v); return d && !isNaN(d.getTime()) ? d.toISOString() : null; };
-  let completedAt = null;
-  try {
-    const bID = data.bookingID;
-    if (bID) {
-      let bSnap = await db.collection("bookings").doc(bID).get();
-      if (!bSnap.exists) {
-        const q = await db.collection("bookings").where("bookingID", "==", bID).limit(1).get();
-        bSnap = q.empty ? null : q.docs[0];
-      }
-      completedAt = iso(bSnap?.data()?.completedAt);
-    }
-  } catch (err) {
-    console.error("[Booking] flush: couldn't read completedAt:", err.message);
-  }
-  let holidays = [];
-  try {
-    holidays = await getHolidaysBetween(pickup, end);
-  } catch (err) {
-    console.error("[Booking] flush: couldn't read holidays:", err.message);
-  }
-
-  const archivePayload = {
-    points: fullTrail,
-    geofenceZones:  data.geofenceZones  || [],
-    geofenceAlerts: data.geofenceAlerts || [],
-    codingAlerts:   data.codingAlerts   || [],
-    codingWarnings: codingWarningsOut(data.codingWarnings),
-    droppedOffAt:   iso(data.droppedOffTime),
-    completedAt,
-    holidays,
-  };
-
-  await file.save(JSON.stringify(archivePayload, null, 2), {
-    contentType: "application/json",
-    metadata: { cacheControl: "no-cache" },
-  });
-  await file.makePublic();
-
-  const archiveUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
-  await recordArchiveFlush(bookingSessionID, archiveUrl);
-
-  return archiveUrl;
 };
