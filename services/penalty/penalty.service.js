@@ -608,13 +608,8 @@ const driverPenaltyView = (p, driverID) => {
   return {
     penaltyID: p.penaltyID || p.id,
     bookingID: p.bookingID,
-    // What he wrote stays visible, but the peso amounts only while it is still Under review (he may still edit it).
-    // Once staff have decided it, the driver has no use for the number.
-    items: (p.lineItems || []).map((i) => ({
-      description: i.description || "Charge",
-      ...(p.status === "UnderReview" ? { amount: Number(i.amount) || 0 } : {}),
-    })),
-    amount: p.status === "UnderReview" ? Number(p.amount) || 0 : null,
+    items: (p.lineItems || []).map((i) => ({ description: i.description || "Charge", amount: Number(i.amount) || 0 })),
+    amount: Number(p.amount) || 0,
     status: DRIVER_PENALTY_LABEL[p.status] || p.status,
     // The staff reason is only shown for a penalty staff turned down or took back.
     reason: ["Discarded", "Voided", "Waived"].includes(p.status) ? (p.statusReason || "") : "",
