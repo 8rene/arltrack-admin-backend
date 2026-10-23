@@ -1,6 +1,5 @@
 // Matches the 'sessionLogArchives' collection in Firestore.
 // Primary key: sessionLogArchivesId (Firestore document ID)
-// Renamed from 'userLogArchives' to match the sessionLogs rename.
 export const SessionLogArchive = {
   sessionLogArchivesId: "", // Firestore doc ID — same as collection name + "Id"
   originalId: "",           // doc ID from original 'sessionLogs' collection

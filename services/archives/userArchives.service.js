@@ -132,6 +132,17 @@ export const deleteUserArchive = async (userArchivesId) => {
 // the OLD uid is re-pointed to it. Nothing is restored under the old uid, so
 // there are never two `user` docs for one email.
 //
+// WHY THE NEW uid IS THE ONE THAT SURVIVES (and the old uid is not brought back):
+// - A customer's login (Firebase Auth) is tied to a uid, and user/{uid} is keyed by that same uid. When the customer
+//   was archived, their old Auth account was permanently deleted (see the note above restoreUserArchive), so nobody
+//   can log in as the old uid any more. Their new login belongs to the NEW uid, which already has its own user doc.
+// - Restoring the old uid as the main account would leave a user doc with no matching login. An admin would then have
+//   to recreate that login by hand under the old uid and delete the new account, and until then the customer could
+//   not sign in with the account they actually use.
+// - Moving the history to the new uid avoids all of that: the old history gets re-pointed (USER_ID_LINKS below), the
+//   new account and its login are never touched, and the old archive record is deleted once everything has moved.
+//   The old uid therefore stops existing anywhere after a merge, which is the intent.
+//
 // Safe to re-run: the archive record is deleted LAST, so if a batch fails
 // midway the record is still there and running the merge again just picks up
 // whatever still points at the old uid.

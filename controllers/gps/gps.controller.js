@@ -9,7 +9,7 @@ import {
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { maybeCheckSilentTrackers } from "../../services/gps/silentTracker.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { getSessionsByCar, getActiveSessionByCar, getRecentSessionsByCarUpTo, getArchivePointCount } from "../../services/booking/bookingSession.service.js";
+import { getSessionsByCar, getActiveSessionByCar, getSessionById, getRecentSessionsByCarUpTo, getArchivePointCount } from "../../services/booking/bookingSession.service.js";
 import { getSessionArchivesByCar, getRecentSessionArchivesByCarUpTo } from "../../services/archives/bookingSessionArchives.service.js";
 import { fetchCarRowsForDate } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
@@ -111,11 +111,10 @@ export const receiveLocation = async (req, res) => {
     return res.status(500).json({ status: "error", message: "Failed to save location." });
   }
 
-  // gpsDevice's own lastLocation/updatedAt (device is known to exist here).
+  // gpsDevice's own updatedAt: when the tracker last reported (device is known to exist here).
   if (!skipWrite) {
     try {
       await db.collection("gpsDevice").doc(dev.docId).update({
-        lastLocation: { latitude: latVal, longitude: lngVal },
         updatedAt: admin.firestore.Timestamp.fromDate(recordedAt),
       });
     } catch (err) {
@@ -202,23 +201,6 @@ export const getDeviceLocation = async (req, res) => {
         lastLocation: doc.lastLocation || null,
         updatedAt:    doc.updatedAt?.toDate?.()?.toISOString?.() || null,
       });
-    }
-
-    const deviceSnap = await db.collection("gpsDevice")
-      .where("gpsDeviceID", "==", deviceId).limit(1).get();
-
-    if (!deviceSnap.empty) {
-      const doc = deviceSnap.docs[0].data();
-      const loc = doc.lastLocation;
-      if (loc && typeof loc === "object" && loc.latitude && loc.longitude) {
-        return res.json({
-          deviceId,
-          lat:          loc.latitude,
-          lng:          loc.longitude,
-          lastLocation: null,
-          updatedAt:    doc.updatedAt?.toDate?.()?.toISOString?.() || null,
-        });
-      }
     }
 
     return res.json({});
@@ -489,31 +471,83 @@ export const getCarActiveSession = async (req, res) => {
   }
 };
 
+// ── Geofence zones ──────────────────────────────────────────────────────────
+// A trip's zones live ONLY on its bookingSessions doc (geofenceZones). The car doc keeps no zones of its
+// own. The customer backend writes the first zones at booking time; this endpoint is how staff change them
+// afterwards, for an upcoming trip or the active one.
+const EDITABLE_SESSION_STATUSES = ["upcoming", "active"];
+
+// Returns an error message, or null when `zones` is a valid [{ label, lat, lng, radius(m) }] list.
+const zonesError = (zones) => {
+  if (!Array.isArray(zones)) return "zones must be an array.";
+  for (const zone of zones) {
+    if (!zone || typeof zone.lat !== "number" || typeof zone.lng !== "number" || typeof zone.radius !== "number") {
+      return "Each zone needs numeric lat, lng, and radius (meters).";
+    }
+  }
+  return null;
+};
+
+// A booking's car, found by the booking's doc ID or by its bookingID field (both are used in this codebase).
+const carIdOfBooking = async (bookingID) => {
+  if (!bookingID) return null;
+  const direct = await db.collection("bookings").doc(bookingID).get();
+  if (direct.exists) return direct.data().carID || null;
+  const snap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+  return snap.empty ? null : (snap.docs[0].data().carID || null);
+};
+
+// Which session a geofence edit applies to:
+//  - no bookingSessionID: the car's active session (what Car Tracking's Traceback tab sends).
+//  - bookingSessionID: that session, which must be upcoming or active and must belong to this car.
+//    An upcoming session has no carID yet (it is set at pickup), so its booking decides the car.
+// Returns { session } or { error: { code, message } }.
+const resolveGeofenceSession = async (carId, bookingSessionID) => {
+  if (!bookingSessionID) {
+    const session = await getActiveSessionByCar(carId);
+    if (!session) {
+      return { error: { code: 404, message: "This car has no active trip. Choose an upcoming booking to set its zones." } };
+    }
+    return { session };
+  }
+  if (typeof bookingSessionID !== "string") {
+    return { error: { code: 400, message: "bookingSessionID must be a string." } };
+  }
+  const session = await getSessionById(bookingSessionID);
+  if (!session) {
+    return { error: { code: 404, message: "Trip session not found." } };
+  }
+  if (!EDITABLE_SESSION_STATUSES.includes(session.data.status)) {
+    return { error: { code: 409, message: `This trip is ${session.data.status}, so its zones can no longer be changed.` } };
+  }
+  const sessionCarId = session.data.carID || await carIdOfBooking(session.data.bookingID);
+  if (sessionCarId !== carId) {
+    return { error: { code: 404, message: "That trip does not belong to this car." } };
+  }
+  return { session };
+};
+
 /**
  * PATCH /api/gps/:carId/geofence
- * Body: { zones: [{ label, lat, lng, radius }] } — radius in METERS, matching
- * geofence.service.js's haversine comparison (NOT km — that's the geo-test's
- * convention, not this one). Overwrites the active session's geofenceZones
- * wholesale, so the frontend always sends the full edited list (add/remove/
- * resize all happen client-side first, then one save).
+ * Body: { zones: [{ label, lat, lng, radius }], bookingSessionID? } — radius in METERS, matching
+ * geofence.service.js's haversine comparison (NOT km — that's the geo-test's convention, not this one).
+ * Overwrites the session's geofenceZones wholesale, so the frontend always sends the full edited list
+ * (add/remove/resize all happen client-side first, then one save).
+ * With bookingSessionID: that upcoming or active trip. Without it: the car's active trip.
  */
 export const updateCarGeofence = async (req, res) => {
   try {
     const { carId } = req.params;
-    const { zones } = req.body;
+    const { zones, bookingSessionID } = req.body;
 
-    if (!Array.isArray(zones)) {
-      return res.status(400).json({ status: "error", message: "zones must be an array." });
-    }
-    for (const zone of zones) {
-      if (typeof zone.lat !== "number" || typeof zone.lng !== "number" || typeof zone.radius !== "number") {
-        return res.status(400).json({ status: "error", message: "Each zone needs numeric lat, lng, and radius (meters)." });
-      }
+    const invalid = zonesError(zones);
+    if (invalid) {
+      return res.status(400).json({ status: "error", message: invalid });
     }
 
-    const session = await getActiveSessionByCar(carId);
-    if (!session) {
-      return res.status(404).json({ status: "error", message: "This car has no active trip to set a geofence on." });
+    const { session, error } = await resolveGeofenceSession(carId, bookingSessionID);
+    if (error) {
+      return res.status(error.code).json({ status: "error", message: error.message });
     }
 
     await session.ref.update({
@@ -525,68 +559,6 @@ export const updateCarGeofence = async (req, res) => {
   } catch (err) {
     console.error("[GPS] updateCarGeofence error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to update geofence." });
-  }
-};
-
-/**
- * GET /api/gps/:carId/geofence-defaults
- * A car's STANDING default geofence zones — not tied to any session, can be
- * set up anytime (no active trip required). Stored on the car's own doc
- * (cars/{carId}.defaultGeofenceZones), unlike updateCarGeofence above which
- * writes onto the active session instead. Auto-copied onto a new session's
- * own geofenceZones at pickup — see bookingSession.service.js's
- * markSessionActive — unless that session already has zones of its own.
- */
-export const getCarGeofenceDefaults = async (req, res) => {
-  try {
-    const { carId } = req.params;
-    const carDoc = await db.collection("cars").doc(carId).get();
-    if (!carDoc.exists) {
-      return res.status(404).json({ status: "error", message: "Car not found." });
-    }
-    const zones = carDoc.data().defaultGeofenceZones || [];
-    return res.json({ status: "ok", data: { zones } });
-  } catch (err) {
-    console.error("[GPS] getCarGeofenceDefaults error:", err.message);
-    return res.status(500).json({ status: "error", message: "Failed to fetch default geofence zones." });
-  }
-};
-
-/**
- * PATCH /api/gps/:carId/geofence-defaults
- * Body: { zones: [{ label, lat, lng, radius }] } — radius in METERS, same
- * convention as updateCarGeofence. Overwrites the car's default zones
- * wholesale (add/remove/resize all happen client-side first, then one save).
- */
-export const updateCarGeofenceDefaults = async (req, res) => {
-  try {
-    const { carId } = req.params;
-    const { zones } = req.body;
-
-    if (!Array.isArray(zones)) {
-      return res.status(400).json({ status: "error", message: "zones must be an array." });
-    }
-    for (const zone of zones) {
-      if (typeof zone.lat !== "number" || typeof zone.lng !== "number" || typeof zone.radius !== "number") {
-        return res.status(400).json({ status: "error", message: "Each zone needs numeric lat, lng, and radius (meters)." });
-      }
-    }
-
-    const carRef = db.collection("cars").doc(carId);
-    const carDoc = await carRef.get();
-    if (!carDoc.exists) {
-      return res.status(404).json({ status: "error", message: "Car not found." });
-    }
-
-    await carRef.update({
-      defaultGeofenceZones: zones,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return res.json({ status: "ok", message: "Default geofence zones updated.", data: { zones } });
-  } catch (err) {
-    console.error("[GPS] updateCarGeofenceDefaults error:", err.message);
-    return res.status(500).json({ status: "error", message: "Failed to update default geofence zones." });
   }
 };
 

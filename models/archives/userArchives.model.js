@@ -38,14 +38,22 @@
 export const UserArchive = {
   userArchivesId: "",  // Firestore doc ID — same as collection name + "Id"
   originalId: "",       // uid from the original 'user' collection
+  // ---- copied from the live user document (see models/user/user.model.js) ----
+  userID: "",
   createdAt: null,
+  updatedAt: null,
   email: "",
   isVerified: false,
+  isFlagged: false,
   phone: "",
   profileImage: "",
   roleID: "",
-  status: "",           // whatever it was at time of deletion, e.g. "active" | "suspended"
+  status: "",           // whatever it was at time of deletion: "locked" | "unlocked"
   username: "",
+  referralCode: null,
+  termsVersionID: null,
+  termsAcceptedAt: null,
+  // ---- bookkeeping ----
   archivedAt: null,
   archivedBy: "",
   restoredAt: null,

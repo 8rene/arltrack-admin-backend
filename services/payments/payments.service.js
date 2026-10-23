@@ -1090,7 +1090,6 @@ export const notifyBalanceDue = async (bookingID, notifiedBy) => {
 
   await doc.ref.update({
     balanceReminderAt: admin.firestore.FieldValue.serverTimestamp(),
-    balanceReminderBy: notifiedBy || null,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 

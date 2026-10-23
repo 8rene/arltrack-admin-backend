@@ -13,7 +13,7 @@ const authLimit = (keyPrefix, max) => rateLimit({ windowMs: 10 * 60 * 1000, max,
 export const registerAuthRoutes = (app) => {
   app.post("/api/auth/login", authLimit("admin-login", 20), login);
 
-  // Closes the userLogs entry created at login (logoutDateTime +
+  // Closes the sessionLogs entry created at login (logoutDateTime +
   // sessionDuration) and writes a matching audit log entry. Requires a
   // valid token — if the token already expired, this will 401 and the
   // frontend just clears local storage anyway (see AuthContext.logout()).

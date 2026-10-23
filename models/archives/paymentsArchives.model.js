@@ -55,6 +55,7 @@ export const PaymentsArchive = {
   depositSettled: 0,       // pesos of the deposit used to pay penalties
   depositReturned: 0,      // pesos handed back to the customer
   depositSettledAt: null,  // when the deposit stopped being Held
+  balanceReminderAt: null, // see payment.model.js: last "pay the balance" reminder (the 6-hour cooldown)
   createdAt: null,
   updatedAt: null,
 };

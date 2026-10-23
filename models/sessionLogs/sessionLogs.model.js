@@ -1,29 +1,22 @@
-// Matches the 'transactionLogArchives' collection in Firestore
-// Primary key: transactionLogArchivesId (Firestore document ID)
-export const TransactionLogArchive = {
-  transactionLogArchivesId: "", // Firestore doc ID — same as collection name + "Id"
-  originalId: "",               // doc ID from original 'transactionLogs' collection
-  transactionLogsID: "",
-  bookingID: "",
-  paymentID: "",                // FK -> payments (new — lets an archived entry still be traced back)
-  refundRequestID: null,        // FK -> refundRequests, only set when type === "Refund" via that flow
-  userID: "",
-  type: "",                     // "Payment" | "Refund" | "Deposit" | "Discount"
-  amount: 0,
-  status: "",                   // "Success" | "Failed" | "Pending" | "Refunded" | "Rejected"
-  paymentMethod: "",
-  referenceNumber: "",
-  description: "",              // short free-text context (new)
-  performedBy: null,            // admin userID if staff-triggered; null if customer/webhook-triggered (new)
-  createdAt: null,
-  archivedAt: null,
-  archivedBy: "",
-  // Restore deletes this doc entirely (see restoreTransactionLogArchive in
-  // services/archives/transactionLogArchives.service.js) rather than
-  // marking it. restoredAt can still show up here though, inherited from
-  // the live transaction log doc if it's ever archived again after being
-  // restored. restoredBy was previously written directly to this doc on
-  // restore but that write path no longer exists, so it's been removed
-  // from this model.
-  restoredAt: null,
+// sessionLogs/{sessionLogsID}
+//
+// One row per login attempt, from BOTH apps: a successful login opens a row that is closed on logout; a blocked login
+// (locked / inactive account) writes a standalone row that never opens a session. Renamed from the old userLogs
+// collection (routes: /api/sessionLogs, formerly /api/user-logs).
+//
+// Written by services/sessionLogs/sessionLogs.service.js here (platform "admin_web") and by utils/sessionLogs/
+// sessionLogs.util.js in the customer backend (platform "customer_web"). Archived to sessionLogArchives.
+export const SessionLog = {
+  sessionLogsID: "",     // Firestore doc ID
+  uID: null,             // userID that logged in; null on a blocked attempt by an unknown user
+  username: "",
+  platform: "",          // "admin_web" | "customer_web"
+  status: "",            // "active" | "logged_out" | "blocked"
+  closedReason: null,    // "manual" (user logged out) | "revoked" (account locked / deleted / role changed while logged in); null while open
+  loginDateTime: null,   // server timestamp; null on a blocked attempt
+  logoutDateTime: null,  // set when the session is closed
+  sessionDuration: 0,    // seconds, set when the session is closed
+  // Blocked attempts only:
+  attemptedAt: null,
+  blockedReason: "",     // written by the admin backend on every row ("" when not blocked); the customer backend leaves it out
 };

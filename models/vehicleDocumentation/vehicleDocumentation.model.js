@@ -16,6 +16,12 @@ export const VehicleDocumentationBeforeTrip = {
   // [dynamic part fields]              // e.g. leftMirrorUrl, rightHeadlightUrl, …
   videos: [],                           // optional — see INSPECTION_MEDIA below
   extraPhotos: [],                      // optional — free pictures, see INSPECTION_MEDIA below
+  recordedAt: null,                     // when the record was saved; the latest one per booking is picked by this
+  // Set once, by "Confirm inspection" (POST /api/vehicle-docs/:phase/confirm) on the booking's latest record of this phase.
+  // Missing = not confirmed yet; a second confirm is refused. Shape:
+  //   { at: Timestamp, by: staff userID, damagedPartCount: parts flagged at that moment,
+  //     notifiedTo: "driver" | "customer" -- who got the "inspection confirmed" notification (absent if nobody) }
+  inspectionConfirmed: null,
   createdAt: null,
   updatedAt: null,
 };
@@ -33,6 +39,12 @@ export const VehicleDocumentationAfterTrip = {
   // [dynamic part fields]             // e.g. leftMirrorUrl, rightHeadlightUrl, …
   videos: [],                          // optional — see INSPECTION_MEDIA below
   extraPhotos: [],                     // optional — free pictures, see INSPECTION_MEDIA below
+  recordedAt: null,                    // when the record was saved; the latest one per booking is picked by this
+  // Set once, by "Confirm inspection" (POST /api/vehicle-docs/:phase/confirm) on the booking's latest record of this phase.
+  // Missing = not confirmed yet; a second confirm is refused. Shape:
+  //   { at: Timestamp, by: staff userID, damagedPartCount: parts flagged at that moment,
+  //     notifiedTo: "driver" | "customer" -- who got the "inspection confirmed" notification (absent if nobody) }
+  inspectionConfirmed: null,
   createdAt: null,
   updatedAt: null,
 };

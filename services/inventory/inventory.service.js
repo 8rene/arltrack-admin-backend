@@ -65,11 +65,10 @@ export const adminUpdateHistoryPartStatus = async ({ tripPhase, bookingID, carID
   if (isNewRecord) {
     await ref.set({
       bookingID, carID, damageParts, inventoryOverallStatus,
-      recordedAt: now, lastEditedAt: now, lastEditedBy: editedBy || null,
-      createdByAdmin: true, // this record didn't come from the driver app — flags where it came from
+      recordedAt: now,
     });
   } else {
-    await ref.update({ damageParts, inventoryOverallStatus, lastEditedAt: now, lastEditedBy: editedBy || null });
+    await ref.update({ damageParts, inventoryOverallStatus });
   }
 
   await createAuditLog({

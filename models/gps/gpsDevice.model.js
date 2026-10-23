@@ -16,7 +16,4 @@ export const GpsDevice = {
   carID:       "",     // FK -> cars/{id}; "" when unassigned
   createdAt:   null,   // Firestore Timestamp (server time)
   updatedAt:   null,   // Firestore Timestamp: last edit/assign/unassign, and refreshed from the tracker's GNSS time on pings
-
-  // Written by the ping handler (not on create), so it is missing until the device first reports:
-  // lastLocation: { latitude, longitude }   // numbers; a copy of the last persisted position
 };

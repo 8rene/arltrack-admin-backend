@@ -6,7 +6,7 @@
 // anything is written here. A parked tracker re-sending the same fix is not written again.
 //
 // Related: gpsDevice/{id} is the registered tracker (which car it is on) and links here through gpsDeviceID.
-// A tracker's own gpsDevice doc also keeps a lastLocation / updatedAt copy.
+// A tracker's own gpsDevice doc also keeps an updatedAt copy (the time of its last ping).
 //
 // Plain shape only (same convention as models/booking/booking.model.js) --
 // all reads/writes live in controllers/gps/gps.controller.js, and the doc-id / list caching is in

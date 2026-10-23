@@ -56,13 +56,12 @@ export const adminReplaceHistoryPhoto = async ({ tripPhase, bookingID, carID, fi
     previousUrl = null;
     await ref.set({
       bookingID, carID, [fieldKey]: newUrl,
-      recordedAt: now, lastEditedAt: now, lastEditedBy: editedBy || null,
-      createdByAdmin: true,
+      recordedAt: now,
     });
   } else {
     ref = existingSnap.docs[0].ref;
     previousUrl = existingSnap.docs[0].data()[fieldKey] || null;
-    await ref.update({ [fieldKey]: newUrl, lastEditedAt: now, lastEditedBy: editedBy || null });
+    await ref.update({ [fieldKey]: newUrl });
   }
 
   await createAuditLog({

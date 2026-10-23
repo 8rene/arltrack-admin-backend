@@ -11,6 +11,9 @@ export const Booking = {
   serviceFee: 0,
   status: "",         // "to pay" (created, deposit not cleared yet; becomes "upcoming" once it is) | "upcoming" | "ongoing" | "completed" | "cancelled" | "cancellation_request" (shown while a request is pending) | "stolen"
   modeOfDriving: "",  // "With Chauffeur" | "Self Drive" — set at creation by the customer backend
+  serviceType: "",     // free-text label the customer picked (or typed for "Others"). Admin does not read it today: it shows serviceTypeID's name
+  serviceTypeID: null, // FK -> serviceType collection; admin resolves the display name from it. null for "Others"
+  pickupAt: null,      // exact pickup INSTANT (Manila, UTC+8), written by the customer backend; the refund window and no-show check measure from it (resolvePickupAt)
   hasDevice: false,
   isReviewed: false,
   userRating: null,

@@ -26,6 +26,9 @@ export const BookingArchive = {
   serviceFee: 0,
   status: "",              // "to pay" | "upcoming" | "ongoing" | "completed" | "cancelled" | "cancellation_request" | "stolen"
   modeOfDriving: "",       // "With Chauffeur" | "Self Drive"
+  serviceType: "",         // free-text label the customer picked (or typed for "Others")
+  serviceTypeID: null,     // FK -> serviceType; null for "Others"
+  pickupAt: null,          // exact pickup instant (Manila, UTC+8), written by the customer backend
   hasDevice: false,
   isReviewed: false,
   userRating: null,

@@ -32,6 +32,13 @@ export const BookingSession = {
   carID:              "",
   pickupLocation:      null, // { address, lat, lng }
   dropoffLocation:     null, // { address, lat, lng }
+  // [{ label, lat, lng, radius }] — radius in METERS. The ONLY place a trip's zones are stored: the car doc keeps
+  // none. Written by the CUSTOMER backend at booking ([Pickup, <destination>, ...extra stops], one per point that has
+  // coordinates; pickup coordinates are required, so a new session always has at least Pickup). Staff edit them
+  // afterwards from Car Tracking > Booking Information, for an upcoming or an active trip
+  // (PATCH /api/gps/:carId/geofence with this doc's bookingSessionID, which overwrites the whole list), and
+  // updateSessionDestination moves the destination zone when a booking's destination changes.
+  // Read by livePing.service.js to raise geofence alerts. Older sessions may be [].
   geofenceZones:       [],
   geofenceAlerts:      [],
   codingAlerts:        [],
