@@ -402,11 +402,10 @@ export const getAllBookings = async (statusFilter) => {
       driverPhone:      b.driverID ? (driverMap[b.driverID]?.phone || "—") : null,
       serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
       // T&C the customer agreed to. termsVersionID + termsAcceptedAt are already on `b`.
-      // termsViewID is what /terms?version=<id> opens: the termsVersions doc ID, or (for bookings
-      // from before the switch) the old termsHash. termsVersionNumber is the readable 1.00 / 1.01.
-      termsViewID:        b.termsVersionID || b.termsHash || null,
-      termsVersionNumber: b.termsVersionID ? (termsMap[b.termsVersionID] ?? null) : (b.termsVersion ?? null),
-      termsLegacy:        !b.termsVersionID && !!b.termsHash,
+      // termsViewID is what /terms?version=<id> opens: the termsVersions doc ID.
+      // termsVersionNumber is the readable 1.00 / 1.01.
+      termsViewID:        b.termsVersionID || null,
+      termsVersionNumber: b.termsVersionID ? (termsMap[b.termsVersionID] ?? null) : null,
       hasHistory:       histInfo.hasHistory,
       bookingSessionID: histInfo.bookingSessionID,
       lastArchivedAt:   histInfo.lastArchivedAt,
