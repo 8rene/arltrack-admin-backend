@@ -16,4 +16,6 @@ export const DriverAssignment = {
   status:       "",  // "assigned" | "unassigned" | "completed"
   assignedAt:   null,
   assignedBy:   "",  // username/uid of the Owner/Admin/Supervisor who assigned it
+  enRouteAt:    null, // set when the assigned driver taps "On my way" (heading to the customer's pickup); absent until then.
+                      // Removed when the booking is reassigned to a different driver. Written by markEnRoute().
 };

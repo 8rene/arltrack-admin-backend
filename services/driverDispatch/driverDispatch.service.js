@@ -13,7 +13,7 @@ import { getTermsVersion } from "../terms/terms.service.js";
 import {
   ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getCompletedAssignment,
   getAssignmentsForDriver, getBookingsByKeys, createAssignment, endActiveAssignment,
-  legacyDriverFieldsPatch,
+  legacyDriverFieldsPatch, getActiveAssignment, markEnRoute,
 } from "../driverAssignments/driverAssignments.service.js";
 import {
   OVERRIDE_REASON_MIN_LENGTH, effectiveEnd, evaluateDriverSchedule, getDriverBufferMinutes,
@@ -269,6 +269,8 @@ const getDriverBookings = async (driverID, statuses) => {
   // booking would come back with no driver and be filtered out below -- which emptied the driver's History tab.
   // A finished trip still belongs to the driver whose own (completed) row it is, so keep that link.
   const rowByKey = new Map(assignments.map((a) => [a.bookingID, a]));
+  // enRouteAt lives on the assignment row, not the booking.
+  rows.forEach((b) => { b.enRouteAt = rowByKey.get(bookingKeyOf(b.id, b))?.enRouteAt || null; });
   rows.forEach((b) => {
     if (b.driverID) return;
     const a = rowByKey.get(bookingKeyOf(b.id, b));
@@ -617,7 +619,7 @@ export const getMyTripTerms = async (bookingDocID, driverID) => {
 //
 // NOT Start Pickup: Start Pickup means the customer has already been received
 // (booking -> ongoing, trip tracking starts). This is the step before it. It
-// stamps booking.enRouteAt, which (1) tells the customer's app the driver is
+// stamps enRouteAt on the driver's assignment row, which (1) tells the customer's app the driver is
 // coming (notification -> the temporary arrival page) and (2) opens the short
 // window in which the customer may see the car's position and plate number.
 // The window closes by itself at Start Pickup (the customer app only serves it
@@ -641,7 +643,8 @@ export const driverOnMyWay = async (bookingDocID, driverID) => {
   if (booking.modeOfDriving !== "With Chauffeur") {
     throw driverErr(400, "This booking is not a chauffeur booking.");
   }
-  if (booking.enRouteAt) return { id: bookingDocID, alreadyOnTheWay: true };
+  const current = await getActiveAssignment(bookingKeyOf(bookingDocID, booking));
+  if (current?.enRouteAt) return { id: bookingDocID, alreadyOnTheWay: true };
 
   // Same readiness gate as Start Pickup (payment settled + before-trip inspection complete).
   const docKeys = [...new Set([booking.bookingID, bookingDocID].filter(Boolean))];
@@ -651,18 +654,9 @@ export const driverOnMyWay = async (bookingDocID, driverID) => {
   if (!checklist.complete) throw driverErr(400, "The vehicle inspection must be complete before you head out.");
 
   const firstName = await firstNameOf(driverID);
-  const ref = db.collection("bookings").doc(bookingDocID);
-  let alreadyOnTheWay = false;
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (snap.data()?.enRouteAt) { alreadyOnTheWay = true; return; } // two quick taps land as one
-    tx.update(ref, {
-      enRouteAt:              admin.firestore.Timestamp.now(),
-      enRouteDriverID:        driverID,
-      enRouteDriverFirstName: firstName,
-    });
-  });
-  if (alreadyOnTheWay) return { id: bookingDocID, alreadyOnTheWay: true };
+  const stamped = await markEnRoute(bookingKeyOf(bookingDocID, booking), driverID); // two quick taps land as one
+  if (!stamped) throw driverErr(403, "This booking is not assigned to you.");
+  if (stamped.alreadyOnTheWay) return { id: bookingDocID, alreadyOnTheWay: true };
 
   if (booking.userID) {
     try {

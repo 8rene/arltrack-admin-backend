@@ -232,6 +232,7 @@ export const createAssignment = async ({ bookingKey, driverID, assignedBy, booki
         status:     ASSIGNMENT_STATUS.ASSIGNED,
         assignedAt: serverNow(),
         assignedBy: assignedBy || "admin",
+        enRouteAt:  admin.firestore.FieldValue.delete(), // a new driver has not headed out yet
       });
       result = { id: primary.id, bookingID: bookingKey, driverID };
     } else {
@@ -275,6 +276,28 @@ export const endActiveAssignment = async (
     active.forEach((d) => t.update(d.ref, { status }));   // the row stays (one per booking); no ended-at / ended-by
     if (bookingRef && bookingPatch) t.update(bookingRef, bookingPatch);
     return active.length ? shape(active[0]) : null;
+  });
+};
+
+/**
+ * Stamps enRouteAt on the booking's current assignment: the driver tapped "On my way". Runs in one transaction
+ * so two quick taps land as one, and only the CURRENT driver can stamp it.
+ * Returns { alreadyOnTheWay: true } when it was already stamped, or null when `driverID` is not the booking's
+ * current driver.
+ */
+export const markEnRoute = async (bookingKey, driverID) => {
+  if (!bookingKey || !driverID) return null;
+  const activeQuery = db.collection(COL)
+    .where("bookingID", "==", bookingKey)
+    .where("status", "==", ASSIGNMENT_STATUS.ASSIGNED);
+
+  return db.runTransaction(async (t) => {
+    const docs = (await t.get(activeQuery)).docs;
+    const primary = pickPrimary(docs);
+    if (!primary || primary.data().driverID !== driverID) return null;
+    if (primary.data().enRouteAt) return { alreadyOnTheWay: true };
+    t.update(primary.ref, { enRouteAt: admin.firestore.Timestamp.now() });
+    return { alreadyOnTheWay: false };
   });
 };
 

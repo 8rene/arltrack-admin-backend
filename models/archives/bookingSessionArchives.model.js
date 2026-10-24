@@ -19,6 +19,13 @@ export const BookingSessionArchive = {
   startedAt: null,               // ACTUAL pickup moment (replaces pickupTime/returnTime/activatedAt)
   startedAtSource: null,         // only set on sessions backfilled by the migration script
   droppedOffTime: null,          // the moment the vehicle was physically back on the lot (null if nobody tapped "Dropped Off")
+  // Live-tracking bookkeeping, copied as-is with the rest of the session (the archive spreads every field).
+  // Full descriptions: models/booking/bookingSession.model.js
+  stolenAt: null,                // when the car was flagged stolen (a marker, not an end -- a stolen car keeps pinging)
+  geofenceFlipCount: 0,
+  lastPingReceivedAt: null,
+  silentAlertedAt: null,
+  needsFinalFlush: null,         // still true here only if the final history file was never saved before archiving
   pointCount: null,              // number of GPS points in the flushed trail, set together with archiveUrl
   currentPosition: null,
   archiveUrl: null,              // Storage URL, if this session was ever flushed before deletion

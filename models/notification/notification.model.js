@@ -28,6 +28,9 @@ export const Notification = {
   //   "refund_approved" | "refund_rejected" | "refund_failed" | "refund_completed" |
   //   "deposit_return_processing" | "booking_cancelled" |
   //   "PenaltyConfirmed" | "PenaltyWaived" | "PenaltyVoided"   (penalty customer notices keep their old PascalCase names)
+  //   Driver / customer / staff trip notices added to this list:
+  //   "driver_assigned" | "driver_unassigned" | "driver_en_route" | "balance_reminder" | "maintenance_overdue"
+  //   (type values are snake_case by convention; only the penalty notices above are PascalCase)
   //   (booking_cancelled: one to the assigned driver, and one to every other Owner/Admin/Supervisor when an admin
   //   cancels a booking; see services/refundRequest/refundRequest.service.js)
   //   (refund_failed / refund_completed: the customer's security deposit and/or discount credit return was delayed /
