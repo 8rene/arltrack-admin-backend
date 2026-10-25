@@ -28,7 +28,6 @@ export const BookingSessionArchive = {
   stolenAt: null,                // when the car was flagged stolen (a marker, not an end -- a stolen car keeps pinging)
   geofenceFlipCount: 0,
   lastPingReceivedAt: null,
-  silentAlertedAt: null,
   needsFinalFlush: null,         // still true here only if the final history file was never saved before archiving
   pointCount: null,              // GPS points in the flushed trail. Cleared on every history save and recounted lazily, so it can be absent
   currentPosition: null,

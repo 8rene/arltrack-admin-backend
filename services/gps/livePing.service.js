@@ -56,17 +56,10 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
   const updates = {
     currentPosition: { lat, lng, date: now.toISOString() },
     // Server-side "last heard from the tracker" — unlike currentPosition.date (tracker time, can be an old
-    // replayed fix), this is what the silent-tracker check looks at. Same write, no extra cost.
+    // replayed fix). Same write, no extra cost.
     lastPingReceivedAt: receivedAt.toISOString(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
-
-  // The tracker is talking again: clear the "tracker silent" flag and its bell entry.
-  if (data.silentAlertedAt) {
-    updates.silentAlertedAt = admin.firestore.FieldValue.delete();
-    resolveNotification("tracker_silent", carID)
-      .catch((err) => console.error("[NOTIF] tracker_silent resolve failed:", err.message));
-  }
 
   // ── Geofence check ──────────────────────────────────────────────
   const geofenceResult = checkGeofence(lat, lng, data.geofenceZones || []);
@@ -74,7 +67,7 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
   const wasBreached = lastGeofenceAlert?.type === "breach";
   // Marked dropped off = the customer is released. The trip stays open (the car may still be driven to
   // maintenance and keeps being recorded), but geofence alerts are the customer's, so they stop here.
-  // Coding-restriction and silent-tracker alerts keep going: a coding fine is yours whoever is driving.
+  // Coding-restriction alerts keep going: a coding fine is yours whoever is driving.
   const droppedOff = !!data.droppedOffTime;
   // Two pings in a row must disagree with the logged state before it changes (see geofence.service.js),
   // so a single bad fix or a car on a zone edge can't raise or clear an alert. The running count lives on
@@ -142,7 +135,7 @@ export const processLivePing = async (carID, lat, lng, speed = 0, offline = fals
       // digits }), so history still shows what applied after rules are edited.
       // Omitted (not undefined — Firestore rejects that) for older callers.
       ...(codingResult.rule ? { rule: codingResult.rule } : {}),
-      // Which plate this applied to, masked ("P*****2"): the rule's digits alone don't say, and the full plate
+      // Which plate this applied to, masked ("AB****3"): the rule's digits alone don't say, and the full plate
       // must not end up in the public history file. A plate corrected later can't change what was recorded.
       ...(maskPlate(plateNumber) ? { plate: maskPlate(plateNumber) } : {}),
       // Coding keeps being recorded after drop-off (the fine is yours whoever drives); this tags those entries.

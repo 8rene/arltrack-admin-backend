@@ -19,7 +19,7 @@
 export const Notification = {
   type: "",
   //   Staff-facing (fan-out to Owner/Admin/Supervisor, or Owners only):
-  //   "cancellation_request" | "new_user" | "geofence_alert" | "coding_alert" | "tracker_silent" |
+  //   "cancellation_request" | "new_user" | "geofence_alert" | "coding_alert" |
   //   "pickup_overdue" | "return_overdue" | "refund_due" | "refund_request" | "license_expiring" |
   //   "license_expired" | "inspection_pickup_needed" | "inspection_return_needed" | "id_resubmit_request" |
   //   "discount_applied" | "penalty_created" | "penalty_review" | "maintenance_created" | "booking_cancelled"

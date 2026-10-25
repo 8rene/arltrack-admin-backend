@@ -7,7 +7,6 @@ import {
   shouldSkipLocationWrite, markLocationWritten,
 } from "../../services/gps/gpsLookupCache.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
-import { maybeCheckSilentTrackers } from "../../services/gps/silentTracker.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getBookingCompletedAt } from "../../services/booking/booking.service.js";
 import { getHolidaysBetween } from "../../services/gps/coding.service.js";
@@ -139,10 +138,6 @@ export const receiveLocation = async (req, res) => {
     );
   }
 
-  // Any ping is a chance to sweep for trackers that have gone quiet (throttled to once per 5 minutes,
-  // never throws). See silentTracker.service.js for why this isn't a cron job.
-  maybeCheckSilentTrackers().catch(() => {});
-
   // ── gpsLocations: the doc the live map reads ─────────────────────────────
   if (!skipWrite) {
     try {
@@ -246,9 +241,6 @@ export const getAllDeviceLocations = async (req, res) => {
       })
       .filter(Boolean);
     });
-
-    // The Live map polls this endpoint — a cheap, throttled moment to run the silent-tracker sweep too.
-    await maybeCheckSilentTrackers();
 
     return res.json({ status: "ok", data });
   } catch (err) {
@@ -720,6 +712,10 @@ export const getCarHistory = async (req, res) => {
           status:    data.status || null,
           startedAt:        sessionStartedAt(data),
           endedAt:          sessionEndedAt(data), // null while still going
+          // Shown on the History list rows so a trip can be told apart without opening its file. Both are
+          // already on the session document, so this costs no extra read.
+          droppedOffAt:     toIso(data.droppedOffTime),
+          stolenAt:         toIso(data.stolenAt),
           archiveUrl:       data.archiveUrl,
           lastArchivedAt:   data.lastArchivedAt || null,
           pointCount:       await getArchivePointCount(session),

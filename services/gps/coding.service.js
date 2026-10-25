@@ -296,12 +296,12 @@ export async function resolveCodingRestriction(plateNumber, lat, lng, atInstant 
 
 /**
  * A plate with the middle hidden, for records that outlive the trip (and for the public history file):
- * first character, one * per hidden character, last character -- "PAB1232" -> "P*****2". The last digit is what
- * number coding is decided by, so the record still shows which plate ending the rule applied to. null if the
- * plate is unknown or too short to mask.
+ * first two characters, one * per hidden character, last character -- "ABC1233" -> "AB****3". The last digit is
+ * what number coding is decided by, so the record still shows which plate ending the rule applied to. null if the
+ * plate is unknown or too short (under 4 characters) to hide anything meaningful.
  */
 export const maskPlate = (plate) => {
   const p = String(plate || "").replace(/[\s-]/g, "");
-  if (p.length < 2) return null;
-  return p[0] + "*".repeat(Math.max(p.length - 2, 1)) + p[p.length - 1];
+  if (p.length < 4) return null;
+  return p.slice(0, 2) + "*".repeat(p.length - 3) + p[p.length - 1];
 };
