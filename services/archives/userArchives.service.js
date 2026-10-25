@@ -98,29 +98,43 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
 // This is the point of no return for a deleted account: deletes the
 // userArchives record itself, plus the live userDetails/userAddress/
 // userDocument docs that were deliberately left untouched at soft-delete
-// time (see deleteUser()). Nothing archives them first — once this runs,
-// that data is genuinely gone.
+// time (see deleteUser()), and the user's editRequests / idResubmitRequests
+// (deleteUser() only rejects the pending ones; they are deleted here).
+// Nothing archives them first — once this runs, that data is genuinely gone.
 //
-// Storage files (license photo, ID photo, ID selfie, profile picture) are
-// deleted LAST, only after the database records are gone, so a failed run can
-// be repeated. A file that cannot be deleted is counted in failedFiles and
-// never blocks the rest. Only files of THIS bucket are touched.
+// Storage files (license photo, ID photo, ID selfie, the photos on ID
+// resubmit requests, profile picture) are deleted only after the database
+// records that point at them are gone, and the archive record goes last, so a
+// failed run can be repeated. A file that cannot be deleted is counted in
+// failedFiles and never blocks the rest. Only files of THIS bucket are touched.
 //
 // Merge safety: mergeUserArchive() re-points the old account's profile docs to
 // the new uid and deletes the archive record, so a merged account never reaches
 // this function. Profile docs are looked up by the archived uid only, so they
 // can never include the surviving account's docs. As a second guard, any file
 // still referenced by another live record is skipped (see urlStillInUse).
-// true when a live record other than the ones being purged still points at this file
-const urlStillInUse = async (url, excludePaths, originalId) => {
-  const checks = [
-    db.collection("user").where("profileImage", "==", url).get(),
-    db.collection("userDocument").where("documentImageUrl", "==", url).get(),
-  ];
-  const snaps = await Promise.all(checks);
-  return snaps.some((snap) =>
-    snap.docs.some((d) => !excludePaths.has(d.ref.path) && d.id !== originalId)
-  );
+// The requests this user submitted (profile edits, new license / ID photos). A merge re-points them to the new account,
+// so only an archive that is being permanently deleted ever gets here.
+const findLiveRequests = async (userID) => {
+  if (!userID) return { edits: [], ids: [] };
+  const [edits, ids] = await Promise.all([
+    db.collection("editRequests").where("userID", "==", userID).get(),
+    db.collection("idResubmitRequests").where("userID", "==", userID).get(),
+  ]);
+  return { edits: edits.docs, ids: ids.docs };
+};
+
+// Places a Storage file of a user can still be referenced from.
+const FILE_REFERENCES = [
+  ["user", "profileImage"],
+  ["userDocument", "documentImageUrl"], ["userDocument", "driverLicenseUrl"], ["userDocument", "selfieWithIdUrl"],
+  ["idResubmitRequests", "newLicenseUrl"], ["idResubmitRequests", "newDocumentUrl"],
+];
+
+// true when a record that is NOT being purged still points at this file
+const urlStillInUse = async (url, purgedPaths) => {
+  const snaps = await Promise.all(FILE_REFERENCES.map(([col, field]) => db.collection(col).where(field, "==", url).get()));
+  return snaps.some((snap) => snap.docs.some((d) => !purgedPaths.has(d.ref.path)));
 };
 
 export const deleteUserArchive = async (userArchivesId) => {
@@ -134,38 +148,54 @@ export const deleteUserArchive = async (userArchivesId) => {
   const detailsDocs  = await findLiveUserDetails(originalId);
   const addressDocs  = await findLiveUserAddress(originalId);
   const documentDocs = await findLiveUserDocument(originalId);
+  const { edits: editDocs, ids: idRequestDocs } = await findLiveRequests(originalId);
 
-  // Every Storage URL inside the records that are about to go: the archived
-  // user copy (profileImage) and the profile docs (license / ID photo, selfie).
-  const candidateUrls = new Set();
-  collectStorageUrls(data, candidateUrls);
-  [...detailsDocs, ...addressDocs, ...documentDocs].forEach((d) => collectStorageUrls(d.data(), candidateUrls));
+  const purgeDocs = [...detailsDocs, ...addressDocs, ...documentDocs, ...editDocs, ...idRequestDocs];
+  const purgedPaths = new Set([archiveRef.path, ...purgeDocs.map((d) => d.ref.path)]);
 
-  const batch = db.batch();
-  batch.delete(archiveRef);
-  for (const d of detailsDocs)  batch.delete(d.ref);
-  for (const d of addressDocs)  batch.delete(d.ref);
-  for (const d of documentDocs) batch.delete(d.ref);
-  await batch.commit();
-
-  // Files last, and only the ones nothing else still uses.
-  const purgedPaths = new Set([archiveRef.path, ...[...detailsDocs, ...addressDocs, ...documentDocs].map((d) => d.ref.path)]);
-  const fileUrls = [];
-  for (const url of candidateUrls) {
-    try {
-      if (!(await urlStillInUse(url, purgedPaths, originalId))) fileUrls.push(url);
-    } catch (err) {
-      console.error("[USER ARCHIVE] could not check file usage, keeping file:", err.message);
+  let deletedFiles = 0;
+  let failedFiles = 0;
+  // Deletes the files in `urls` that nothing outside the purge still uses. A failure never blocks the rest.
+  const removeFiles = async (urls) => {
+    const keep = [];
+    for (const url of urls) {
+      try {
+        if (!(await urlStillInUse(url, purgedPaths))) keep.push(url);
+      } catch (err) {
+        console.error("[USER ARCHIVE] could not check file usage, keeping file:", err.message);
+      }
     }
+    if (!keep.length) return;
+    const r = await deleteStorageFiles(keep);
+    deletedFiles += r.deleted;
+    failedFiles += r.failed;
+  };
+
+  // Records go in chunks (a batch takes at most 500 writes); each chunk's files go right after it is committed, and the
+  // archive record goes LAST. So if something fails midway the archive is still there and the same delete can be run
+  // again, and no file is ever left behind for a record that is already gone.
+  for (let i = 0; i < purgeDocs.length; i += 400) {
+    const part = purgeDocs.slice(i, i + 400);
+    const batch = db.batch();
+    part.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+
+    const urls = new Set();
+    part.forEach((d) => collectStorageUrls(d.data(), urls)); // license / ID photo, selfie, photos on ID resubmit requests
+    await removeFiles(urls);
   }
-  const files = fileUrls.length ? await deleteStorageFiles(fileUrls) : { deleted: 0, failed: 0 };
+
+  await archiveRef.delete();
+  await removeFiles(collectStorageUrls(data)); // the profile picture on the archived user copy
 
   return {
     deletedDetails:  detailsDocs.length,
     deletedAddress:  addressDocs.length,
     deletedDocument: documentDocs.length,
-    deletedFiles:    files.deleted,
-    failedFiles:     files.failed,
+    deletedEditRequests:  editDocs.length,
+    deletedIdRequests:    idRequestDocs.length,
+    deletedFiles,
+    failedFiles,
   };
 };
 

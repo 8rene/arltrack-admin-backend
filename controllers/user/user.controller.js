@@ -4,7 +4,7 @@ import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/role
 import { consumeOtp } from "../otp/otp.controller.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
-import { upsertUserDocument } from "../../services/profileRequests/profileRequests.service.js";
+import { upsertUserDocument, closePendingRequestsForUser } from "../../services/profileRequests/profileRequests.service.js";
 import { generateUniqueReferralCode } from "../../utils/referral/referral.util.js";
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
@@ -335,6 +335,14 @@ export const deleteUser = async (req, res) => {
       // Delete any staffUser doc(s) so a removed account can't still log in.
       const staffSnap = await db.collection("staffUser").where("userID", "==", uid).get();
       await Promise.all(staffSnap.docs.map((d) => d.ref.delete()));
+
+      // Pending profile-edit / ID-resubmit requests of this user would otherwise sit in the review queue for an
+      // account that is gone: reject them (nothing is deleted yet; that happens at the permanent delete). Never blocks the delete.
+      try {
+        await closePendingRequestsForUser(uid, req.user?.uid || null);
+      } catch (reqErr) {
+        console.warn("[USER] Could not close pending requests:", reqErr.message);
+      }
     }
 
     // Delete from Firebase Auth (uses UID which is the Firestore doc ID)

@@ -244,6 +244,40 @@ export const rejectRequest = async (kind, reqID, note, adminUid) => {
 };
 
 // ─────────────────────────────────────────────
+// Account deleted: every PENDING edit / ID resubmit request of that user is rejected, so it leaves the review queue
+// instead of sitting there for an account that no longer exists. Called by deleteUser() in
+// controllers/user/user.controller.js. The requester is NOT notified (the account is gone) and nothing is deleted
+// here: the requests stay until the archived user is permanently deleted (deleteUserArchive in
+// services/archives/userArchives.service.js), so a restore or merge still finds them.
+// ─────────────────────────────────────────────
+export const closePendingRequestsForUser = async (userID, closedBy) => {
+  const out = { editRequests: 0, idResubmitRequests: 0 };
+  if (!userID) return out;
+  const kinds = [
+    ["editRequests", "edit_request"],
+    ["idResubmitRequests", "id_resubmit_request"],
+  ];
+  for (const [col, notifType] of kinds) {
+    const snap = await db.collection(col).where("userID", "==", userID).where("status", "==", "pending").get();
+    for (let i = 0; i < snap.docs.length; i += 400) {
+      const batch = db.batch();
+      snap.docs.slice(i, i + 400).forEach((d) => batch.update(d.ref, {
+        status: "rejected",
+        reviewNote: "Account deleted.",
+        reviewedBy: closedBy || null,
+        reviewedAt: timestamp(),
+        updatedAt: timestamp(),
+      }));
+      await batch.commit();
+    }
+    snap.docs.forEach((d) => resolveNotification(notifType, d.id)
+      .catch((err) => console.error(`[NOTIF] Failed to resolve ${notifType}:`, err.message)));
+    out[col] = snap.size;
+  }
+  return out;
+};
+
+// ─────────────────────────────────────────────
 // Self-service: a user submitting a request about their OWN profile.
 // userID always comes from the verified token (req.user.uid) in the
 // controller, never from the request body — otherwise anyone could

@@ -43,13 +43,15 @@ export const deleteUserArchiveHandler = async (req, res) => {
     const { userArchivesId } = req.params;
     const result = await deleteUserArchive(userArchivesId);
     const fileNote = result.deletedFiles > 0 ? ` ${result.deletedFiles} stored file(s) removed from Storage.` : "";
+    const reqCount = (result.deletedEditRequests || 0) + (result.deletedIdRequests || 0);
+    const reqNote = reqCount > 0 ? ` ${reqCount} profile request(s) removed.` : "";
     const failNote = result.failedFiles > 0 ? ` ${result.failedFiles} file(s) could not be removed.` : "";
     createAuditLog({
       action: "delete",
-      description: `Permanently deleted archived user ${userArchivesId}.${fileNote}${failNote}`,
+      description: `Permanently deleted archived user ${userArchivesId}.${reqNote}${fileNote}${failNote}`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[USER ARCHIVE] Failed to write audit log:", err));
-    return res.status(200).json({ success: true, message: `Archived user permanently deleted.${fileNote}${failNote}`, data: result });
+    return res.status(200).json({ success: true, message: `Archived user permanently deleted.${reqNote}${fileNote}${failNote}`, data: result });
   } catch (error) {
     console.error("[USER ARCHIVE] delete error:", error);
     return res.status(400).json({ success: false, message: error.message });

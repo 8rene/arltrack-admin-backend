@@ -7,7 +7,8 @@
 //
 // Only the fields in ALLOWED_PROFILE_FIELDS (same file) can be in `changes`, so a request can never touch roleID,
 // status and similar. Approving applies every change to the collection it belongs to (applyProfileChanges).
-// userArchives.service.js deletes a user's editRequests when the account is deleted.
+// When the account is deleted, deleteUser() rejects the user's PENDING requests (closePendingRequestsForUser, reviewNote "Account deleted.");
+// the requests are deleted when the archived user is permanently deleted (deleteUserArchive in userArchives.service.js).
 export const EditRequest = {
   userID: "",          // the user whose profile changes (always taken from the verified token, never the request body)
   requestedBy: "",     // uid of whoever submitted it; same as userID. Only this person can cancel it
