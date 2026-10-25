@@ -174,7 +174,7 @@ const fetchReviews = async (bookingID) => {
 /**
  * Fetches the bookingSession document linked to a bookingID (bookingID is
  * an FK field on the doc, not the doc's own ID — see
- * models/bookingSession/bookingsession.model.js). Returns { docRef, data }
+ * models/booking/bookingSession.model.js). Returns { docRef, data }
  * or null if this booking never got a session (e.g. cancelled before any
  * tracking data existed).
  */
@@ -394,7 +394,7 @@ const archiveBookingSession = async (sessionDocID, sessionData, archivedBy = "ad
 
 /**
  * Writes a refundRequest archive document. No standalone viewer page reads
- * this collection (see models/refundArchives/refundArchives.model.js) — it
+ * this collection (see models/archives/refundArchives.model.js) — it
  * exists solely so a refund request tied to a deleted booking isn't lost.
  * Returns the new refundArchivesID.
  */

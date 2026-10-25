@@ -48,7 +48,10 @@ export const emailReceipt = async (req, res) => {
         message: `This receipt was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.` });
     }
 
-    const sent = await sendReceiptEmail({ receipt, toEmail: receipt._email });
+    // Building the email can throw too (not only the send). Treat that like a failed send so the claim is given back.
+    let sent;
+    try { sent = await sendReceiptEmail({ receipt, toEmail: receipt._email }); }
+    catch (err) { sent = { success: false, error: err.message }; }
     if (!sent.success) {
       await emailLimiter.release(key, slot.previous);
       console.error("[RECEIPT] email failed:", sent.error);
@@ -112,7 +115,10 @@ export const emailStatement = async (req, res) => {
         message: `This statement was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.` });
     }
 
-    const sent = await sendStatementEmail({ statement, toEmail: statement._email });
+    // Building the email can throw too (not only the send). Treat that like a failed send so the claim is given back.
+    let sent;
+    try { sent = await sendStatementEmail({ statement, toEmail: statement._email }); }
+    catch (err) { sent = { success: false, error: err.message }; }
     if (!sent.success) {
       await emailLimiter.release(key, slot.previous);
       console.error("[STATEMENT] email failed:", sent.error);

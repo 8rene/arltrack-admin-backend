@@ -336,7 +336,7 @@ export const removeBrand = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[FLEET] removeBrand error:", error);
-    const status = error.message === "Brand not found." ? 404 : 500;
+    const status = error.statusCode || (error.message === "Brand not found." ? 404 : 500);
     return res.status(status).json({ success: false, message: error.message });
   }
 };
@@ -378,7 +378,7 @@ export const removeModel = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[FLEET] removeModel error:", error);
-    const status = error.message === "Model not found." ? 404 : 500;
+    const status = error.statusCode || (error.message === "Model not found." ? 404 : 500);
     return res.status(status).json({ success: false, message: error.message });
   }
 };

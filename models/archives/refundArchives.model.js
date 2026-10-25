@@ -2,7 +2,7 @@
 //
 // An archive is a COPY of the refund request document, taken when its booking is deleted (see
 // services/booking/bookingDelete.service.js -- there is no standalone "delete this refund request" action), plus the
-// bookkeeping fields below. So it has every column models/refundRequest/refundRequest.model.js has -- keep the two in
+// bookkeeping fields below. So it has every column models/cancelBookings/refundRequest.model.js has -- keep the two in
 // step. A booking can have several refund requests: every one is archived. The temporary approvalLockedAt lock is
 // never copied.
 //

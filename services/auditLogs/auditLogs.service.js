@@ -74,7 +74,7 @@ export const getAuditLogsByUser = async (uid, limit = 100) => {
     }));
 };
 
-export const archiveAuditLog = async (id) => {
+export const archiveAuditLog = async (id, archivedBy = null) => {
   const logRef = db.collection("auditLogs").doc(id);
   const logDoc = await logRef.get();
 
@@ -86,6 +86,7 @@ export const archiveAuditLog = async (id) => {
     ...logData,
     originalId: id,
     archivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    archivedBy, // userID of the staff member who archived it
   });
 
   await logRef.delete();

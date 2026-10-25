@@ -39,7 +39,7 @@ export const addAuditLog = async (req, res) => {
 export const deleteAuditLog = async (req, res) => {
   try {
     const { id } = req.params;
-    await archiveAuditLog(id);
+    await archiveAuditLog(id, req.user?.uid || null);
     return res.status(200).json({ success: true, message: "Audit log archived successfully." });
   } catch (error) {
     console.error("[AUDIT LOGS] delete error:", error);

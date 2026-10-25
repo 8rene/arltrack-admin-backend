@@ -79,14 +79,13 @@ export const getSystemSettings = async () => {
     .get();
 
   if (snap.empty) {
-    const ref = await db.collection(COLLECTION).add({
+    const ref = db.collection(COLLECTION).doc();
+    await ref.set({
       ...DEFAULTS,
+      systemSettingsID: ref.id, // mirrors the doc's own ID, written in the same operation
       createdAt: timestamp(),
       updatedBy: null,
     });
-
-    // Mirror the doc's own ID onto itself, matching this app's existing convention
-    await ref.update({ systemSettingsID: ref.id });
 
     return { ...DEFAULTS, systemSettingsID: ref.id, createdAt: null, updatedBy: null };
   }
@@ -178,15 +177,14 @@ export const updateSystemSettings = async (payload, actor) => {
   // of truth for the same fee.
   const { systemSettingsID, createdAt, serviceFee: _legacyServiceFee, gatewayFee: _legacyGatewayFee, ...rest } = current;
 
-  const ref = await db.collection(COLLECTION).add({
+  const ref = db.collection(COLLECTION).doc();
+  await ref.set({
     ...rest,
     ...update,
+    systemSettingsID: ref.id, // mirrors the doc's own ID, written in the same operation
     createdAt: timestamp(),
     updatedBy: actor ? { userID: actor.userID || actor.id || null, name: actor.name || actor.username || null } : null,
   });
-
-  // Mirror the doc's own ID onto itself, matching this app's existing convention
-  await ref.update({ systemSettingsID: ref.id });
 
   const snap = await ref.get();
   return { ...DEFAULTS, ...snap.data() };

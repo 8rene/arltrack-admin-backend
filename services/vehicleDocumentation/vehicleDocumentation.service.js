@@ -283,10 +283,12 @@ export const saveVehicleDocBefore = async ({ bookingID, carID, photoFields: rawP
       updatedAt: timestamp,
     });
   } else {
-    const newRef = await db.collection("vehicleDocumentationBeforeTrip").add({
+    const newRef = db.collection("vehicleDocumentationBeforeTrip").doc();
+    docID = newRef.id;
+    await newRef.set({
       bookingID,
       carID,
-      vehicleDocumentationBeforeTripID: "", // will be back-filled below
+      vehicleDocumentationBeforeTripID: docID, // mirrors the Firestore doc ID, written in the same operation
       frontViewUrl: "",
       sideViewUrl:  "",
       backViewUrl:  "",
@@ -294,9 +296,6 @@ export const saveVehicleDocBefore = async ({ bookingID, carID, photoFields: rawP
       createdAt: timestamp,
       updatedAt: timestamp,
     });
-    docID = newRef.id;
-    // Back-fill the ID field so it mirrors the Firestore doc ID
-    await newRef.update({ vehicleDocumentationBeforeTripID: docID });
   }
 
   return { success: true, vehicleDocumentationBeforeTripID: docID };
@@ -332,19 +331,19 @@ export const saveVehicleDocAfter = async ({ bookingID, carID, photoFields: rawPh
       updatedAt: timestamp,
     });
   } else {
-    const newRef = await db.collection("vehicleDocumentationAfterTrip").add({
+    const newRef = db.collection("vehicleDocumentationAfterTrip").doc();
+    docID = newRef.id;
+    await newRef.set({
       bookingID,
       carID,
-      vehicleDocumentationAfterTripID: "", // will be back-filled below
-      frontViewUrl: "", 
+      vehicleDocumentationAfterTripID: docID, // mirrors the Firestore doc ID, written in the same operation
+      frontViewUrl: "",
       sideViewUrl:  "",
       backViewUrl:  "",
       ...photoFields,
       createdAt: timestamp,
       updatedAt: timestamp,
     });
-    docID = newRef.id;
-    await newRef.update({ vehicleDocumentationAfterTripID: docID });
   }
 
   return { success: true, vehicleDocumentationAfterTripID: docID };

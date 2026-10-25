@@ -434,14 +434,34 @@ export const addBrand = async (brandName) => {
 // ─────────────────────────────────────────────
 // BRANDS — Delete brand (also removes its models)
 // ─────────────────────────────────────────────
+// A brand or model that a car still uses must not be deleted: the car would be left pointing at nothing and show "—".
+const conflict = (message) => Object.assign(new Error(message), { statusCode: 409 });
+
+const countCarsUsing = async (field, values) => {
+  let total = 0;
+  for (let i = 0; i < values.length; i += 30) { // Firestore "in" takes at most 30 values
+    const snap = await db.collection("cars").where(field, "in", values.slice(i, i + 30)).count().get();
+    total += snap.data().count;
+  }
+  return total;
+};
+
 export const deleteBrand = async (brandID) => {
   const brandDoc = await db.collection("brand").doc(brandID).get();
   if (!brandDoc.exists) throw new Error("Brand not found.");
 
+  const modelsSnap = await db.collection("model").where("brandID", "==", brandID).get();
+
+  // Cars store both brandID and modelID, so check both: a car on one of this brand's models blocks the delete too.
+  const byBrand = await countCarsUsing("brandID", [brandID]);
+  const byModel = modelsSnap.empty ? 0 : await countCarsUsing("modelID", modelsSnap.docs.map(d => d.id));
+  const inUse = Math.max(byBrand, byModel);
+  if (inUse > 0) {
+    throw conflict(`This brand can't be deleted: ${inUse} car${inUse === 1 ? " is" : "s are"} still using it or one of its models. Change or remove ${inUse === 1 ? "that car" : "those cars"} first.`);
+  }
+
   const batch = db.batch();
   batch.delete(db.collection("brand").doc(brandID));
-
-  const modelsSnap = await db.collection("model").where("brandID", "==", brandID).get();
   modelsSnap.docs.forEach(d => batch.delete(d.ref));
 
   await batch.commit();
@@ -474,6 +494,12 @@ export const addModel = async (modelName, brandID) => {
 export const deleteModel = async (modelID) => {
   const modelDoc = await db.collection("model").doc(modelID).get();
   if (!modelDoc.exists) throw new Error("Model not found.");
+
+  const inUse = await countCarsUsing("modelID", [modelID]);
+  if (inUse > 0) {
+    throw conflict(`This model can't be deleted: ${inUse} car${inUse === 1 ? " is" : "s are"} still using it. Change or remove ${inUse === 1 ? "that car" : "those cars"} first.`);
+  }
+
   await db.collection("model").doc(modelID).delete();
   return { id: modelID, deleted: true };
 };

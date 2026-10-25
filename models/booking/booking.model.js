@@ -30,7 +30,7 @@ export const Booking = {
 
   // Who is driving is NOT stored on the booking. A chauffeur booking's current
   // driver is its "assigned" row in driverAssignments (see
-  // models/driverAssignment/driverAssignment.model.js); a booking with no such
+  // models/driverAssignments/driverAssignment.model.js); a booking with no such
   // row is still in the dispatch queue. (driverID / driverAssignedAt /
   // driverAssignedBy used to live here.)
   //

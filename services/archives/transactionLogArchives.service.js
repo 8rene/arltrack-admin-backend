@@ -21,7 +21,7 @@ export const getAllTransactionLogArchives = async () => {
   });
 
   // transactionLogArchives stores userID per the model (see
-  // models/transactionLogArchives/transactionLogArchives.model.js) but
+  // models/archives/transactionLogArchives.model.js) but
   // nothing resolved it to a name for the admin UI — add it here.
   const nameMap = await resolveUserNames(rows.map((r) => r.userID));
   return rows.map((r) => ({ ...r, userName: r.userID ? nameMap[r.userID] : null }));

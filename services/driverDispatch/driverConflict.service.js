@@ -18,7 +18,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getSystemSettings } from "../systemSettings/systemSettings.service.js";
 import {
-  ASSIGNMENT_STATUS, bookingKeyOf, getActiveAssignment, getAssignmentsForDriver, getBookingsByKeys,
+  ASSIGNMENT_STATUS, getAssignmentsForDriver, getBookingsByKeys,
 } from "../driverAssignments/driverAssignments.service.js";
 
 // ─────────────────────────────────────────────
@@ -125,30 +125,3 @@ export const describeConflict = (c, bufferMinutes) =>
   c.type === "overlap"
     ? `This driver is already assigned to booking ${c.bookingID} from ${fmtWhen(c.startDateTime)} to ${fmtWhen(c.endDateTime)}, which overlaps this trip.`
     : `This driver has booking ${c.bookingID} from ${fmtWhen(c.startDateTime)} to ${fmtWhen(c.endDateTime)}, only ${fmtGap(c.gapMinutes)} apart from this trip (at least ${fmtGap(bufferMinutes)} is needed between trips).`;
-
-/**
- * Date edit on a booking that already has a driver: refuse a change that would give that driver a
- * real overlap. A "tight" gap is allowed (it is only a warning everywhere else too). Throws an Error
- * with the reason; does nothing when the booking has no driver or is not a live chauffeur trip.
- */
-export const assertAssignedDriverFreeForNewDates = async ({ docID, bookingData, newStart, newEnd }) => {
-  if (bookingData.modeOfDriving !== "With Chauffeur") return;
-  if (!LIVE_STATUSES.includes(String(bookingData.status || "").toLowerCase())) return;
-
-  const start = toDate(newStart ?? bookingData.startDateTime);
-  const end = toDate(newEnd ?? bookingData.endDateTime);
-  if (!start || !end) return;
-
-  const assignment = await getActiveAssignment(bookingKeyOf(docID, bookingData));
-  if (!assignment?.driverID) return;
-
-  const bufferMinutes = await getDriverBufferMinutes();
-  const others = await getDriverLiveBookings(assignment.driverID);
-  const { all } = evaluateDriverSchedule(others, { start, end, bufferMs: bufferMinutes * MINUTE_MS, excludeDocID: docID });
-  const overlap = all.find((c) => c.type === "overlap");
-  if (overlap) {
-    throw new Error(
-      `${describeConflict(overlap, bufferMinutes)} Unassign or reassign the driver first, or choose different dates.`
-    );
-  }
-};

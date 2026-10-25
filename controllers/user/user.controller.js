@@ -315,6 +315,7 @@ export const deleteUser = async (req, res) => {
         ...userData,
         originalId: uid,
         archivedAt: admin.firestore.FieldValue.serverTimestamp(),
+        archivedBy: req.user?.uid || null, // userID of the staff member who deleted the account
       });
 
       // NOTE: userDetails, userAddress, and userDocument are deliberately

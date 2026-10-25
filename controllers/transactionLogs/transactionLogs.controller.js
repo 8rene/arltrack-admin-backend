@@ -16,7 +16,7 @@ export const listTransactionLogs = async (req, res) => {
 export const deleteTransactionLog = async (req, res) => {
   try {
     const { id } = req.params;
-    await archiveTransactionLog(id);
+    await archiveTransactionLog(id, req.user?.uid || null);
     return res.status(200).json({ success: true, message: "Transaction log archived successfully." });
   } catch (error) {
     console.error("[TRANSACTION LOGS] delete error:", error);

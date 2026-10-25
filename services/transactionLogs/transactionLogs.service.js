@@ -110,7 +110,7 @@ export const getAllTransactionLogs = async () => {
   });
 };
 
-export const archiveTransactionLog = async (id) => {
+export const archiveTransactionLog = async (id, archivedBy = null) => {
   const logRef = db.collection("transactionLogs").doc(id);
   const logDoc = await logRef.get();
 
@@ -122,6 +122,7 @@ export const archiveTransactionLog = async (id) => {
     ...logData,
     originalId: id,
     archivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    archivedBy, // userID of the staff member who archived it
   });
 
   await logRef.delete();

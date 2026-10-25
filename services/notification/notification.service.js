@@ -81,14 +81,14 @@ export const createNotification = async ({ type, refID, refCollection, title, me
  * Reuses createNotification()'s own per-person dedup check — nothing
  * extra to do here, each person's active/inactive state is independent.
  */
-export const notifyStaff = async ({ type, refID, refCollection, title, message, extra = {}, renotify = false }) => {
+export const notifyStaff = async ({ type, refID, refCollection, title, message, extra = {}, renotify = false, dedupeKey = null }) => {
   const staffSnap = await db.collection("user")
     .where("roleID", "in", [ROLE_IDS.OWNER, ROLE_IDS.ADMIN, ROLE_IDS.SUPERVISOR])
     .get();
 
   return Promise.all(
     staffSnap.docs.map((d) =>
-      createNotification({ type, refID, refCollection, title, message, userID: d.id, extra, renotify })
+      createNotification({ type, refID, refCollection, title, message, userID: d.id, extra, renotify, dedupeKey })
     )
   );
 };
@@ -98,14 +98,14 @@ export const notifyStaff = async ({ type, refID, refCollection, title, message, 
  * should see when somebody else did them (e.g. a Supervisor scheduling
  * maintenance), without pinging every Admin/Supervisor too.
  */
-export const notifyOwners = async ({ type, refID, refCollection, title, message, extra = {}, renotify = false }) => {
+export const notifyOwners = async ({ type, refID, refCollection, title, message, extra = {}, renotify = false, dedupeKey = null }) => {
   const ownerSnap = await db.collection("user")
     .where("roleID", "==", ROLE_IDS.OWNER)
     .get();
 
   return Promise.all(
     ownerSnap.docs.map((d) =>
-      createNotification({ type, refID, refCollection, title, message, userID: d.id, extra, renotify })
+      createNotification({ type, refID, refCollection, title, message, userID: d.id, extra, renotify, dedupeKey })
     )
   );
 };

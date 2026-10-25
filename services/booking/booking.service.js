@@ -18,7 +18,6 @@ import { getHolidaysBetween } from "../gps/coding.service.js";
 import {
   bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
 } from "../../services/driverAssignments/driverAssignments.service.js";
-import { assertAssignedDriverFreeForNewDates } from "../driverDispatch/driverConflict.service.js";
 import {
   REQUEST_STATUS, getPendingRequest, getAllPendingRequests, getRequestsByBookingKeys, resolveRequest, recordDirectCancellation,
 } from "../../services/cancellationRequests/cancellationRequests.service.js";
@@ -620,7 +619,9 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
 
   // "location" (free text) is deliberately not editable: the name always comes from a map pick (stopEdits below),
   // so the text and the geofence pin can never drift apart.
-  const allowed = ["startDateTime", "endDateTime", "notesAdmin", "notesUser", "status"];
+  // The booking's dates are not editable either: a booking is never rescheduled from the admin side, so pickupAt,
+  // startDateTime and endDateTime always stay the values the customer booked with.
+  const allowed = ["notesAdmin", "notesUser", "status"];
   const filtered = {};
   allowed.forEach((k) => {
     if (updates[k] !== undefined && !(k === "status" && !updates[k])) { // "" status = "no change"
@@ -636,16 +637,6 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
       `Cannot cancel booking ${bookingID || docID}: it is "${oldStatus}". A trip that has already started can't be cancelled -- ` +
       "reject the request instead, or drop the car off and complete the trip, then return the deposit."
     );
-  }
-
-  // ── Changing the dates of a booking that already has a driver must not give that driver a real
-  // overlap. (A tight gap is allowed, same as everywhere else it is only a warning.) A booking
-  // that is being cancelled/completed in the same edit is skipped. ──
-  if ((filtered.startDateTime !== undefined || filtered.endDateTime !== undefined)
-      && !["cancelled", "completed", "stolen"].includes(filtered.status)) {
-    await assertAssignedDriverFreeForNewDates({
-      docID, bookingData, newStart: filtered.startDateTime, newEnd: filtered.endDateTime,
-    });
   }
 
   // ── Stolen only makes sense for a trip that is out on the road: the booking must be
