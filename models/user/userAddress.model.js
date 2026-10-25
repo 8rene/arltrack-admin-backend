@@ -11,8 +11,7 @@ export const UserAddress = {
   city: "",
   province: "",
   region: "",
-  postalCode: "",
-  zipCode: "",
+  postalCode: "",  // the only postal field; the old zipCode field was merged into this one (scripts/migrateZipToPostal.js)
   village: "",
   createdAt: null,  // set only when the admin creates the document
   updatedAt: null,  // set when the admin edits it

@@ -27,9 +27,16 @@ const ALLOWED_PROFILE_FIELDS = {
   userDetails: new Set(["firstName", "middleName", "lastName", "suffix", "birthDate"]),
   userAddress: new Set([
     "street", "barangay", "municipality", "city", "province",
-    "postalCode", "village", "zipCode", "region",
+    "postalCode", "village", "region",
   ]),
 };
+
+// Fields that used to be editable but were retired. zipCode was merged into postalCode (see
+// scripts/migrateZipToPostal.js). Old pending edit requests and stale open browser tabs can still
+// send it, so it is dropped quietly instead of erroring or writing the field back onto the address.
+const RETIRED_FIELDS = new Set(["userAddress.zipCode"]);
+const dropRetiredFields = (changes) =>
+  (Array.isArray(changes) ? changes : []).filter((c) => !RETIRED_FIELDS.has(`${c?.collection}.${c?.field}`));
 
 const assertAllowedChanges = (changes) => {
   for (const c of changes) {
@@ -96,7 +103,9 @@ export const upsertUserDocument = async (userID, fields) => {
 // canEditDirectly path (Profile.jsx/Account.jsx, via the controller) can
 // call the same logic.
 // ─────────────────────────────────────────────
-export const applyProfileChanges = async (userID, changes = []) => {
+export const applyProfileChanges = async (userID, rawChanges = []) => {
+  const changes = dropRetiredFields(rawChanges);
+  if (!changes.length) return; // nothing left to write (e.g. only a retired field was sent)
   assertAllowedChanges(changes);
   const byCollection = { user: {}, userDetails: {}, userAddress: {} };
   changes.forEach((c) => {
@@ -244,47 +253,14 @@ export const rejectRequest = async (kind, reqID, note, adminUid) => {
 };
 
 // ─────────────────────────────────────────────
-// Account deleted: every PENDING edit / ID resubmit request of that user is rejected, so it leaves the review queue
-// instead of sitting there for an account that no longer exists. Called by deleteUser() in
-// controllers/user/user.controller.js. The requester is NOT notified (the account is gone) and nothing is deleted
-// here: the requests stay until the archived user is permanently deleted (deleteUserArchive in
-// services/archives/userArchives.service.js), so a restore or merge still finds them.
-// ─────────────────────────────────────────────
-export const closePendingRequestsForUser = async (userID, closedBy) => {
-  const out = { editRequests: 0, idResubmitRequests: 0 };
-  if (!userID) return out;
-  const kinds = [
-    ["editRequests", "edit_request"],
-    ["idResubmitRequests", "id_resubmit_request"],
-  ];
-  for (const [col, notifType] of kinds) {
-    const snap = await db.collection(col).where("userID", "==", userID).where("status", "==", "pending").get();
-    for (let i = 0; i < snap.docs.length; i += 400) {
-      const batch = db.batch();
-      snap.docs.slice(i, i + 400).forEach((d) => batch.update(d.ref, {
-        status: "rejected",
-        reviewNote: "Account deleted.",
-        reviewedBy: closedBy || null,
-        reviewedAt: timestamp(),
-        updatedAt: timestamp(),
-      }));
-      await batch.commit();
-    }
-    snap.docs.forEach((d) => resolveNotification(notifType, d.id)
-      .catch((err) => console.error(`[NOTIF] Failed to resolve ${notifType}:`, err.message)));
-    out[col] = snap.size;
-  }
-  return out;
-};
-
-// ─────────────────────────────────────────────
 // Self-service: a user submitting a request about their OWN profile.
 // userID always comes from the verified token (req.user.uid) in the
 // controller, never from the request body — otherwise anyone could
 // submit an edit request that claims to be from a different user.
 // ─────────────────────────────────────────────
-export const createEditRequest = async (userID, role, changes) => {
-  if (!Array.isArray(changes) || changes.length === 0) {
+export const createEditRequest = async (userID, role, rawChanges) => {
+  const changes = dropRetiredFields(rawChanges);
+  if (changes.length === 0) {
     const err = new Error("changes must be a non-empty array.");
     err.statusCode = 400;
     throw err;
