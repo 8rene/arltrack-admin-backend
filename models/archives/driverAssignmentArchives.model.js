@@ -22,4 +22,5 @@ export const DriverAssignmentArchive = {
   status: "",              // "assigned" | "unassigned" | "completed" -- as it was when the booking was deleted
   assignedAt: null,
   assignedBy: "",
+  enRouteAt: null,         // when the driver tapped "On my way"; absent if they never did (see driverAssignment.model.js)
 };
