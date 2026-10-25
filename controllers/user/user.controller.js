@@ -311,9 +311,10 @@ export const deleteUser = async (req, res) => {
       deletedUserName = userData.username || userData.email || uid;
 
       // Archive user
-      await db.collection("userArchives").add({
+      // The archive's document ID IS the user's uid (set, not add): restore puts the user back under the same ID and a retry
+      // overwrites instead of duplicating.
+      await db.collection("userArchives").doc(uid).set({
         ...userData,
-        originalId: uid,
         archivedAt: admin.firestore.FieldValue.serverTimestamp(),
         archivedBy: req.user?.uid || null, // userID of the staff member who deleted the account
       });

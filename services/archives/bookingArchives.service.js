@@ -55,6 +55,7 @@ export const getAllBookingArchives = async () => {
 
       return {
         bookingArchivesId: doc.id,
+        originalId: doc.id, // response only (the ID is no longer stored as a field)
         ...data,
         customerName: data.userID ? (nameMap[data.userID] || "—") : "—",
         amount: paymentAmount,
@@ -147,7 +148,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   if (!archiveDoc.exists) throw new Error("Archived booking not found.");
 
   const archived1 = archiveDoc.data();
-  const originalId = archived1.originalId;
+  const originalId = archiveDoc.id; // the archive's ID is the live booking's ID
   const originalData = stripArchiveMeta(archived1);
 
   const bookingID = originalData.bookingID ?? originalId;
@@ -167,7 +168,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   const sessionArchiveDoc = await findLinkedBookingSessionArchive(bookingID);
   if (paymentArchiveDoc) {
     const archived2 = paymentArchiveDoc.data();
-    const payOriginalId = archived2.originalId;
+    const payOriginalId = paymentArchiveDoc.id;
     const payOriginalData = stripArchiveMeta(archived2);
 
     const paymentActiveRef = payOriginalId
@@ -184,7 +185,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   if (sessionArchiveDoc) {
     // stripArchiveMeta, not a hand-written list: the archive stores bookingSessionArchivesID (capital D) and the old
     // list only knew the lowercase spelling, so that id was written onto the live session.
-    const sessionOriginalId = sessionArchiveDoc.data().originalId;
+    const sessionOriginalId = sessionArchiveDoc.id;
     const sessionOriginalData = stripArchiveMeta(sessionArchiveDoc.data());
 
     const sessionActiveRef = sessionOriginalId
@@ -197,7 +198,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   // ── 3. Find and restore linked reviews archives ──
   const reviewArchiveDocs = await findLinkedReviewArchives(bookingID);
   for (const reviewDoc of reviewArchiveDocs) {
-    const revOriginalId = reviewDoc.data().originalId;
+    const revOriginalId = reviewDoc.id;
     const reviewOriginalData = stripArchiveMeta(reviewDoc.data());
 
     const reviewActiveRef = revOriginalId
@@ -216,7 +217,7 @@ export const restoreBookingArchive = async (bookingArchivesId, restoredBy = "adm
   const paymentArchiveData = paymentArchiveDoc ? paymentArchiveDoc.data() : null;
   const linkedRestored = await restoreLinkedForBooking({
     bookingKeys: [bookingID, originalId],
-    paymentIDs: paymentArchiveData ? [paymentArchiveData.paymentID ?? paymentArchiveData.originalId] : [],
+    paymentIDs: paymentArchiveData ? [paymentArchiveData.paymentID ?? paymentArchiveDoc.id] : [],
   });
   const restoredMaintenance = await restoreMaintenanceArchivesForBooking({ bookingKeys: [bookingID, originalId] });
   const restoredInspection = await restoreInspectionArchiveForBooking({ bookingKeys: [bookingID, originalId] });
@@ -259,7 +260,7 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   if (!archiveDoc.exists) throw new Error("Archived booking not found.");
 
   const data = archiveDoc.data();
-  const bookingID = data.bookingID ?? data.originalId;
+  const bookingID = data.bookingID ?? archiveDoc.id;
 
   // Find linked archives
   const paymentArchiveDoc  = await findLinkedPaymentArchive(bookingID);
@@ -279,16 +280,16 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   const entryRefs          = await getEntryRefsForBooking(bookingID);
   // Bookings archived since then keep those rows in driverAssignmentArchives / cancellationRequestArchives /
   // paymentEntryArchives (and the penalty and refund archives); the live-row cleanup above covers older bookings.
-  const paymentID          = paymentArchiveDoc ? (paymentArchiveDoc.data().paymentID ?? paymentArchiveDoc.data().originalId) : null;
+  const paymentID          = paymentArchiveDoc ? (paymentArchiveDoc.data().paymentID ?? paymentArchiveDoc.id) : null;
   const linkedArchiveRefs  = await getLinkedArchiveRefsForBooking({
-    bookingKeys: [bookingID, data.originalId],
+    bookingKeys: [bookingID, archiveDoc.id],
     paymentIDs: paymentID ? [paymentID] : [],
   });
   const penaltyArchiveRefs = await getPenaltyArchiveRefsForBooking(bookingID);
   const refundArchiveRefs  = await getRefundArchiveRefsForBooking(bookingID);
-  const maintenanceArchiveRefs = await getMaintenanceArchiveRefsForBooking({ bookingKeys: [bookingID, data.originalId] });
+  const maintenanceArchiveRefs = await getMaintenanceArchiveRefsForBooking({ bookingKeys: [bookingID, archiveDoc.id] });
   // vehicle inspection archive (new) + the Storage files (photos, GPS history JSON) behind every record that goes
-  const inspectionArchiveSnaps = await getInspectionArchiveSnapsForBooking({ bookingKeys: [bookingID, data.originalId] });
+  const inspectionArchiveSnaps = await getInspectionArchiveSnapsForBooking({ bookingKeys: [bookingID, archiveDoc.id] });
   const fileUrls = inspectionFileUrls({ archiveSnaps: inspectionArchiveSnaps, liveDocs: inspectionDocs });
   if (sessionArchiveDoc?.data().archiveUrl) fileUrls.add(sessionArchiveDoc.data().archiveUrl);
 

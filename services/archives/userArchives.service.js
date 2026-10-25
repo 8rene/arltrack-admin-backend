@@ -15,6 +15,7 @@ export const getAllUserArchives = async () => {
     const data = doc.data();
     return {
       userArchivesId: doc.id,
+      originalId: doc.id, // response only (the ID is no longer stored as a field)
       ...data,
       createdAt:  toISO(data.createdAt),
       archivedAt: toISO(data.archivedAt),
@@ -65,8 +66,9 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
   const archiveDoc = await archiveRef.get();
   if (!archiveDoc.exists) throw new Error("Archived user not found.");
 
+  // The archive's document ID IS the user's uid.
+  const originalId = archiveDoc.id;
   const {
-    originalId,
     archivedAt,
     archivedBy,
     restoredAt,
@@ -127,7 +129,7 @@ export const deleteUserArchive = async (userArchivesId) => {
   if (!archiveDoc.exists) throw new Error("Archived user not found.");
 
   const data = archiveDoc.data();
-  const originalId = data.originalId;
+  const originalId = archiveDoc.id; // the archive's document ID is the user's uid
 
   const detailsDocs  = await findLiveUserDetails(originalId);
   const addressDocs  = await findLiveUserAddress(originalId);
@@ -195,12 +197,14 @@ const USER_ID_LINKS = [
   ["driverAssignments", "driverID"], ["cancellationRequests", "userID"],
   ["refundRequests", "userID"], ["penalties", "userID"], ["reviews", "userID"],
   ["payments", "userID"], ["paymentEntries", "userID"], ["paymentsArchives", "userID"],
-  ["transactionLogs", "userID"], ["sessionLogs", "userID"], ["userLogs", "userID"],
+  ["transactionLogs", "userID"], ["sessionLogs", "userID"],
   ["notifications", "userID"], ["editRequests", "userID"], ["idResubmitRequests", "userID"],
   ["auditLogs", "userID"],
   ["bookingArchives", "userID"], ["refundArchives", "userID"], ["penaltyArchives", "userID"],
   ["reviewsArchives", "userID"], ["transactionLogArchives", "userID"],
-  ["sessionLogArchives", "userID"], ["userLogArchives", "userID"], ["auditLogsArchives", "userID"],
+  ["sessionLogArchives", "userID"], ["auditLogsArchives", "userID"],
+  // rows archived with a booking: they come back with the old uid unless re-pointed too
+  ["paymentEntryArchives", "userID"], ["cancellationRequestArchives", "userID"], ["driverAssignmentArchives", "driverID"],
   ["referrals", "referrerUserID"], ["referrals", "referredUserID"],
 ];
 
@@ -219,7 +223,8 @@ const commitInChunks = async (ops) => {
 export const findMergeCandidate = async (userArchivesId) => {
   const archiveDoc = await db.collection("userArchives").doc(userArchivesId).get();
   if (!archiveDoc.exists) throw new Error("Archived user not found.");
-  const { email, originalId } = archiveDoc.data();
+  const { email } = archiveDoc.data();
+  const originalId = archiveDoc.id;
   if (!email) return null;
 
   const snap = await db.collection("user").where("email", "==", email).get();
@@ -235,7 +240,7 @@ export const mergeUserArchive = async (userArchivesId, targetUserID, mergedBy = 
   if (!archiveDoc.exists) throw new Error("Archived user not found.");
 
   const archived = archiveDoc.data();
-  const oldUID = archived.originalId;
+  const oldUID = archiveDoc.id; // the archive's document ID is the old uid
   if (!oldUID) throw new Error("Archived record has no original user ID to merge from.");
   if (!targetUserID) throw new Error("Target user ID is required.");
   if (targetUserID === oldUID) throw new Error("Cannot merge an account into itself.");

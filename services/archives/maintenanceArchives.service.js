@@ -35,7 +35,7 @@ export const writeMaintenanceArchives = async (docs = [], archivedBy = "admin") 
   for (const part of chunk(docs, BATCH_WRITES)) {
     const batch = db.batch();
     part.forEach((d) => batch.set(db.collection(ARCHIVE).doc(d.id), {
-      maintenanceArchivesID: d.id, originalId: d.id, archiveDate: stamp(), archivedAt: stamp(), archivedBy, ...d.data(),
+      maintenanceArchivesID: d.id, archiveDate: stamp(), archivedAt: stamp(), archivedBy, ...d.data(),
     }));
     await batch.commit();
   }
@@ -47,7 +47,7 @@ const putBack = async (docs) => {
   for (const part of chunk(docs, BATCH_WRITES / 2)) {
     const batch = db.batch();
     part.forEach((d) => {
-      batch.set(db.collection(LIVE).doc(d.data().originalId || d.id), stripArchiveMeta(d.data()));
+      batch.set(db.collection(LIVE).doc(d.id), stripArchiveMeta(d.data()));
       batch.delete(d.ref);
     });
     await batch.commit();
@@ -98,6 +98,7 @@ export const getAllMaintenanceArchives = async () => {
       return {
         ...out,
         maintenanceArchivesId: d.id,
+        originalId: d.id, // response only (the ID is no longer stored as a field)
         plateNumber: car?.plateNumber || "—",
         brandName: car ? brandMap[car.brandID] || "—" : "—",
         modelName: car ? modelMap[car.modelID] || "—" : "—",

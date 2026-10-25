@@ -6,7 +6,8 @@
 // returns, and the admin frontend reads that one. Both hold the same value.
 export const BookingSessionArchive = {
   bookingSessionArchivesID: "",  // Firestore doc ID
-  originalId: "",                // doc ID from original 'bookingSessions' collection
+  // originalId is NOT stored any more: this archive document's ID IS the live document's ID (restore writes it back under that ID).
+  // The archive list APIs still return it as originalId (= the document ID) so the pages keep working.
   bookingSessionID: "",
   bookingID: "",                 // FK back to the (now also archived) booking
   carID: "",

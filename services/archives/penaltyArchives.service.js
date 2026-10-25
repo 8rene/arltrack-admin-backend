@@ -25,6 +25,7 @@ export const getAllPenaltyArchives = async () => {
     const { id: _docID, ...data } = hydrated[idx];
     return {
       penaltyArchivesId: doc.id,
+      originalId: doc.id, // response only (the ID is no longer stored as a field)
       ...data,
       customerName: data.userID ? (nameMap[data.userID] || "—") : "—",
       createdAt:   toISO(data.createdAt),
@@ -47,13 +48,13 @@ const restoreLinkedBooking = async (bookingID) => {
 
   const archiveDoc = snap.docs[0];
   const {
-    bookingArchivesID: _id, bookingArchivesId: _id2, originalId,
+    bookingArchivesID: _id, bookingArchivesId: _id2,
     archiveDate: _ad, archivedAt: _a, archivedBy: _ab,
     restoredAt: _r, restoredBy: _rb, customerName: _cn,
     ...original
   } = archiveDoc.data();
 
-  const activeRef = originalId ? db.collection("bookings").doc(originalId) : db.collection("bookings").doc();
+  const activeRef = db.collection("bookings").doc(archiveDoc.id);
   await activeRef.set(original);
   await archiveDoc.ref.delete();
   return true;
@@ -66,13 +67,13 @@ const restoreLinkedPayment = async (bookingID) => {
 
   const archiveDoc = snap.docs[0];
   const {
-    paymentsArchivesID: _id, paymentsArchivesId: _id2, originalId,
+    paymentsArchivesID: _id, paymentsArchivesId: _id2,
     archiveDate: _ad, archivedAt: _a, archivedBy: _ab,
     restoredAt: _r, restoredBy: _rb, customerName: _cn,
     ...original
   } = archiveDoc.data();
 
-  const activeRef = originalId ? db.collection("payments").doc(originalId) : db.collection("payments").doc();
+  const activeRef = db.collection("payments").doc(archiveDoc.id);
   await activeRef.set(original);
   await archiveDoc.ref.delete();
   return true;
@@ -85,7 +86,7 @@ export const restorePenaltyArchive = async (penaltyArchivesId, restoredBy = "adm
   if (!archiveDoc.exists) throw new Error("Archived penalty not found.");
 
   const archived = archiveDoc.data();
-  const originalId = archived.originalId;
+  const originalId = archiveDoc.id;
   const originalData = stripArchiveMeta(archived);
 
   const activeRef = originalId ? db.collection("penalties").doc(originalId) : db.collection("penalties").doc();
@@ -117,7 +118,7 @@ export const restorePenaltyArchivesForBooking = async (bookingID) => {
     const data = d.data();
     const batch = db.batch();
     batch.set(
-      db.collection("penalties").doc(data.originalId || d.id),
+      db.collection("penalties").doc(d.id),
       stripArchiveMeta(data)
     );
     batch.delete(d.ref);

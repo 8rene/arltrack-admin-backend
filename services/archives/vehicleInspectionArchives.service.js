@@ -53,7 +53,6 @@ export const writeInspectionArchive = async (rows = [], { bookingID, archivedBy 
   const records = rows.map((r) => ({ collection: r.name, id: r.doc.id, data: r.doc.data() }));
   await db.collection(ARCHIVE).doc(bookingID).set({
     vehicleInspectionArchivesId: bookingID,
-    originalId: bookingID,
     bookingID,
     carID: first?.carID || null,
     records,

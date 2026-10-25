@@ -3,7 +3,7 @@
 //
 // Written from controllers/user/user.controller.js's deleteUser(), which
 // spreads the live 'user' doc's fields (see models/user/user.model.js) plus
-// originalId/archivedAt.
+// archivedAt/archivedBy. The archive's document ID IS the user's uid (set, not add).
 //
 // A deleted user's userDetails/userAddress/userDocument are deliberately
 // NOT archived (or touched at all) here — they're left live and linked by
@@ -15,7 +15,7 @@
 // check stops a stale pending edit/ID-resubmit request from resurrecting
 // them for an account that's already gone.
 //
-// The actual purge of userDetails/userAddress/userDocument happens in
+// The actual purge of userDetails/userAddress/userDocument (and the user's editRequests / idResubmitRequests, plus all their Storage files) happens in
 // deleteUserArchive() (services/archives/userArchives.service.js) — that's
 // the real point of no return for a deleted account, not this soft-delete
 // step.
@@ -33,7 +33,8 @@
 // who is deleted (archived) again later carries none.
 export const UserArchive = {
   userArchivesId: "",  // Firestore doc ID — same as collection name + "Id"
-  originalId: "",       // uid from the original 'user' collection
+  // originalId is NOT stored any more: this archive document's ID IS the live document's ID (restore writes it back under that ID).
+  // The archive list APIs still return it as originalId (= the document ID) so the pages keep working.
   // ---- copied from the live user document (see models/user/user.model.js) ----
   userID: "",
   createdAt: null,

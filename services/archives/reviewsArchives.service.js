@@ -22,6 +22,7 @@ export const getAllReviewsArchives = async () => {
     const data = doc.data();
     return {
       reviewsArchivesID : doc.id,
+      originalId        : doc.id, // response only (the ID is no longer stored as a field)
       ...data,
       createdAt  : toISO(data.createdAt),
       updatedAt  : toISO(data.updatedAt),
@@ -53,7 +54,6 @@ export const restoreReviewsArchive = async (reviewsArchivesID, restoredBy = "adm
 
   const {
     reviewsArchivesID : _skip,
-    originalId,
     archiveDate,
     archivedAt,
     archivedBy,
@@ -62,9 +62,7 @@ export const restoreReviewsArchive = async (reviewsArchivesID, restoredBy = "adm
     ...originalData
   } = archiveDoc.data();
 
-  const activeRef = originalId
-    ? db.collection("reviews").doc(originalId)
-    : db.collection("reviews").doc();
+  const activeRef = db.collection("reviews").doc(archiveDoc.id); // same ID the review had
 
   await activeRef.set(originalData);
 

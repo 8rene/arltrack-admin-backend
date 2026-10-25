@@ -16,7 +16,8 @@
 export const VehicleInspectionArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored ----
   vehicleInspectionArchivesId: "",  // = the bookingID = the Firestore doc ID of this archive document
-  originalId: "",          // the bookingID again, kept for consistency with the other archive models
+  // originalId is NOT stored any more: this archive document's ID IS the live document's ID (restore writes it back under that ID).
+  // The archive list APIs still return it as originalId (= the document ID) so the pages keep working.
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,
   archivedBy: "",          // staff uid, or "admin" when the caller passed none

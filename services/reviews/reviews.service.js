@@ -151,11 +151,10 @@ export const archiveAndDeleteReview = async (reviewDocID, deletedBy = "admin") =
   if (!reviewDoc.exists) throw new Error("Review not found.");
   const reviewData = reviewDoc.data();
 
-  const archiveRef = db.collection("reviewsArchives").doc();
+  const archiveRef = db.collection("reviewsArchives").doc(String(reviewDocID)); // same ID as the live review
   await archiveRef.set({
     reviewsArchivesID: archiveRef.id,
     reviewID: reviewData.reviewID ?? reviewDocID,
-    originalId: reviewDocID,
     archiveDate: admin.firestore.FieldValue.serverTimestamp(),
     archivedAt: admin.firestore.FieldValue.serverTimestamp(),
     archivedBy: deletedBy,

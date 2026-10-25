@@ -61,7 +61,7 @@ export const getAllRefundArchives = async () => {
   // The rows are archived with the booking (paymentEntryArchives); the reader looks in both collections.
   const requests = snapshot.docs.map((doc) => {
     const data = doc.data();
-    return { ...data, refundRequestID: data.refundRequestID || data.originalId || doc.id };
+    return { ...data, refundRequestID: data.refundRequestID || doc.id };
   });
   const withEntries = await hydrateRefundRequestsWithArchives(requests);
   const cancellationRows = await getCancellationRowsForBookings(requests.map((r) => r.bookingID));
@@ -80,6 +80,7 @@ export const getAllRefundArchives = async () => {
     const paid = data.bookingPaid ?? data.grossPaid;
     return {
       refundArchivesId: doc.id,
+      originalId: doc.id, // response only (the ID is no longer stored as a field)
       ...data,
       ...(amt !== undefined ? { toRefundAmount: amt, amount: amt } : {}),
       ...(paid !== undefined ? { bookingPaid: paid, grossPaid: paid } : {}),
@@ -109,7 +110,7 @@ const restoreLinkedBooking = async (bookingID) => {
 
   const bookingArchiveDoc = snap.docs[0];
   const archived1 = bookingArchiveDoc.data();
-  const originalId = archived1.originalId;
+  const originalId = bookingArchiveDoc.id;
   const bookingOriginalData = stripArchiveMeta(archived1);
 
   const bookingActiveRef = originalId
@@ -133,7 +134,7 @@ const restoreLinkedPayment = async (bookingID) => {
 
   const paymentArchiveDoc = snap.docs[0];
   const archived2 = paymentArchiveDoc.data();
-  const originalId = archived2.originalId;
+  const originalId = paymentArchiveDoc.id;
   const paymentOriginalData = stripArchiveMeta(archived2);
 
   const paymentActiveRef = originalId
@@ -154,7 +155,7 @@ export const restoreRefundArchive = async (refundArchivesId, restoredBy = "admin
   if (!archiveDoc.exists) throw new Error("Archived refund request not found.");
 
   const archived3 = archiveDoc.data();
-  const originalId = archived3.originalId;
+  const originalId = archiveDoc.id;
   const originalData = stripArchiveMeta(archived3);
 
   const activeRef = originalId
@@ -191,7 +192,7 @@ export const restoreRefundArchivesForBooking = async (bookingID) => {
     const data = d.data();
     const batch = db.batch();
     batch.set(
-      db.collection("refundRequests").doc(data.originalId || d.id),
+      db.collection("refundRequests").doc(d.id),
       stripArchiveMeta(data)
     );
     batch.delete(d.ref);

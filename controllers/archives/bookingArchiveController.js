@@ -17,7 +17,7 @@ const resolveBookingID = async (bookingArchivesId) => {
   const doc = await db.collection("bookingArchives").doc(bookingArchivesId).get();
   if (!doc.exists) return null;
   const data = doc.data();
-  return data.bookingID ?? data.originalId ?? null;
+  return data.bookingID ?? doc.id;
 };
 
 // Firestore Timestamps (also nested ones) -> ISO strings, so the page can show them.
@@ -36,7 +36,7 @@ const linkedRecordsHandler = (collection, label) => async (req, res) => {
     if (!bookingDoc.exists) return res.status(404).json({ success: false, message: "Archived booking not found." });
     const b = bookingDoc.data();
     // archived rows may carry the booking's own bookingID or its Firestore doc id
-    const keys = [...new Set([b.bookingID, b.originalId].filter(Boolean))];
+    const keys = [...new Set([b.bookingID, bookingDoc.id].filter(Boolean))];
     const found = new Map();
     await Promise.all(keys.map(async (key) => {
       (await db.collection(collection).where("bookingID", "==", key).get()).docs.forEach((d) => found.set(d.id, d));

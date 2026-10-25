@@ -16,7 +16,8 @@
 export const ReviewsArchive = {
   reviewsArchivesID: "", // Firestore doc ID — same as collection name + "ID"
   reviewID: "",          // doc ID from original 'reviews' collection
-  originalId: "",        // same value as reviewID — kept for consistency with other archive models
+  // originalId is NOT stored any more: this archive document's ID IS the live document's ID (restore writes it back under that ID).
+  // The archive list APIs still return it as originalId (= the document ID) so the pages keep working.
   userID: "",            // reviewer's user ID (some older rows may instead have reviewerID)
   reviewerID: "",
   bookingID: "",

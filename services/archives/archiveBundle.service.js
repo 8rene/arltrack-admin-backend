@@ -84,7 +84,7 @@ export const restoreArchiveItem = async (kind, archiveID, restoredBy = "admin") 
 // Payment entries that belong to this one record, in the archive and (only when the live parent is gone) live.
 const ownEntryRefs = async (cfg, data, archiveID) => {
   if (!cfg.entryField) return [];
-  const key = data[cfg.entryField] || (cfg.entryField === "refundReqID" ? data.refundRequestID : null) || data.originalId || archiveID;
+  const key = data[cfg.entryField] || (cfg.entryField === "refundReqID" ? data.refundRequestID : null) || archiveID;
   if (!key) return [];
   const keep = (row) => {
     // a payment owns only its deposit / balance rows: penalty and refund rows belong to the penalty / refund
@@ -95,7 +95,7 @@ const ownEntryRefs = async (cfg, data, archiveID) => {
   const archived = await db.collection("paymentEntryArchives").where(cfg.entryField, "==", key).get();
   archived.docs.filter((d) => keep(d.data())).forEach((d) => refs.push(d.ref));
 
-  const liveParent = await db.collection(cfg.liveParent).doc(String(data.originalId || key)).get();
+  const liveParent = await db.collection(cfg.liveParent).doc(String(archiveID)).get();
   if (!liveParent.exists) {
     const live = await db.collection("paymentEntries").where(cfg.entryField, "==", key).get();
     live.docs.filter((d) => keep(d.data())).forEach((d) => refs.push(d.ref));

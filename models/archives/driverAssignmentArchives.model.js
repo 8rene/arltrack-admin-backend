@@ -9,8 +9,9 @@
 // row gets no restoredAt (the live model has no such column).
 export const DriverAssignmentArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored (see services/archives/archiveMeta.js) ----
-  driverAssignmentArchivesID: "",  // Firestore doc ID of this archive document (= originalId)
-  originalId: "",          // doc ID of the original 'driverAssignments' document, reused on restore
+  driverAssignmentArchivesID: "",  // Firestore doc ID of this archive document (= the live document's ID)
+  // originalId is NOT stored any more: this archive document's ID IS the live document's ID (restore writes it back under that ID).
+  // The archive list APIs still return it as originalId (= the document ID) so the pages keep working.
   archiveDate: null,       // set when archived (same moment as archivedAt)
   archivedAt: null,
   archivedBy: "",

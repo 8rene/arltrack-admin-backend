@@ -48,6 +48,7 @@ export const getAllPaymentsArchives = async () => {
     const { id: _docID, ...data } = hydrated[idx];
     return {
       paymentsArchivesId: doc.id,
+      originalId: doc.id, // response only (the ID is no longer stored as a field)
       ...data,
       createdAt:  toISO(data.createdAt),
       updatedAt:  toISO(data.updatedAt),
@@ -84,7 +85,7 @@ const restoreLinkedBooking = async (bookingID) => {
 
   const bookingArchiveDoc = snap.docs[0];
   const archived1 = bookingArchiveDoc.data();
-  const originalId = archived1.originalId;
+  const originalId = bookingArchiveDoc.id;
   const bookingOriginalData = stripArchiveMeta(archived1);
 
   const bookingActiveRef = originalId
@@ -108,7 +109,7 @@ export const restorePaymentsArchive = async (paymentsArchivesId, restoredBy = "a
   if (!archiveDoc.exists) throw new Error("Archived payment not found.");
 
   const archived2 = archiveDoc.data();
-  const originalId = archived2.originalId;
+  const originalId = archiveDoc.id;
   const originalData = stripArchiveMeta(archived2);
 
   const activeRef = originalId

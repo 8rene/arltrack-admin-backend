@@ -299,12 +299,11 @@ const gatherBookingBundle = async (bookingDocID) => {
  * Returns the new bookingArchivesID.
  */
 const archiveBooking = async (bookingDocID, bookingData, archivedBy = "admin") => {
-  const archiveRef = db.collection("bookingArchives").doc(); // auto-ID
+  const archiveRef = db.collection("bookingArchives").doc(String(bookingDocID)); // same ID as the live doc: a retry overwrites instead of duplicating
 
   const archiveDoc = {
     bookingArchivesID : archiveRef.id,          // new archive doc ID
     bookingID         : bookingData.bookingID ?? bookingDocID, // original booking ID
-    originalId        : bookingDocID,            // Firestore doc ID for restore
     archiveDate       : admin.firestore.FieldValue.serverTimestamp(),
     archivedAt        : admin.firestore.FieldValue.serverTimestamp(),
     archivedBy,
@@ -323,12 +322,11 @@ const archiveBooking = async (bookingDocID, bookingData, archivedBy = "admin") =
  * Returns the new paymentsArchivesID.
  */
 const archivePayment = async (paymentDocID, paymentData, archivedBy = "admin") => {
-  const archiveRef = db.collection("paymentsArchives").doc(); // auto-ID
+  const archiveRef = db.collection("paymentsArchives").doc(String(paymentDocID)); // same ID as the live doc: a retry overwrites instead of duplicating
 
   const archiveDoc = {
     paymentsArchivesID : archiveRef.id,
     paymentID          : paymentData.paymentID ?? paymentDocID,
-    originalId         : paymentDocID,
     archiveDate        : admin.firestore.FieldValue.serverTimestamp(),
     archivedAt         : admin.firestore.FieldValue.serverTimestamp(),
     archivedBy,
@@ -346,12 +344,11 @@ const archivePayment = async (paymentDocID, paymentData, archivedBy = "admin") =
  * Returns the new reviewsArchivesID.
  */
 const archiveReview = async (reviewDocID, reviewData, archivedBy = "admin") => {
-  const archiveRef = db.collection("reviewsArchives").doc(); // auto-ID
+  const archiveRef = db.collection("reviewsArchives").doc(String(reviewDocID)); // same ID as the live doc: a retry overwrites instead of duplicating
 
   const archiveDoc = {
     reviewsArchivesID : archiveRef.id,
     reviewID          : reviewData.reviewID ?? reviewDocID,
-    originalId        : reviewDocID,
     archiveDate       : admin.firestore.FieldValue.serverTimestamp(),
     archivedAt        : admin.firestore.FieldValue.serverTimestamp(),
     archivedBy,
@@ -373,12 +370,11 @@ const archiveReview = async (reviewDocID, reviewData, archivedBy = "admin") => {
  * Returns the new bookingSessionArchivesID.
  */
 const archiveBookingSession = async (sessionDocID, sessionData, archivedBy = "admin") => {
-  const archiveRef = db.collection("bookingSessionArchives").doc(); // auto-ID
+  const archiveRef = db.collection("bookingSessionArchives").doc(String(sessionDocID)); // same ID as the live doc: a retry overwrites instead of duplicating
 
   const archiveDoc = {
     bookingSessionArchivesID : archiveRef.id,
     bookingSessionID         : sessionData.bookingSessionID ?? sessionDocID,
-    originalId                : sessionDocID,
     archiveDate                : admin.firestore.FieldValue.serverTimestamp(),
     archivedAt                  : admin.firestore.FieldValue.serverTimestamp(),
     archivedBy,
@@ -399,12 +395,11 @@ const archiveBookingSession = async (sessionDocID, sessionData, archivedBy = "ad
  * Returns the new refundArchivesID.
  */
 const archiveRefundRequest = async (refundRequestDocID, refundRequestData, archivedBy = "admin") => {
-  const archiveRef = db.collection("refundArchives").doc(); // auto-ID
+  const archiveRef = db.collection("refundArchives").doc(String(refundRequestDocID)); // same ID as the live doc: a retry overwrites instead of duplicating
 
   const archiveDoc = {
     refundArchivesID : archiveRef.id,
     refundRequestID   : refundRequestData.refundRequestID ?? refundRequestDocID,
-    originalId         : refundRequestDocID,
     archiveDate         : admin.firestore.FieldValue.serverTimestamp(),
     archivedAt           : admin.firestore.FieldValue.serverTimestamp(),
     archivedBy,
@@ -425,12 +420,11 @@ const archiveRefundRequest = async (refundRequestDocID, refundRequestData, archi
  * Returns the new penaltyArchivesID.
  */
 const archivePenalty = async (penaltyDocID, penaltyData, archivedBy = "admin") => {
-  const archiveRef = db.collection("penaltyArchives").doc(); // auto-ID
+  const archiveRef = db.collection("penaltyArchives").doc(String(penaltyDocID)); // same ID as the live doc: a retry overwrites instead of duplicating
 
   const archiveDoc = {
     penaltyArchivesID : archiveRef.id,
     penaltyID         : penaltyData.penaltyID ?? penaltyDocID,
-    originalId        : penaltyDocID,
     archiveDate       : admin.firestore.FieldValue.serverTimestamp(),
     archivedAt        : admin.firestore.FieldValue.serverTimestamp(),
     archivedBy,

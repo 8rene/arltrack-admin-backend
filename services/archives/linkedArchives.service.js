@@ -61,7 +61,7 @@ export const writeLinkedArchives = async (collected, archivedBy = "admin") => {
     for (const part of chunk(docs, BATCH_WRITES)) {
       const batch = db.batch();
       part.forEach((d) => batch.set(db.collection(archive).doc(d.id), {
-        [idKey]: d.id, originalId: d.id, archiveDate: stamp(), archivedAt: stamp(), archivedBy, ...d.data(),
+        [idKey]: d.id, archiveDate: stamp(), archivedAt: stamp(), archivedBy, ...d.data(),
       }));
       await batch.commit();
     }
@@ -84,7 +84,7 @@ const restoreLinkedArchives = async (kind, field, values) => {
   for (const part of chunk(docs, BATCH_WRITES / 2)) {
     const batch = db.batch();
     part.forEach((d) => {
-      batch.set(db.collection(LINKED[kind].live).doc(d.data().originalId || d.id), stripArchiveMeta(d.data()));
+      batch.set(db.collection(LINKED[kind].live).doc(d.id), stripArchiveMeta(d.data()));
       batch.delete(d.ref);
     });
     await batch.commit();

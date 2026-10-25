@@ -15,6 +15,7 @@ export const getAllBookingSessionArchives = async () => {
     const data = doc.data();
     return {
       bookingSessionArchivesId: doc.id,
+      originalId: doc.id, // response only (the ID is no longer stored as a field)
       ...data,
       createdAt:      toISO(data.createdAt),
       archiveDate:    toISO(data.archiveDate),
@@ -75,7 +76,7 @@ export const restoreBookingSessionArchive = async (bookingSessionArchivesId, res
   if (!archiveDoc.exists) throw new Error("Archived booking session not found.");
 
   // same fix as in bookingArchives.service.js: the archive stores bookingSessionArchivesID (capital D)
-  const originalId = archiveDoc.data().originalId;
+  const originalId = archiveDoc.id;
   const originalData = stripArchiveMeta(archiveDoc.data());
 
   // ── 1. Restore the session doc ──

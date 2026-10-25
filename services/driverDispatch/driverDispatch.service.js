@@ -997,20 +997,18 @@ const lookupArchivedBookings = async (keys) => {
   const byKey = new Map();
   const add = (doc) => {
     const data = doc.data();
-    const key = data.bookingID || data.originalId || doc.id;
-    if (!byKey.has(key)) byKey.set(key, { ...data, id: data.originalId || doc.id, archived: true });
+    const key = data.bookingID || doc.id;
+    if (!byKey.has(key)) byKey.set(key, { ...data, id: doc.id, archived: true });
   };
   for (let i = 0; i < keys.length; i += 30) {
     const part = keys.slice(i, i + 30);
     const snap = await db.collection("bookingArchives").where("bookingID", "in", part).get();
     snap.forEach(add);
   }
-  // Very old bookings have no bookingID field and were keyed by their doc id.
-  const stillMissing = keys.filter((k) => !byKey.has(k));
-  for (let i = 0; i < stillMissing.length; i += 30) {
-    const snap = await db.collection("bookingArchives").where("originalId", "in", stillMissing.slice(i, i + 30)).get();
-    snap.forEach(add);
-  }
+  // A booking archive's document ID is the booking's own doc ID: fetch what is still missing directly by ID.
+  const stillMissing = keys.filter((k) => k && !byKey.has(k));
+  const direct = await Promise.all(stillMissing.map((k) => db.collection("bookingArchives").doc(String(k)).get()));
+  direct.filter((s) => s.exists).forEach(add);
   return byKey;
 };
 
