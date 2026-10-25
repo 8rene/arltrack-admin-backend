@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { collectStorageUrls, deleteStorageFiles } from "../../utils/storage/storageFiles.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -97,6 +98,29 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
 // userDocument docs that were deliberately left untouched at soft-delete
 // time (see deleteUser()). Nothing archives them first — once this runs,
 // that data is genuinely gone.
+//
+// Storage files (license photo, ID photo, ID selfie, profile picture) are
+// deleted LAST, only after the database records are gone, so a failed run can
+// be repeated. A file that cannot be deleted is counted in failedFiles and
+// never blocks the rest. Only files of THIS bucket are touched.
+//
+// Merge safety: mergeUserArchive() re-points the old account's profile docs to
+// the new uid and deletes the archive record, so a merged account never reaches
+// this function. Profile docs are looked up by the archived uid only, so they
+// can never include the surviving account's docs. As a second guard, any file
+// still referenced by another live record is skipped (see urlStillInUse).
+// true when a live record other than the ones being purged still points at this file
+const urlStillInUse = async (url, excludePaths, originalId) => {
+  const checks = [
+    db.collection("user").where("profileImage", "==", url).get(),
+    db.collection("userDocument").where("documentImageUrl", "==", url).get(),
+  ];
+  const snaps = await Promise.all(checks);
+  return snaps.some((snap) =>
+    snap.docs.some((d) => !excludePaths.has(d.ref.path) && d.id !== originalId)
+  );
+};
+
 export const deleteUserArchive = async (userArchivesId) => {
   const archiveRef = db.collection("userArchives").doc(userArchivesId);
   const archiveDoc = await archiveRef.get();
@@ -109,6 +133,12 @@ export const deleteUserArchive = async (userArchivesId) => {
   const addressDocs  = await findLiveUserAddress(originalId);
   const documentDocs = await findLiveUserDocument(originalId);
 
+  // Every Storage URL inside the records that are about to go: the archived
+  // user copy (profileImage) and the profile docs (license / ID photo, selfie).
+  const candidateUrls = new Set();
+  collectStorageUrls(data, candidateUrls);
+  [...detailsDocs, ...addressDocs, ...documentDocs].forEach((d) => collectStorageUrls(d.data(), candidateUrls));
+
   const batch = db.batch();
   batch.delete(archiveRef);
   for (const d of detailsDocs)  batch.delete(d.ref);
@@ -116,10 +146,24 @@ export const deleteUserArchive = async (userArchivesId) => {
   for (const d of documentDocs) batch.delete(d.ref);
   await batch.commit();
 
+  // Files last, and only the ones nothing else still uses.
+  const purgedPaths = new Set([archiveRef.path, ...[...detailsDocs, ...addressDocs, ...documentDocs].map((d) => d.ref.path)]);
+  const fileUrls = [];
+  for (const url of candidateUrls) {
+    try {
+      if (!(await urlStillInUse(url, purgedPaths, originalId))) fileUrls.push(url);
+    } catch (err) {
+      console.error("[USER ARCHIVE] could not check file usage, keeping file:", err.message);
+    }
+  }
+  const files = fileUrls.length ? await deleteStorageFiles(fileUrls) : { deleted: 0, failed: 0 };
+
   return {
     deletedDetails:  detailsDocs.length,
     deletedAddress:  addressDocs.length,
     deletedDocument: documentDocs.length,
+    deletedFiles:    files.deleted,
+    failedFiles:     files.failed,
   };
 };
 

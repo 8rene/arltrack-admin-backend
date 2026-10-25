@@ -44,7 +44,7 @@ export const UserArchive = {
   phone: "",
   profileImage: "",
   roleID: "",
-  status: "",           // whatever it was at time of deletion: "locked" | "unlocked"
+  status: "",           // whatever it was at time of deletion: "active" | "inactive" | "locked" (see user.model.js)
   username: "",
   referralCode: null,
   termsVersionID: null,

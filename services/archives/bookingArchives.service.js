@@ -265,23 +265,20 @@ export const deleteBookingArchive = async (bookingArchivesId) => {
   const paymentArchiveDoc  = await findLinkedPaymentArchive(bookingID);
   const reviewArchiveDocs  = await findLinkedReviewArchives(bookingID);
   const sessionArchiveDoc  = await findLinkedBookingSessionArchive(bookingID);
-  // Inspection records were never archived in the first place (they live
-  // permanently in their own collections) — so a permanent delete here is
-  // the only place that ever cleans them up. Without this, they'd be
-  // orphaned forever: no booking, live or archived, left pointing to them.
+  // Live inspection docs: normally already moved into vehicleInspectionArchives
+  // when the booking was deleted. Older bookings (archived before that existed)
+  // may still have them in their live collections, so they are cleaned up here too.
   const inspectionDocs     = await findLinkedInspectionDocs(bookingID);
-  // driverAssignments / cancellationRequests rows are NOT archived with the booking —
-  // they stay in their live tables (keyed by bookingID) so a restore reconnects the
-  // driver and request history automatically. This permanent delete is the only
-  // place they are cleaned up.
+  // Live driverAssignments / cancellationRequests rows: only bookings archived before these had
+  // their own archives still have them in the live tables (keyed by bookingID). Newer bookings
+  // keep them in driverAssignmentArchives / cancellationRequestArchives (cleaned up below).
   const assignmentRefs     = await getAssignmentRefsForBooking(bookingID);
   const requestRefs        = await getRequestRefsForBooking(bookingID);
-  // paymentEntries rows are not archived either (live, keyed by bookingID / paymentID), so a restore
-  // reconnects the money history. This permanent delete is the only place they are cleaned up.
+  // Live paymentEntries rows: same story, only older bookings still have them live
+  // (keyed by bookingID / paymentID). Newer ones are in paymentEntryArchives.
   const entryRefs          = await getEntryRefsForBooking(bookingID);
-  // Bookings archived since the three collections got their own archives keep those rows in
-  // driverAssignmentArchives / cancellationRequestArchives / paymentEntryArchives (and the penalty and refund
-  // archives); the live-row cleanup above only covers bookings archived before that.
+  // Bookings archived since then keep those rows in driverAssignmentArchives / cancellationRequestArchives /
+  // paymentEntryArchives (and the penalty and refund archives); the live-row cleanup above covers older bookings.
   const paymentID          = paymentArchiveDoc ? (paymentArchiveDoc.data().paymentID ?? paymentArchiveDoc.data().originalId) : null;
   const linkedArchiveRefs  = await getLinkedArchiveRefsForBooking({
     bookingKeys: [bookingID, data.originalId],
