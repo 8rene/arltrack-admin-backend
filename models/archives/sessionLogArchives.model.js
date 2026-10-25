@@ -1,6 +1,6 @@
 // Matches the 'sessionLogArchives' collection in Firestore.
 //
-// An archive is a COPY of a sessionLogs row (see models/sessionLogs/sessionLogs.model.js -- keep the two in step). It is made by
+// An archive is a COPY of a sessionLogs row (see models/logs/sessionLogs.model.js -- keep the two in step). It is made by
 // archiveSessionLog() in services/sessionLogs/sessionLogs.service.js, which spreads the live row, adds originalId and archivedAt,
 // and then deletes the live row.
 //

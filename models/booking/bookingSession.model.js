@@ -42,14 +42,19 @@ export const BookingSession = {
   geofenceZones:       [],
   geofenceAlerts:      [],
   codingAlerts:        [],
-  // Entry shapes written by livePing.service.js. One entry per CHANGE of state, never one per ping.
-  //   geofenceAlerts: { type: "breach" | "cleared", nearestZone?, distanceMeters?, zone?, at, receivedAt, delayed?, afterDropOff? }
-  //   codingAlerts:   { type: "restricted" | "cleared", reason?, city?, rule?, plate?, at, receivedAt, delayed?, afterDropOff? }
-  //     at          the time it HAPPENED (tracker clock); receivedAt = when the server heard about it
-  //     delayed     true only when receivedAt is >2 min after `at` (e.g. an offline flush)
-  //     afterDropOff  written once droppedOffTime was set: a geofence breach closed by the drop-off, or a coding
-  //                   restriction that happened after it (coding keeps being recorded, geofence stops)
-  //     plate       coding "restricted" only -- the plate MASKED, e.g. "P*****2" (never the full plate)
+  // Alert entries written from a live ping also carry `receivedAt` (server time) and, when the ping
+  // reached the server >2 min after the tracker recorded it, `delayed: true`. `at` stays the time it happened.
+  // Written by livePing.service.js / silentTracker.service.js while a trip is active (not set at creation):
+  //   geofenceFlipCount  — consecutive pings disagreeing with the logged geofence state (2 = real change)
+  //   lastPingReceivedAt — ISO time the server last heard from the tracker
+  //   silentAlertedAt    — set when staff were told the tracker went silent; removed on the next ping
+  //   stolenAt           — when the car was flagged stolen (markSessionStolen). A stolen car keeps pinging, so this is
+  //                        a marker, not an end: sessionEndedAt() still treats stolen as "still going".
+  //   needsFinalFlush    — set when the trip ends / is flagged stolen, removed once its final history file is saved;
+  //                        the nightly job retries any session that still has it (getSessionsNeedingFinalFlush).
+  // Alert entries may also carry `afterDropOff: true` (written once droppedOffTime was set: a geofence breach that
+  // was closed by the drop-off, or a coding restriction that happened afterwards) and, for coding "restricted"
+  // entries, `plate` (the plate masked like "P*****2").
   // Number Coding restrictions found for the car's plate BEFORE the booking was
   // made — the list the customer was warned about. FLAT: one entry per matched rule,
   // no nested arrays.
@@ -88,24 +93,8 @@ export const BookingSession = {
   droppedOffTime: null,
 
   currentPosition:     null, // { lat, lng, date }
-
-  // ── Live-tracking bookkeeping. Written while a trip is active / when it ends; absent on older sessions ──
-  geofenceFlipCount:   0,    // consecutive pings that disagree with the logged geofence state (2 = a real change)
-  lastPingReceivedAt:  null, // ISO string -- last time the SERVER heard from the tracker (not the fix's own time)
-  silentAlertedAt:     null, // timestamp -- staff were told the tracker went silent; deleted on the next ping
-  // When the car was flagged stolen. A stolen car keeps pinging, so this is a marker, NOT an end:
-  // sessionEndedAt() still treats a stolen session as "still going".
-  stolenAt:            null, // timestamp | null
-  // true from the moment the trip ends / is flagged stolen until its FINAL history file is saved; the nightly
-  // job retries any session that still has it (getSessionsNeedingFinalFlush). Absent once saved.
-  needsFinalFlush:     null,
-  // public Firebase Storage URL, set by every history save (pickup, drop-off, nightly, return, stolen).
-  // The file is ONE compact JSON object, readable on its own without this session:
-  //   { session: { bookingSessionID, bookingID, carID, status, startedAt, droppedOffAt, completedAt, stolenAt, endedAt },
-  //     points, geofenceZones, geofenceAlerts, codingAlerts, codingWarnings, droppedOffAt, completedAt, holidays }
-  // It is publicly readable, so it holds IDs and times only -- no customer or staff names.
-  archiveUrl:          null,
-  pointCount:          null, // number of GPS points in the flushed trail, set with archiveUrl
+  archiveUrl:          null, // public Firebase Storage URL, set by the nightly flush job
+  pointCount:          null, // GPS points in the flushed trail. Cleared on every history save (recordArchiveFlush) and recounted lazily the next time History loads, so it can be absent
   lastArchivedAt:      null,
   createdAt:           null,
   updatedAt:           null,

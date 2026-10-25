@@ -39,7 +39,7 @@ export const Payment = {
   // Live state of a Partial payment's balance. The customer backend's settle-once guard reads these inside a
   // Firestore transaction, so they stay until that guard reads the entries instead.
   currentPhase: "",     // "deposit" | "balance": which phase the open checkout is for
-  balanceStatus: "",    // "" | "not_due" | "pending" | "paid" | "failed" | "cancelled"
+  balanceStatus: "",    // "not_applicable" (a Full payment: there is no balance, written by the customer backend) | "not_due" | "pending" | "paid" | "failed" | "cancelled" | "" (very old rows)
   balanceAmount: 0,     // what the open balance checkout charges
   // NOT stored here: balanceCollected / balanceCollectedAmount. "Staff collected the balance in person" is a settled
   // in-person balance row in paymentEntries, and hydratePayment() derives both from it. Likewise refundIssuedBy /

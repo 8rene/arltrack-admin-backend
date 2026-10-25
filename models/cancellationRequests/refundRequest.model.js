@@ -30,7 +30,7 @@
 //   "Refunded" → PayMongo confirmed success
 //   "Rejected" → admin rejected, never sent to PayMongo
 //   "Failed"   → PayMongo confirmed the refund failed after approval
-const RefundRequest = {
+export const RefundRequest = {
   refundRequestID: "",
   bookingID: "",
   paymentID: "",
@@ -84,4 +84,3 @@ const RefundRequest = {
   updatedAt: null,
 };
 
-module.exports = { RefundRequest };

@@ -12,7 +12,7 @@ export const Car = {
   longDescription: "",
   transmission: "",   // "Automatic" | "Manual"
   year: 0,
-  status: "",         // "Active" | "Inactive" | "Maintenance"
+  status: "",         // "Active" | "Rented" | "Reserved" | "Maintenance" | "Inactive"
   // Only meaningful when status === "Inactive". Captured via a small modal
   // in Fleet.jsx when a car is switched to Maintenance or Inactive —
   // cleared (set back to null) if the car is later switched to any other

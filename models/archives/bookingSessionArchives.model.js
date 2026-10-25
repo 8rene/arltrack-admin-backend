@@ -1,5 +1,9 @@
 // Matches the 'bookingSessionArchives' collection in Firestore
 // Primary key: bookingSessionArchivesID (Firestore document ID)
+//
+// ID spelling: the field STORED on the document is bookingSessionArchivesID (capital D, written when the session is
+// archived). The list endpoint also adds bookingSessionArchivesId (lowercase d, copied from the doc ID) to each row it
+// returns, and the admin frontend reads that one. Both hold the same value.
 export const BookingSessionArchive = {
   bookingSessionArchivesID: "",  // Firestore doc ID
   originalId: "",                // doc ID from original 'bookingSessions' collection
@@ -26,18 +30,13 @@ export const BookingSessionArchive = {
   lastPingReceivedAt: null,
   silentAlertedAt: null,
   needsFinalFlush: null,         // still true here only if the final history file was never saved before archiving
-  pointCount: null,              // number of GPS points in the flushed trail, set together with archiveUrl
+  pointCount: null,              // GPS points in the flushed trail. Cleared on every history save and recounted lazily, so it can be absent
   currentPosition: null,
   archiveUrl: null,              // Storage URL, if this session was ever flushed before deletion
   lastArchivedAt: null,
-  // Flattened copy of every archive/{date} day-doc this session had —
-  // [{ date: "YYYY-MM-DD", points: [...] }, ...]. Not a live subcollection
-  // here since an archived record never needs per-day querying.
-  archiveDays: [],
   createdAt: null,
   updatedAt: null,
   archiveDate: null,
   archivedAt: null,
   archivedBy: "",
-  restoredBy: null,
 };

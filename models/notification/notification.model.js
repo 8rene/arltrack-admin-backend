@@ -30,6 +30,12 @@ export const Notification = {
   //   "PenaltyConfirmed" | "PenaltyWaived" | "PenaltyVoided"   (penalty customer notices keep their old PascalCase names)
   //   Driver / customer / staff trip notices added to this list:
   //   "driver_assigned" | "driver_unassigned" | "driver_en_route" | "balance_reminder" | "maintenance_overdue"
+  //   Written by the CUSTOMER backend (shares this collection):
+  //     to staff:    "new_booking" | "edit_request" | "penalty_paid" | "payment_after_cancellation" | "id_resubmit_request" |
+  //                  "cancellation_request" | "new_user" | "refund_request"
+  //     to a driver: "driver_trip_reminder"
+  //     to the customer: "payment_successful" | "payment_failed" | "booking_confirmed" | "upcoming_booking" |
+  //                  "booking_reminder" | "booking_expired" | "booking_cancelled"
   //   (type values are snake_case by convention; only the penalty notices above are PascalCase)
   //   (booking_cancelled: one to the assigned driver, and one to every other Owner/Admin/Supervisor when an admin
   //   cancels a booking; see services/refundRequest/refundRequest.service.js)
