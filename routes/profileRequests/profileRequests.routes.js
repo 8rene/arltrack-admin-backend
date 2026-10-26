@@ -29,12 +29,15 @@ const allowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 // Profile.jsx's role check) would otherwise skip review entirely.
 const ownerAdminOnly = [roles.OWNER, roles.ADMIN];
 
+// Editing ANOTHER user's profile or documents is an Admin-only job (not Owner, not Supervisor).
+const adminOnly = [roles.ADMIN];
+
 export const registerProfileRequestsRoutes = (app) => {
-  // Editing another user's profile or documents is an Admin job: Owner/Admin only. Supervisors can still view and approve/reject
-  // (verify endpoint in user.routes.js) but can no longer change expiry/number or replace photos.
-  app.put   ("/api/users/:uid/document",              verifyToken, requireRole(ownerAdminOnly), updateUserDocument);
-  app.put   ("/api/users/:uid/document/replace",      verifyToken, requireRole(ownerAdminOnly), adminReplaceDocument);
-  app.put   ("/api/users/:uid/profile",               verifyToken, requireRole(ownerAdminOnly), adminUpdateProfile);
+  // Editing another user's profile or documents is an Admin-only job. Owner and Supervisors can still view, and Supervisors can
+  // approve/reject (verify endpoint in user.routes.js), but they can't change details, expiry/number or replace photos.
+  app.put   ("/api/users/:uid/document",              verifyToken, requireRole(adminOnly), updateUserDocument);
+  app.put   ("/api/users/:uid/document/replace",      verifyToken, requireRole(adminOnly), adminReplaceDocument);
+  app.put   ("/api/users/:uid/profile",               verifyToken, requireRole(adminOnly), adminUpdateProfile);
   app.post  ("/api/edit-requests/:id/approve",         verifyToken, requireRole(allowed), approveProfile);
   app.post  ("/api/id-resubmit-requests/:id/approve",  verifyToken, requireRole(allowed), approveIdResubmit);
   app.patch ("/api/review-requests/:kind/:id/reject",  verifyToken, requireRole(allowed), rejectReviewRequest);
