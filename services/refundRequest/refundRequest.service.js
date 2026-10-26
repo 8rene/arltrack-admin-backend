@@ -174,14 +174,18 @@ const dropOldRefundNames = () => ({ amount: admin.firestore.FieldValue.delete(),
 // ─────────────────────────────────────────────────────────────────────────────
 const policyForRequest = (request, payment, { waiveForfeit = false } = {}) => {
   if (!request) return null;
-  if (typeof request.returnDeposit === "boolean") return getRefundPolicyFromFlag(payment, { returnDeposit: request.returnDeposit, waiveForfeit });
+  if (typeof request.returnDeposit === "boolean") {
+    // gatewayFeeKept is the amount locked on the request when the customer asked (absent = 0: requests made before the rule).
+    return getRefundPolicyFromFlag(payment, { returnDeposit: request.returnDeposit, waiveForfeit, gatewayFeeKept: Number(request.gatewayFeeKept) || 0 });
+  }
   if (!request.policyTier) return null;
-  return getRefundPolicy(payment, {
+  // Old snapshot requests were made before the gateway-fee rule: the customer was never shown a deduction, so none is taken.
+  return { ...getRefundPolicy(payment, {
     pickupAt: request.pickupAt,
     requestedAt: request.requestedAt || request.createdAt,
     waiveForfeit,
     bookedAt: request.bookedAt || null,   // when the deposit was paid, if the request snapshot kept it (no grace without it)
-  });
+  }), gatewayFeeKept: 0 };
 };
 
 // A discount given on a fully paid booking is HELD for the customer, and it is money they already paid. So when the booking
@@ -322,7 +326,7 @@ export const getAllRefundRequests = async (status) => {
             row.paidWith = paidWithOf(payment);   // how the customer paid, per phase (the screen shows it; QR Ph is hand-back only)
             if (data.status !== "Pending") return row;
             const policy = policyForRequest(data, payment);
-            const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0 });
+            const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0, gatewayFeeKept: policy ? policy.gatewayFeeKept : 0 });
             row.planPreview = {
               total: plan.total,
               onlineAmount: plan.total - plan.manualAmount,
@@ -333,6 +337,7 @@ export const getAllRefundRequests = async (status) => {
               bookingPaid: plan.grossPaid,
               grossPaid: plan.grossPaid,                   // old name, same value, until the web apps read bookingPaid
               forfeit: plan.forfeit,                       // deposit kept under the 48-hour policy
+              gatewayFeeKept: plan.gatewayFeeKept,         // gateway fee kept when the deposit goes back
               tier: policy ? policy.tier : null,           // "full" | "late" | "no_show" | null (no policy snapshot)
               hoursBeforePickup: policy ? policy.hoursBeforePickup : null,
               parts: plan.parts.map((p) => ({ kind: p.kind, amount: p.amount })),
@@ -614,7 +619,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       throw fail(`This booking is already ${bookingNow.status} — a refund can't be approved for a rental that has started. Reject the request instead.`, 409);
     }
 
-    const plan = computeRefundPlan(payment, { forfeit });
+    const plan = computeRefundPlan(payment, { forfeit, gatewayFeeKept: policy ? policy.gatewayFeeKept : 0 });
     // Everything was paid online but no PayMongo payment id is on record: there is nothing PayMongo can return,
     // and it must NOT be turned into a hand-back. Say exactly that instead of "nothing to refund".
     if (plan.total <= 0 && plan.unrefundableAmount > 0) {
@@ -689,6 +694,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       // deposit that was not kept and the staff reason is in the audit log line written below.
       bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
+      gatewayFeeKept: plan.gatewayFeeKept,
       forfeitWaived: !!(policy && policy.waived),
       ...(decisionReason && canWriteDecisionReason(claimed, cancelRow) ? { reason: decisionReason } : {}),
       updatedAt: now,

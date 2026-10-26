@@ -9,6 +9,8 @@ import {
   cancelEditRequest,
   createIdResubmitRequest,
   setOwnAvatar,
+  adminUpdateUserProfile,
+  adminReplaceUserDocument,
 } from "../../services/profileRequests/profileRequests.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { notifyStaff, resolveNotification } from "../../services/notification/notification.service.js";
@@ -20,9 +22,13 @@ import { notifyStaff, resolveNotification } from "../../services/notification/no
 export const updateUserDocument = async (req, res) => {
   try {
     const { uid } = req.params;
-    const fields = req.body || {};
+    // Only these may be changed here. Photos go through PUT /api/users/:uid/document/replace (URL checked), and the
+    // signup selfie is never editable, so a caller cannot point a document at an arbitrary URL.
+    const EDITABLE = ["driverLicenseExpiry", "documentType", "documentNumber", "driversLicenseNumber"];
+    const body = req.body || {};
+    const fields = Object.fromEntries(EDITABLE.filter((k) => body[k] !== undefined).map((k) => [k, body[k]]));
     if (Object.keys(fields).length === 0) {
-      return res.status(400).json({ success: false, message: "No fields provided." });
+      return res.status(400).json({ success: false, message: "No editable fields provided." });
     }
 
     const data = await upsertUserDocument(uid, fields);
@@ -267,6 +273,45 @@ export const updateOwnAvatar = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error("[PROFILE_REQUESTS] updateOwnAvatar error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/users/:uid/profile   (Owner/Admin)
+// Body: { changes: [{ collection: "user"|"userDetails"|"userAddress", field, newValue }] }
+export const adminUpdateProfile = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const data = await adminUpdateUserProfile(uid, req.body?.changes);
+
+    if (data.changed.length) {
+      createAuditLog({
+        action: "update",
+        description: `Edited profile of user ${uid}: ${data.changed.map((c) => `${c.field} "${c.from}" → "${c.to}"`).join("; ")}.`,
+        userID: req.user?.uid || null,
+      }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+    }
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] adminUpdateProfile error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/users/:uid/document/replace   (Owner/Admin)
+// Body: { documentKind: "license"|"document", newUrl, driverLicenseExpiry?, documentType?, documentNumber? }
+export const adminReplaceDocument = async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const data = await adminReplaceUserDocument(uid, req.body || {});
+    createAuditLog({
+      action: "update",
+      description: `Replaced the ${data.documentKind === "license" ? "driver's license" : "ID document"} of user ${uid}.`,
+      userID: req.user?.uid || null,
+    }).catch((err) => console.error("[PROFILE_REQUESTS] Failed to write audit log:", err));
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[PROFILE_REQUESTS] adminReplaceDocument error:", error);
     return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };

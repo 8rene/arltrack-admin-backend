@@ -36,6 +36,7 @@ export const RefundArchive = {
   bookingPaid: 0,          // everything the customer had paid before any forfeit
   returnDeposit: true,
   depositForfeited: 0,
+  gatewayFeeKept: 0,   // online payment (gateway) fee kept on this refund: only when the deposit goes back (0 = fully refunded)
   forfeitWaived: false,
   status: "",              // Pending | Approved | Refunded | Rejected | Failed (at the time of deletion)
   processedBy: null,

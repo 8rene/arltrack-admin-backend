@@ -1,5 +1,7 @@
 import {
   updateUserDocument,
+  adminUpdateProfile,
+  adminReplaceDocument,
   approveProfile,
   approveIdResubmit,
   rejectReviewRequest,
@@ -28,7 +30,11 @@ const allowed = [roles.OWNER, roles.ADMIN, roles.SUPERVISOR];
 const ownerAdminOnly = [roles.OWNER, roles.ADMIN];
 
 export const registerProfileRequestsRoutes = (app) => {
-  app.put   ("/api/users/:uid/document",              verifyToken, requireRole(allowed), updateUserDocument);
+  // Editing another user's profile or documents is an Admin job: Owner/Admin only. Supervisors can still view and approve/reject
+  // (verify endpoint in user.routes.js) but can no longer change expiry/number or replace photos.
+  app.put   ("/api/users/:uid/document",              verifyToken, requireRole(ownerAdminOnly), updateUserDocument);
+  app.put   ("/api/users/:uid/document/replace",      verifyToken, requireRole(ownerAdminOnly), adminReplaceDocument);
+  app.put   ("/api/users/:uid/profile",               verifyToken, requireRole(ownerAdminOnly), adminUpdateProfile);
   app.post  ("/api/edit-requests/:id/approve",         verifyToken, requireRole(allowed), approveProfile);
   app.post  ("/api/id-resubmit-requests/:id/approve",  verifyToken, requireRole(allowed), approveIdResubmit);
   app.patch ("/api/review-requests/:kind/:id/reject",  verifyToken, requireRole(allowed), rejectReviewRequest);

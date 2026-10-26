@@ -454,3 +454,128 @@ export const setOwnAvatar = async (userID, profileImage) => {
   await db.collection("user").doc(userID).update({ profileImage: url, updatedAt: timestamp() });
   return { profileImage: url };
 };
+
+// ─────────────────────────────────────────────
+// Admin direct edits (Owner/Admin only — enforced at the route). Unlike the self-service paths above, these act on SOMEONE
+// ELSE'S account, so they write an old → new trail for the audit log. Email is deliberately not editable here: it is not in
+// ALLOWED_PROFILE_FIELDS, so assertAllowedChanges() rejects it.
+// ─────────────────────────────────────────────
+const plainValue = (v) => {
+  if (v === null || v === undefined) return "";
+  if (typeof v?.toDate === "function") return v.toDate().toISOString().slice(0, 10); // Firestore Timestamp (birthDate)
+  return String(v).trim();
+};
+
+// referralCode is editable here (admin only) but is NOT in ALLOWED_PROFILE_FIELDS on purpose: that list is also used by the
+// self-service paths, and users must not be able to pick their own code. Same look as generated codes (ARL-XXXXXXXX), but
+// the admin may type a custom one: 4–20 letters / digits / hyphens, stored upper-case, unique across all users.
+const REFERRAL_CODE_RE = /^[A-Z0-9-]{4,20}$/;
+
+export const adminUpdateUserProfile = async (userID, rawChanges) => {
+  await requireLiveUser(userID);
+  const all = dropRetiredFields(rawChanges);
+  if (!all.length) badRequest("No changes provided.");
+
+  const codeChange = all.find((c) => c?.collection === "user" && c?.field === "referralCode");
+  const referredChange = all.find((c) => c?.collection === "referral" && c?.field === "referredByCode");
+  const changes = all.filter((c) => c !== codeChange && c !== referredChange);
+  assertAllowedChanges(changes);
+
+  const userSnap = await db.collection("user").doc(userID).get();
+  const before = { user: userSnap.data() || {} };
+  for (const col of [...new Set(changes.map((c) => c.collection))]) {
+    if (col === "user") continue;
+    const snap = await db.collection(col).where("userID", "==", userID).limit(1).get();
+    before[col] = snap.empty ? {} : snap.docs[0].data();
+  }
+
+  // Checked BEFORE anything is written, so a bad referral code cannot leave the other edits half-applied.
+  let newCode = null;
+  if (codeChange) {
+    const code = String(codeChange.newValue ?? "").trim().toUpperCase();
+    if (!REFERRAL_CODE_RE.test(code)) badRequest("Referral code must be 4–20 characters: letters, numbers or hyphens.");
+    if (code !== plainValue(before.user.referralCode)) {
+      const dup = await db.collection("user").where("referralCode", "==", code).limit(1).get();
+      if (!dup.empty && dup.docs[0].id !== userID) {
+        const err = new Error(`The referral code "${code}" is already used by another account.`);
+        err.statusCode = 409;
+        throw err;
+      }
+      newCode = code;
+    }
+  }
+
+  // "Referred by" is edited as the REFERRER's code. The link lives in the "referrals" table ({ referrerUserID, referredUserID }),
+  // written by the customer backend at signup; here the admin can set, change or clear it. Everything is validated before any write.
+  let referral = null;   // { oldRows, oldReferrerCode, newReferrerID|null, newReferrerCode|null }
+  if (referredChange) {
+    const wanted = String(referredChange.newValue ?? "").trim().toUpperCase();
+    const oldRows = await db.collection("referrals").where("referredUserID", "==", userID).get();
+    const oldReferrerID = oldRows.empty ? null : oldRows.docs[0].data().referrerUserID;
+    let oldReferrerCode = "";
+    if (oldReferrerID) oldReferrerCode = plainValue((await db.collection("user").doc(oldReferrerID).get()).data()?.referralCode);
+
+    let newReferrerID = null;
+    if (wanted) {
+      if (!REFERRAL_CODE_RE.test(wanted)) badRequest("Referred-by code must be a referral code like ARL-ABCD1234.");
+      const found = await db.collection("user").where("referralCode", "==", wanted).limit(1).get();
+      if (found.empty) badRequest(`No account has the referral code "${wanted}".`);
+      newReferrerID = found.docs[0].id;
+      if (newReferrerID === userID) badRequest("A user can't be referred by their own code.");
+      // no loops: if this user already referred the new referrer, A → B → A would result
+      const loop = await db.collection("referrals").where("referrerUserID", "==", userID).where("referredUserID", "==", newReferrerID).limit(1).get();
+      if (!loop.empty) badRequest("That account was referred by this user, so it can't also be their referrer.");
+    }
+    if (newReferrerID !== oldReferrerID) {
+      referral = { oldRows, oldReferrerCode, newReferrerID, newReferrerCode: wanted || "" };
+    }
+  }
+
+  // trim text and skip anything that is already that value
+  const effective = changes
+    .map((c) => ({ ...c, newValue: typeof c.newValue === "string" ? c.newValue.trim() : c.newValue }))
+    .filter((c) => plainValue(before[c.collection]?.[c.field]) !== plainValue(c.newValue));
+
+  if (effective.length) await applyProfileChanges(userID, effective);
+  if (newCode) await userSnap.ref.update({ referralCode: newCode, updatedAt: timestamp() });
+  if (referral) {
+    const batch = db.batch();
+    referral.oldRows.docs.forEach((d) => batch.delete(d.ref));
+    if (referral.newReferrerID) {
+      const ref = db.collection("referrals").doc();
+      batch.set(ref, { referralID: ref.id, referrerUserID: referral.newReferrerID, referredUserID: userID, createdAt: timestamp() });
+    }
+    await batch.commit();
+  }
+
+  const changed = effective.map((c) => ({ field: c.field, from: plainValue(before[c.collection]?.[c.field]), to: plainValue(c.newValue) }));
+  if (newCode) changed.push({ field: "referralCode", from: plainValue(before.user.referralCode), to: newCode });
+  if (referral) changed.push({ field: "referredBy", from: referral.oldReferrerCode, to: referral.newReferrerCode });
+  return { userID, changed };
+};
+
+// Replace a user's license / ID photo directly (no review step — the admin IS the reviewer). The browser uploads the file to
+// Storage first; the URL must point at that user's own upload folder, so it cannot be an arbitrary or external image.
+export const adminReplaceUserDocument = async (userID, { documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber }) => {
+  await requireLiveUser(userID);
+  if (!["license", "document"].includes(documentKind)) badRequest("documentKind must be 'license' or 'document'.");
+
+  let parsed;
+  try { parsed = new URL(String(newUrl || "")); } catch { badRequest("newUrl must be a valid URL."); }
+  let objectPath = "";
+  try { objectPath = decodeURIComponent(parsed.pathname.split("/o/")[1] || ""); } catch { /* checked below */ }
+  const folder = documentKind === "license" ? "driverLicenseResubmit" : "documentResubmit";
+  if (parsed.protocol !== "https:" || parsed.hostname !== "firebasestorage.googleapis.com" || !objectPath.startsWith(`${folder}/${userID}_`)) {
+    badRequest("newUrl must be a Firebase Storage upload for this user.");
+  }
+  if (documentKind === "license" && !driverLicenseExpiry) badRequest("driverLicenseExpiry is required when replacing a license.");
+  if (documentKind === "document" && (!String(documentType || "").trim() || !String(documentNumber || "").trim())) {
+    badRequest("documentType and documentNumber are required when replacing an ID document.");
+  }
+
+  return applyOwnDocumentUpdate(
+    userID, documentKind, newUrl, driverLicenseExpiry,
+    documentType === undefined ? undefined : String(documentType).trim(),
+    documentNumber === undefined ? undefined : String(documentNumber).trim(),
+  );
+};
