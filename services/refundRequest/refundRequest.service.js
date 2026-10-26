@@ -2001,24 +2001,14 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AUTO-APPROVE (customer asked within the 2-hour grace window)
+// AUTO-APPROVE (customer asked within the 2-hour grace window) is NOT done here any more.
 //
-// For a grace-window request the customer backend calls POST /api/internal/refund-requests/:id/auto-approve right after
-// creating it. Staff review is skipped: this runs the SAME approveRefundRequest() staff use (lock, plan, booking cancel,
-// customer notification), as the "system" user. For a payment made today it is saved with a sendAfter and the cron sends
-// the money tomorrow. If that call fails the request simply stays Pending: the customer backend notifies staff, who
-// approve it by hand on the Refunds page (nothing sweeps it up automatically).
+// The CUSTOMER backend approves a grace-window request itself, in the same call that creates it
+// (arltrack-customer-backend/utils/payments/autoApproveRefund.util.js). It never calls this backend and never calls PayMongo:
+// it saves the request as Approved with a sendAfter (the next Manila midnight) and the pending "out" rows, exactly like an
+// approval of a same-day payment here, and the cron below (runScheduledRefunds) sends the money. Keep what it writes in step
+// with approveRefundRequest() above: the cron, the hand-back flow and the Dashboard read those rows and fields.
 // ─────────────────────────────────────────────────────────────────────────────
-export const autoApproveRefundRequest = async (refundRequestID) => {
-  const snap = await db.collection("refundRequests").doc(refundRequestID).get();
-  if (!snap.exists) throw fail("Refund request not found.", 404);
-  const r = snap.data();
-  if (r.status !== "Pending") return { skipped: true, status: r.status };   // already handled: calling twice is harmless
-  return approveRefundRequest(refundRequestID, "system", {
-    reason: "Auto-approved: requested within 2 hours of paying the deposit.",
-    cancelReason: "Cancelled: refund requested within the 2-hour grace window.",
-  });
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SCHEDULED SEND (same-day rule) -- sends the PayMongo refunds of an Approved request whose `sendAfter` has passed.

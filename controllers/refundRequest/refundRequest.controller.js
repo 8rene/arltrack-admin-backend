@@ -6,7 +6,6 @@ import {
   rejectRefundRequest,
   markManualRefundIssued,
   markFailedRefundHandedBack,
-  autoApproveRefundRequest,
   retryScheduledRefund,
 } from "../../services/refundRequest/refundRequest.service.js";
 
@@ -119,17 +118,6 @@ export const failedRefundHandedBack = async (req, res) => {
     });
   } catch (error) {
     console.error("[REFUND] failed-handback error:", error);
-    return res.status(error.status || 500).json({ success: false, message: error.message });
-  }
-};
-
-// Called by the CUSTOMER backend right after it creates a grace-window request (see routes: x-internal-secret, no login).
-export const autoApproveRefund = async (req, res) => {
-  try {
-    const data = await autoApproveRefundRequest(req.params.id);
-    return res.status(200).json({ success: true, data });
-  } catch (error) {
-    console.error("[REFUND] auto-approve error:", error.message);
     return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };

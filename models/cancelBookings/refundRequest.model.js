@@ -59,12 +59,15 @@ export const RefundRequest = {
   gatewayFeeKept: 0,   // online payment (gateway) fee kept on this refund: only when the deposit goes back (0 = fully refunded)
   forfeitWaived: false,
   // ── Written by the customer backend when it creates the request (requestRefund) ──
-  // A request made inside the 2-hour grace window is NOT flagged: the customer backend just calls
-  // POST /api/internal/refund-requests/:id/auto-approve right after creating it, and the admin backend approves it without staff
-  // review. If that call fails the request stays Pending, the customer backend notifies staff, and they approve it by hand.
+  // A request made inside the 2-hour grace window is NOT flagged: the customer backend approves it ITSELF right after creating it
+  // (utils/payments/autoApproveRefund.util.js), with no staff review and no call to this backend. For a payment made today it saves
+  // the request as Approved with a sendAfter and pending "out" rows, and this backend's cron sends the money. If that approval
+  // fails the request stays Pending, the customer backend notifies staff, and they approve it by hand.
   depositGraceApplied: false, // true = under 48h before pickup, but asked inside the grace window, so the deposit goes back
   // ── Same-day rule (PayMongo can't PARTIALLY refund a payment on the day it was made) ──
-  // Written when a request is approved and part of it is smaller than the charge it refunds AND that charge was paid today (Manila).
+  // Written when a request is approved (by staff in the admin backend, or by the customer backend for a grace-window request) and
+  // part of it is smaller than the charge it refunds AND that charge was paid today (Manila). A grace-window approval from the
+  // customer backend always schedules its online parts, because that backend never sends to PayMongo itself.
   // Nothing is sent to PayMongo at approval; runScheduledRefunds() (admin cron, 16:10 UTC = 00:10 Manila) sends it after sendAfter.
   // What to send (each part's PayMongo payment id + amount) is on the request's online "out" rows in paymentEntries, not here.
   sendAfter: null,           // the next Manila midnight; absent when the refund went out immediately, and removed again once it has been sent
