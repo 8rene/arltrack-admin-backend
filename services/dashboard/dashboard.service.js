@@ -3,9 +3,56 @@ import admin from "firebase-admin";
 import { loadLiveBookingKeys, countsAsRevenue } from "../payments/paymentHelpers.js";
 import { resolveVehicleName } from "../booking/booking.service.js";
 import { getPayoutsNeedingAttention } from "../depositReturn/depositReturn.service.js";
+import { ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 
 // Deposit / discount returns that failed or are still processing at PayMongo (the dashboard raises an alert / warning).
 export const getReturnAlerts = () => getPayoutsNeedingAttention();
+
+// Scheduled (same-day payment) refunds for the Dashboard: when each was put on the schedule, when it is sent, and
+// whether the automatic send already failed. States:
+//   "scheduled" -> waiting for its send time (nothing to do)
+//   "due"       -> send time passed, the nightly job has not sent it yet
+//   "retry"     -> the automatic send failed with a temporary error: staff press "Retry now" on Refund Requests
+//   "failed"    -> PayMongo rejected it for good (request is Failed): hand it back manually
+const tsToDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : v ? new Date(v) : null);
+export const getScheduledRefunds = async () => {
+  const [approvedSnap, failedSnap] = await Promise.all([
+    db.collection("refundRequests").where("status", "==", "Approved").get(),
+    db.collection("refundRequests").where("status", "==", "Failed").get(),
+  ]);
+  const docs = [...approvedSnap.docs, ...failedSnap.docs].filter((d) => {
+    const r = d.data();
+    return r.sendAfter && !r.scheduledSentAt;   // only requests that were scheduled
+  });
+  const now = Date.now();
+  const out = [];
+  for (const d of docs) {
+    const r = d.data();
+    const rows = (await db.collection(ENTRY_COLLECTION).where("refundReqID", "==", d.id).get()).docs.map((x) => x.data());
+    const online = rows.filter((v) => v.direction === "out" && v.source === "online" && !v.handBackFor && v.status !== "unrefundable");
+    const unsent = online.filter((v) => !v.referenceNumber && v.status !== "success");
+    const errorNote = (unsent.find((v) => v.transactionErrorNote) || {}).transactionErrorNote || null;
+    // Failed with nothing left unsent = the failure was not a scheduled send: the normal Refund Failed alert covers it.
+    if (r.status === "Failed" && !errorNote) continue;
+    // Approved and every part already has a PayMongo refund id: it was sent, only the cleanup is missing.
+    if (r.status === "Approved" && unsent.length === 0 && online.length > 0) continue;
+    const created = online.map((v) => tsToDate(v.createdAt)).filter(Boolean).sort((a, b) => a - b)[0];
+    const scheduledAt = tsToDate(r.scheduledAt) || created || tsToDate(r.updatedAt);
+    const sendAfter = tsToDate(r.sendAfter);
+    const due = sendAfter && sendAfter.getTime() <= now;
+    const state = r.status === "Failed" ? "failed" : errorNote && due ? "retry" : due ? "due" : "scheduled";
+    out.push({
+      refundRequestID: d.id,
+      bookingID: r.bookingID || null,
+      amount: unsent.length ? unsent.reduce((a, v) => a + (Number(v.amount) || 0), 0) : (r.toRefundAmount ?? r.amount ?? 0),
+      state,
+      scheduledAt: scheduledAt ? scheduledAt.toISOString() : null,
+      sendAfter: sendAfter ? sendAfter.toISOString() : null,
+      errorNote,
+    });
+  }
+  return out.sort((a, b) => String(a.sendAfter).localeCompare(String(b.sendAfter)));
+};
 
 const parsePaymentTotal = (data) => {
   const rental  = parseFloat(data.rentalFee  ?? 0) || 0;

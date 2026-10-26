@@ -116,14 +116,19 @@ const computeRefundSchedule = (payment, plan, now = new Date()) => {
   }
   return { deferred: false, sendAfter: null };
 };
+// Was this payment made on the same Manila calendar day as `now`? Same test computeRefundSchedule uses, exported so the
+// deposit return (depositReturn.service.js) can refuse an online partial refund PayMongo would reject today anyway.
+export const wasPaidTodayManila = (paidAt, now = new Date()) => {
+  const d = toDateSafe(paidAt);
+  return !!d && manilaDayStart(d).getTime() === manilaDayStart(now).getTime();
+};
 const fmtManilaDate = (d) => toDateSafe(d)
   ? toDateSafe(d).toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" })
   : "the next day";
 
-// A scheduled send is tried again by the cron up to this many times, then left for staff ("Retry now").
-const MAX_SCHEDULED_ATTEMPTS = 5;
-// Errors worth trying again later: the same-day restriction (timezone edge), PayMongo balance not ready, PayMongo
-// unreachable. Anything else (payment can't be refunded, already refunded, ...) is permanent and goes to staff.
+// The cron sends a scheduled refund ONCE and never retries it by itself. Errors that are only temporary (the same-day
+// restriction at a timezone edge, PayMongo balance not ready, PayMongo unreachable) leave the request Approved so staff can
+// press "Retry now". Anything else (payment can't be refunded, already refunded, ...) is permanent: the request is marked Failed.
 const isRetryableRefundError = (err) => {
   if (!err) return false;
   if (err.status === 502) return true;
@@ -752,14 +757,14 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       // is closed by this approval) -- is stored on each part's "out" row in paymentEntries (paymongoPaymentID, amount).
       ...(schedule.deferred ? {
         sendAfter: schedule.sendAfter,
-        refundAttempts: 0,
+        scheduledAt: now,   // when it was put on the schedule (shown on the Dashboard); removed together with sendAfter once sent
       } : {}),
       ...(decisionReason && canWriteDecisionReason(claimed, cancelRow) ? { reason: decisionReason } : {}),
       updatedAt: now,
     };
-    // Who approved and when are not stored on the refund request: the booking's cancellation row carries them
-    // (cancelBookingForRefund writes processedBy there). The "out" rows still get them -- they are passed to the
-    // rows' writer below, which is the only thing that reads them from the request.
+    // Who approved is stored on the request (processedBy, written in the batch below). When is not: the "out" rows and the
+    // audit log carry the time. Both are also passed to the rows' writer below, which is the only thing that reads them
+    // from the request.
     const approvedBy = { processedBy: adminUserID, processedAt: now };
     // parts / manualRefund / unrefundable go ONLY to paymentEntries ("out" rows), committed together with the
     // status change. Strict: if the rows can't be written the request stays Pending-with-lock, never "Approved"
@@ -856,6 +861,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
       source: "staff",
       outcome: outcome === "deposit_forfeited" ? "nothing_owed" : outcome,
       ...extra,
+      processedBy: staffUserID || null,
       toRefundAmount: 0,
       status: "Refunded", // nothing left to do — no manual portion to issue later
       createdAt: now,
@@ -1257,6 +1263,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         toRefundAmount: totalToRefund,
         bookingPaid: plan.grossPaid,
         depositForfeited: forfeit,
+        processedBy: staffUserID || null,
         returnDeposit: forfeit === 0,   // false only for a no-show where the deposit is kept
         status: "Pending",
         approvalLockedAt: claimedAt,
@@ -1298,6 +1305,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         const failedBatch = db.batch();
         failedBatch.update(reqRef, {
           status: "Failed",
+          processedBy: staffUserID || null,
           updatedAt: failedAt,
           approvalLockedAt: admin.firestore.FieldValue.delete(),
         });
@@ -1327,6 +1335,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       toRefundAmount: totalToRefund,
       bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
+      processedBy: staffUserID || null,
       updatedAt: now,
     };
     // Same rule as approveRefundRequest: the rows are the record, committed with the status, strict.
@@ -1502,17 +1511,35 @@ export const markFailedRefundHandedBack = async (refundRequestID, issuedBy, meth
     const snap = await t.get(reqRef);
     if (!snap.exists) throw fail("Refund request not found.", 404);
     const r = snap.data();
-    if (r.status !== "Failed") throw fail(`Only a Failed refund can be handed back this way (this one is ${r.status}).`, 409);
+    // A Failed request (PayMongo refused a part), OR an Approved one whose SCHEDULED same-day send hit a temporary error and
+    // is waiting for "Retry now": staff may pay that unsent part back themselves instead of retrying.
+    const scheduledStuck = r.status === "Approved";
+    if (r.status !== "Failed" && !scheduledStuck) throw fail(`Only a Failed refund can be handed back this way (this one is ${r.status}).`, 409);
+    if (scheduledStuck) {
+      if (!r.sendAfter || r.scheduledSentAt) throw fail("Only a Failed refund, or a scheduled refund whose send failed, can be handed back this way.", 409);
+      if (isLocked(r)) throw fail("This refund is being processed right now. Refresh in a moment.", 409);
+    }
 
     const rowSnap = await t.get(entryCol.where("refundReqID", "==", refundRequestID));
     const rows = rowSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((e) => e.direction === "out");
 
     const covered = new Set(rows.filter((e) => e.handBackFor && e.status === "success").map((e) => e.handBackFor));
     const failedRows = rows.filter((e) => e.source === "online" && e.status === "failed" && !covered.has(e.id));
-    if (!failedRows.length) throw fail("There is no failed part left to hand back on this refund.", 409);
+    // Scheduled send that failed: its online parts were never sent (no PayMongo refund id) and the last error is on a row.
+    const unsentRows = scheduledStuck
+      ? rows.filter((e) => e.source === "online" && !e.handBackFor && !e.referenceNumber && e.status !== "success" && e.status !== "unrefundable" && e.status !== "failed")
+      : [];
+    if (scheduledStuck && !unsentRows.some((e) => e.transactionErrorNote)) {
+      throw fail("The scheduled send has not failed. It is sent automatically after its send time; hand it back only once it could not be sent.", 409);
+    }
+    const handBackRows = [...failedRows, ...unsentRows];
+    if (!handBackRows.length) throw fail("There is no failed part left to hand back on this refund.", 409);
 
     const now = new Date();
-    const written = failedRows.map((f) => {
+    // The unsent parts are closed as failed (the error note stays) and covered by the hand-back rows below, exactly like a
+    // part PayMongo refused. This is what stops a later "Retry now" or the cron from sending the same money again.
+    unsentRows.forEach((f) => t.update(entryCol.doc(f.id), { status: "failed", updatedAt: now }));
+    const written = handBackRows.map((f) => {
       const id = `${f.id}_handback`;
       const row = {
         paymentEntryID: id,
@@ -1544,19 +1571,24 @@ export const markFailedRefundHandedBack = async (refundRequestID, issuedBy, meth
     });
 
     // Anything else still open? (a PayMongo part not settled yet, or the original in-person portion not handed back)
-    const stillOnline = rows.some((e) => e.source === "online" && e.status !== "unrefundable" && e.status !== "success" && e.status !== "failed");
+    const closedNow = new Set(unsentRows.map((e) => e.id));
+    const stillOnline = rows.some((e) => e.source === "online" && !closedNow.has(e.id) && e.status !== "unrefundable" && e.status !== "success" && e.status !== "failed");
     const manualOutstanding = rows.some((e) => e.source === "in_person" && !e.handBackFor && e.status !== "success");
     const finalize = !stillOnline && !manualOutstanding;
 
     // Everything the customer has actually been given back, counting these hand-backs.
+    // `rows` is the state BEFORE this transaction's writes, so a scheduled part closed just now (closedNow) still reads as
+    // "pending" there: leave it out, its money is the hand-back row in `written`, or it would be counted twice.
     const returnedTotal = rows
-      .filter((e) => e.status === "success" || (e.status === "pending" && e.source === "online"))
+      .filter((e) => !closedNow.has(e.id) && (e.status === "success" || (e.status === "pending" && e.source === "online")))
       .reduce((s, e) => s + (Number(e.amount) || 0), 0)
       + written.reduce((s, e) => s + e.amount, 0);
 
     t.update(reqRef, {
       status: finalize ? "Refunded" : "Approved",
       updatedAt: now,
+      // Nothing is left to send: no sendAfter = the cron and "Retry now" never touch this request again.
+      ...(scheduledStuck ? { sendAfter: admin.firestore.FieldValue.delete(), scheduledAt: admin.firestore.FieldValue.delete() } : {}),
       ...(finalize ? { refundedAt: now, toRefundAmount: Math.round(returnedTotal * 100) / 100 } : {}),
     });
     return { request: r, rows, written, finalize, returnedTotal: Math.round(returnedTotal * 100) / 100 };
@@ -1995,10 +2027,10 @@ export const autoApproveRefundRequest = async (refundRequestID) => {
 //   * a part whose "out" row already has a PayMongo refund id (referenceNumber) is SKIPPED, so a retry never refunds twice
 //   * the refund id is written to the row right after PayMongo accepts it (before anything else can fail)
 //   * what to send comes from the request's online "out" rows (each carries its paymongoPaymentID and amount)
-//   * retryable errors (same-day edge, balance not ready, PayMongo unreachable): the request stays Approved and the cron
-//     tries again on its next run, up to MAX_SCHEDULED_ATTEMPTS; once refundAttempts reaches that the cron skips it and
-//     staff are notified ("Retry now" resets the counter)
-//   * when everything is sent, sendAfter and refundAttempts are removed from the request: no sendAfter = nothing left to send
+//   * temporary errors (same-day edge, balance not ready, PayMongo unreachable): NO automatic retry. The request stays Approved,
+//     the error is saved on the part's "out" row (transactionErrorNote), staff are notified, and the cron skips it from then on;
+//     staff use "Retry now"
+//   * when everything is sent, sendAfter is removed from the request: no sendAfter = nothing left to send
 //   * a permanent error marks the request Failed: staff use the existing "failed hand-back" flow
 //   * the PayMongo refund.updated webhook (customer backend) settles the rows exactly as for an immediate refund
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2049,25 +2081,19 @@ export const sendScheduledRefund = async (refundRequestID, { force = false, acto
         await row.ref.update({ referenceNumber: paymongoRefundID, status: "pending", transactionErrorNote: null, processedAt: new Date(), updatedAt: new Date() });
         sentNow += 1;
       } catch (e) {
-        const attempts = (Number(claimed.refundAttempts) || 0) + 1;
         const anySent = sentNow > 0 || partRows.some((rw, idx) => idx < i && rw.data().referenceNumber);
-        if (isRetryableRefundError(e) && !anySent && attempts < MAX_SCHEDULED_ATTEMPTS) {
-          await row.ref.update({ transactionErrorNote: e.message, updatedAt: new Date() }).catch(() => {});
-          await reqRef.update({ refundAttempts: attempts, approvalLockedAt: admin.firestore.FieldValue.delete() });
-          auditSafe({ action: "system", description: `Scheduled refund ${refundRequestID}: PayMongo said "${e.message}" (attempt ${attempts}/${MAX_SCHEDULED_ATTEMPTS}). It will be tried again on the next run.`, userID: actor, bookingID: claimed.bookingID, paymentID: claimed.paymentID, refundRequestID });
-          throw fail(`PayMongo could not send the refund yet: ${e.message} (attempt ${attempts}/${MAX_SCHEDULED_ATTEMPTS}). It will be retried automatically.`, 502);
-        }
         if (isRetryableRefundError(e) && !anySent) {
-          // out of automatic attempts: stays Approved for staff ("Retry now"); refundAttempts >= MAX makes the cron stop trying
+          // Temporary error, nothing sent yet: stays Approved for staff ("Retry now"). No automatic retry.
           await row.ref.update({ transactionErrorNote: e.message, updatedAt: new Date() }).catch(() => {});
-          await reqRef.update({ refundAttempts: attempts, approvalLockedAt: admin.firestore.FieldValue.delete() });
-          await notifyStaff({ type: "refund_due", refID: claimed.bookingID, refCollection: "bookings", title: "Scheduled refund could not be sent", message: `The scheduled refund for booking ${claimed.bookingID} failed ${attempts} times (${e.message}). Open Refund Requests and use "Retry now", or hand it back manually.` }).catch(() => {});
-          throw fail(`PayMongo still can't send this refund (${e.message}). Automatic retries are used up: staff must retry or hand it back.`, 502);
+          await reqRef.update({ approvalLockedAt: admin.firestore.FieldValue.delete() });
+          await notifyStaff({ type: "refund_due", refID: claimed.bookingID, refCollection: "bookings", title: "Scheduled refund could not be sent", message: `The scheduled refund for booking ${claimed.bookingID} could not be sent (${e.message}). Open Refund Requests and use "Retry now", or hand it back manually.` }).catch(() => {});
+          auditSafe({ action: "system", description: `Scheduled refund ${refundRequestID}: PayMongo said "${e.message}". Not sent; staff must use "Retry now" or hand it back.`, userID: actor, bookingID: claimed.bookingID, paymentID: claimed.paymentID, refundRequestID });
+          throw fail(`PayMongo could not send the refund: ${e.message}. Staff can use "Retry now", or hand it back manually.`, 502);
         }
         // permanent error (or a later part failed after an earlier one went out): same outcome as approve -> Failed, staff finish it
         const failedAt = new Date();
         await row.ref.update({ status: "failed", transactionErrorNote: e.message, updatedAt: failedAt });
-        await reqRef.update({ status: "Failed", refundAttempts: attempts, updatedAt: failedAt, approvalLockedAt: admin.firestore.FieldValue.delete() });
+        await reqRef.update({ status: "Failed", updatedAt: failedAt, approvalLockedAt: admin.firestore.FieldValue.delete() });
         await notifyStaff({ type: "refund_due", refID: claimed.bookingID, refCollection: "bookings", title: "Scheduled refund failed", message: `PayMongo rejected the scheduled refund for booking ${claimed.bookingID}: ${e.message}. Hand it back manually from the Refund Requests page.` }).catch(() => {});
         auditSafe({ action: "system", description: `Scheduled refund ${refundRequestID} FAILED at PayMongo (${e.message}) -- marked Failed for manual follow-up.`, userID: actor, bookingID: claimed.bookingID, paymentID: claimed.paymentID, refundRequestID });
         throw fail(`PayMongo rejected the refund: ${e.message}. The request is marked Failed -- please hand it back manually.`, 502);
@@ -2075,7 +2101,7 @@ export const sendScheduledRefund = async (refundRequestID, { force = false, acto
     }
 
     // Done: no sendAfter left on the request = nothing left to send (the cron only looks at requests that still have one).
-    await reqRef.update({ sendAfter: admin.firestore.FieldValue.delete(), refundAttempts: admin.firestore.FieldValue.delete(), updatedAt: new Date(), approvalLockedAt: admin.firestore.FieldValue.delete() });
+    await reqRef.update({ sendAfter: admin.firestore.FieldValue.delete(), scheduledAt: admin.firestore.FieldValue.delete(), updatedAt: new Date(), approvalLockedAt: admin.firestore.FieldValue.delete() });
     // Every part had already gone out before (an old request that was sent but not marked): nothing new to tell the customer.
     if (sentNow === 0) return { refundRequestID, sent: 0 };
     auditSafe({ action: "system", description: `Scheduled refund ${refundRequestID}: ${sentNow} PayMongo refund(s) sent after the same-day wait.`, userID: actor, bookingID: claimed.bookingID, paymentID: claimed.paymentID, refundRequestID });
@@ -2088,29 +2114,31 @@ export const sendScheduledRefund = async (refundRequestID, { force = false, acto
   }
 };
 
-// Staff "Retry now": resets the attempt counter and sends right away (still refuses a same-day payment's send time).
+// Staff "Retry now": sends right away (still refuses a same-day payment's send time).
 export const retryScheduledRefund = async (refundRequestID, staffUserID) => {
-  await db.collection("refundRequests").doc(refundRequestID).update({ refundAttempts: 0 }).catch(() => {});
   return sendScheduledRefund(refundRequestID, { force: true, actor: staffUserID || "system" });
 };
 
-// What the cron runs: every scheduled send that is due (an Approved request that still has a sendAfter).
+// What the cron runs: every scheduled send that is due (an Approved request that still has a sendAfter). Each is tried ONCE.
+// One that already failed (its online "out" row carries the error) is skipped: there is no automatic retry, staff use "Retry now".
 export const runScheduledRefunds = async () => {
-  const out = { sent: 0, retryLater: 0, failed: 0, errors: [] };
+  const out = { sent: 0, skipped: 0, failed: 0, errors: [] };
+
+  const hasSendError = async (refundRequestID) => {
+    const rows = await db.collection(ENTRY_COLLECTION).where("refundReqID", "==", refundRequestID).get();
+    return rows.docs.some((x) => { const v = x.data(); return v.direction === "out" && v.source === "online" && !v.handBackFor && !v.referenceNumber && !!v.transactionErrorNote; });
+  };
 
   const approved = await db.collection("refundRequests").where("status", "==", "Approved").get();
   const now = Date.now();
   for (const d of approved.docs) {
     const r = d.data();
     if (!r.sendAfter || r.scheduledSentAt) continue;   // scheduledSentAt: an old request that was already sent
-    if ((Number(r.refundAttempts) || 0) >= MAX_SCHEDULED_ATTEMPTS) continue;   // automatic attempts used up: staff use "Retry now"
     const due = toDateSafe(r.sendAfter);
     if (due && due.getTime() > now) continue;
+    if (await hasSendError(d.id)) { out.skipped += 1; continue; }   // already tried and failed: waiting for staff
     try { await sendScheduledRefund(d.id); out.sent += 1; }
-    catch (e) {
-      if (e.status === 502 && /retried automatically/.test(e.message)) out.retryLater += 1; else out.failed += 1;
-      out.errors.push(`${d.id}: ${e.message}`);
-    }
+    catch (e) { out.failed += 1; out.errors.push(`${d.id}: ${e.message}`); }
   }
   return out;
 };

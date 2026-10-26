@@ -1,5 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { createPaymongoRefund } from "../refundRequest/refundRequest.service.js";
+import { createPaymongoRefund, wasPaidTodayManila } from "../refundRequest/refundRequest.service.js";
 import { hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolvePaymongoIDs, getPaymentBreakdown } from "../payments/paymentBreakdown.js";
 import { notifyStaff, resolveNotification, createNotification } from "../notification/notification.service.js";
@@ -57,6 +57,13 @@ export const planOnlineDepositReturn = (payment, amount) => {
   }
   if (!ids.deposit) {
     return { ok: false, reason: "This payment's PayMongo record is incomplete (no payment id for the deposit), so it can only be handed back in store." };
+  }
+  // Same-day rule (see computeRefundSchedule in refundRequest.service.js): PayMongo can't PARTIALLY refund a payment on the day
+  // it was made, and a deposit / discount return is always smaller than the first payment. Refusing here, before anything is
+  // saved, means no failed row, no staff alert and no "return delayed" message to the customer. From the next Manila day on
+  // the same call is accepted (this also covers a retry).
+  if (wasPaidTodayManila(payment && payment.paidAt)) {
+    return { ok: false, reason: "The first payment was made today, and PayMongo can't partially refund a payment on the day it was made. Hand it back in store, or return it online from tomorrow." };
   }
   const collected = getPaymentBreakdown(payment).depositCollected;
   if (amount > collected) {

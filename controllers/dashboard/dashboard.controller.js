@@ -1,4 +1,4 @@
-import { getDashboardMetrics, getReturnAlerts } from "../../services/dashboard/dashboard.service.js";
+import { getDashboardMetrics, getReturnAlerts, getScheduledRefunds } from "../../services/dashboard/dashboard.service.js";
 
 export const dashboardMetrics = async (req, res) => {
   try {
@@ -19,5 +19,14 @@ export const dashboardReturnAlerts = async (req, res) => {
   } catch (error) {
     console.error("[DASHBOARD] Error fetching return alerts:", error);
     return res.status(500).json({ success: false, message: "Failed to load refund alerts." });
+  }
+};
+
+export const dashboardScheduledRefunds = async (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: await getScheduledRefunds() });
+  } catch (error) {
+    console.error("[DASHBOARD] Error fetching scheduled refunds:", error);
+    return res.status(500).json({ success: false, message: "Failed to load scheduled refunds." });
   }
 };

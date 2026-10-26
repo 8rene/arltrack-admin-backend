@@ -1,4 +1,4 @@
-import { dashboardMetrics, dashboardReturnAlerts } from "../../controllers/dashboard/dashboard.controller.js";
+import { dashboardMetrics, dashboardReturnAlerts, dashboardScheduledRefunds } from "../../controllers/dashboard/dashboard.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -8,4 +8,5 @@ const allowed = [roles.SUPERVISOR, roles.ADMIN, roles.OWNER];
 export const registerDashboardRoutes = (app) => {
   app.get("/api/dashboard/metrics", verifyToken, requireRole(allowed), dashboardMetrics);
   app.get("/api/dashboard/return-alerts", verifyToken, requireRole(allowed), dashboardReturnAlerts);
+  app.get("/api/dashboard/scheduled-refunds", verifyToken, requireRole(allowed), dashboardScheduledRefunds);
 };
