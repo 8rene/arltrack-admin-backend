@@ -6,6 +6,8 @@ import {
   rejectRefundRequest,
   markManualRefundIssued,
   markFailedRefundHandedBack,
+  autoApproveRefundRequest,
+  retryScheduledRefund,
 } from "../../services/refundRequest/refundRequest.service.js";
 
 export const listRefundRequests = async (req, res) => {
@@ -53,8 +55,12 @@ export const approveRefund = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: data.manualAmount > 0
-        ? "Refund approved and sent to PayMongo. Part of it must be handed back in person — mark it as returned once done. The booking has been cancelled."
-        : "Refund approved and sent to PayMongo. Final status will update once PayMongo confirms.",
+        ? (data.scheduled
+            ? "Refund approved. The payment was made today, so PayMongo can't send it yet: it is scheduled for the next day. Part of it must be handed back in person — mark it as returned once done. The booking has been cancelled."
+            : "Refund approved and sent to PayMongo. Part of it must be handed back in person — mark it as returned once done. The booking has been cancelled.")
+        : (data.scheduled
+            ? "Refund approved. The payment was made today, so PayMongo can't send it yet: it is scheduled for the next day and will be sent automatically. The booking has been cancelled."
+            : "Refund approved and sent to PayMongo. Final status will update once PayMongo confirms."),
       data,
     });
   } catch (error) {
@@ -113,6 +119,29 @@ export const failedRefundHandedBack = async (req, res) => {
     });
   } catch (error) {
     console.error("[REFUND] failed-handback error:", error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+// Called by the CUSTOMER backend right after it creates a grace-window request (see routes: x-internal-secret, no login).
+export const autoApproveRefund = async (req, res) => {
+  try {
+    const data = await autoApproveRefundRequest(req.params.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[REFUND] auto-approve error:", error.message);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+// Staff "Retry now" on a scheduled refund that could not be sent.
+export const retryScheduledRefundSend = async (req, res) => {
+  try {
+    const staffUserID = req.user?.userID || req.user?.uid || null;
+    const data = await retryScheduledRefund(req.params.id, staffUserID);
+    return res.status(200).json({ success: true, message: "Refund sent to PayMongo. Final status will update once PayMongo confirms.", data });
+  } catch (error) {
+    console.error("[REFUND] retry scheduled error:", error.message);
     return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };
