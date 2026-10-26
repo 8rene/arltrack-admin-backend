@@ -595,92 +595,107 @@ export const getCarTraceback = async (req, res) => {
     // logs for whichever session actually spans this date — records above
     // come straight from Sheets with no session context, so we look up the
     // session separately here rather than change how records are sourced.
-    let geofenceZones = [];
-    let geofenceAlerts = [];
-    let codingAlerts = [];
-    let codingWarnings = []; // booking-time coding warnings saved on the session
-    // { bookingSessionID, bookingID, status, startedAt, endedAt } for
-    // whichever session owns this date — powers TracebackBookingInfoPanel's
-    // read-only summary + canEdit check ("today" + status === "active") on
-    // the frontend. null when no session covers this date.
-    let session = null;
-    // Holidays inside this trip's dates -- the live records carry none, the saved file does, so a trip still in
-    // progress had no holiday box on Traceback. [] when there is no session or the lookup fails.
-    let holidays = [];
+    // A car can have MORE THAN ONE trip on the same date (one finishes, the next is booked and picked up
+    // later that day). Trips never overlap in time, but they do share a date, so every trip that touches
+    // this date is returned in `sessions` -- each with its OWN zones / alerts / warnings / holidays. The
+    // frontend picks the right one for the instant being scrubbed. The top-level fields below stay as
+    // they were (the newest trip on the date) so older clients keep working.
+    let sessions = [];
     try {
-      // A session covers a date from its REAL start (startedAt) to its real
-      // end (see sessionEndedAt) or "now" while it's still going. Sessions that
-      // never started have no start, so they never match — they have no trail.
-      const findMatch = (sessions) => sessions.find((s) => {
+      // A session covers a date from its REAL start (startedAt) to its real end (see sessionEndedAt) or
+      // "now" while it's still going. Sessions that never started have no start, so they never match.
+      const findMatches = (list) => list.filter((s) => {
         const start = sessionStartedAt(s.data);
         if (!start) return false;
         const end = sessionEndedAt(s.data) || new Date();
         return datesBetweenPHT(start, end).includes(date);
       });
 
-      // Bounded lookup first (a few reads); only if it errors (e.g. index not
-      // built yet) or finds nothing do we fall back to reading every session.
       const endOfDate = new Date(`${date}T23:59:59.999+08:00`); // PHT end of day
-      let match = null;
-      let recent = null; // null = bounded lookup unavailable (error); [] = ran, found nothing
-      try {
-        recent = await getRecentSessionsByCarUpTo(carId, endOfDate);
-        match = findMatch(recent);
-      } catch (e) {
-        console.warn("[GPS] bounded session lookup failed, using full read:", e.message);
-      }
-      // Trips on one car don't overlap, so if the newest few sessions up to
-      // that date don't cover it, no session does — no need to read them all.
-      if (!match && (recent === null || recent.length === 0)) match = findMatch(await getSessionsByCar(carId));
-      let isArchived = false;
 
-      // Live bookingSessions doc is deleted once its booking gets archived
-      // (see bookingDelete.service.js's cascade) — without this fallback,
-      // an archived trip's dots would still show on the map (Sheets rows
-      // are never touched by archiving) but all context around them would
-      // silently vanish. Check the preserved archive copy instead.
-      if (!match) {
-        let recentArch = null;
+      // Live sessions AND archived ones: an earlier trip that has since been archived (its live doc is
+      // deleted) can sit on the same date as a newer, still-live trip, so one must not hide the other.
+      // Bounded lookups first (a few reads); a full read only if a lookup errors or finds nothing at all.
+      const collect = async (getRecent, getAll, isArchived) => {
+        let recent = null; // null = bounded lookup unavailable (error); [] = ran, found nothing
         try {
-          recentArch = await getRecentSessionArchivesByCarUpTo(carId, endOfDate);
-          match = findMatch(recentArch);
+          recent = await getRecent(carId, endOfDate);
         } catch (e) {
-          console.warn("[GPS] bounded archive lookup failed, using full read:", e.message);
+          console.warn("[GPS] bounded session lookup failed, using full read:", e.message);
         }
-        if (!match && (recentArch === null || recentArch.length === 0)) match = findMatch(await getSessionArchivesByCar(carId));
-        isArchived = !!match;
-      }
+        let matches = recent ? findMatches(recent) : [];
+        if (!matches.length && (recent === null || recent.length === 0)) matches = findMatches(await getAll(carId));
+        return matches.map((m) => ({ match: m, isArchived }));
+      };
 
-      if (match) {
-        geofenceZones  = match.data.geofenceZones  || [];
-        geofenceAlerts = match.data.geofenceAlerts || [];
-        codingAlerts   = match.data.codingAlerts   || [];
-        codingWarnings = codingWarningsOut(match.data.codingWarnings);
-        session = {
-          bookingSessionID: match.data.bookingSessionID,
-          bookingID:        match.data.bookingID || null,
-          status:           match.data.status || null,
-          startedAt:        sessionStartedAt(match.data),
-          endedAt:          sessionEndedAt(match.data), // null while still going
+      const [live, archived] = await Promise.all([
+        // limit 8 (the default is 4): the newest N trips up to the end of the date, so a busy day with
+        // several short bookings on one car still finds all of them.
+        collect((id, end) => getRecentSessionsByCarUpTo(id, end, 8), getSessionsByCar, false),
+        collect((id, end) => getRecentSessionArchivesByCarUpTo(id, end, 8), getSessionArchivesByCar, true),
+      ]);
+
+      // Same trip in both places (archived but live doc not yet deleted) -> keep the live one.
+      const seen = new Set();
+      const all = [...live, ...archived].filter(({ match }) => {
+        const id = match.data.bookingSessionID || match.ref?.id;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      all.sort((a, b) => (sessionStartedAt(a.match.data)?.getTime() ?? 0) - (sessionStartedAt(b.match.data)?.getTime() ?? 0));
+
+      sessions = await Promise.all(all.map(async ({ match, isArchived }) => {
+        const d = match.data;
+        const session = {
+          bookingSessionID: d.bookingSessionID,
+          bookingID:        d.bookingID || null,
+          status:           d.status || null,
+          startedAt:        sessionStartedAt(d),
+          endedAt:          sessionEndedAt(d), // null while still going
           // Event times for the Traceback bar flags and the Logs panel (ISO or null).
-          droppedOffAt:     toIso(match.data.droppedOffTime),
-          stolenAt:         toIso(match.data.stolenAt),
+          droppedOffAt:     toIso(d.droppedOffTime),
+          stolenAt:         toIso(d.stolenAt),
           completedAt:      null, // filled just below, only when the trip really ended (one extra read)
           isArchived,
         };
-        if (match.data.status === "ended") session.completedAt = await getBookingCompletedAt(match.data.bookingID);
+        if (d.status === "ended") session.completedAt = await getBookingCompletedAt(d.bookingID);
+        let holidays = [];
         try {
-          holidays = await getHolidaysBetween(sessionStartedAt(match.data), sessionEndedAt(match.data) || new Date());
+          holidays = await getHolidaysBetween(sessionStartedAt(d), sessionEndedAt(d) || new Date());
         } catch (hErr) {
           console.error("[GPS] getCarTraceback holidays lookup error:", hErr.message);
         }
-      }
+        return {
+          session,
+          geofenceZones:  d.geofenceZones  || [],
+          geofenceAlerts: d.geofenceAlerts || [],
+          codingAlerts:   d.codingAlerts   || [],
+          codingWarnings: codingWarningsOut(d.codingWarnings),
+          holidays,
+        };
+      }));
     } catch (lookupErr) {
       console.error("[GPS] getCarTraceback session lookup error:", lookupErr.message);
       // Non-fatal — traceback still returns points, just without zone/alert/session data.
     }
 
-    return res.json({ status: "ok", data: { carId, date, records, geofenceZones, geofenceAlerts, codingAlerts, codingWarnings, holidays, session } });
+    // Legacy single-trip fields = the newest trip on this date.
+    const latest = sessions[sessions.length - 1] || null;
+
+    return res.json({
+      status: "ok",
+      data: {
+        carId, date, records,
+        geofenceZones:  latest?.geofenceZones  || [],
+        geofenceAlerts: latest?.geofenceAlerts || [],
+        codingAlerts:   latest?.codingAlerts   || [],
+        codingWarnings: latest?.codingWarnings || [],
+        holidays:       latest?.holidays       || [],
+        session:        latest?.session        || null,
+        sessions, // every trip touching this date, oldest first
+      },
+    });
   } catch (err) {
     console.error("[GPS] getCarTraceback error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to fetch traceback." });
