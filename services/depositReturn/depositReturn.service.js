@@ -1,5 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { createPaymongoRefund, wasPaidTodayManila } from "../refundRequest/refundRequest.service.js";
+import { createPaymongoRefund, wasPaidTodayManila, paidWithOf } from "../refundRequest/refundRequest.service.js";
 import { hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolvePaymongoIDs, getPaymentBreakdown } from "../payments/paymentBreakdown.js";
 import { notifyStaff, resolveNotification, createNotification } from "../notification/notification.service.js";
@@ -282,10 +282,18 @@ export const getDepositReturns = async () => {
       }
     } catch { /* a name is cosmetic */ }
 
+    // How the customer paid (shown in the Refunds table). Cosmetic: a lookup problem just leaves it empty.
+    let paidWith = null;
+    try {
+      const ps = await db.collection("payments").where("paymentID", "==", paymentID).limit(1).get();
+      if (!ps.empty) paidWith = paidWithOf(await hydratePaymentData(ps.docs[0].data(), ps.docs[0].id));
+    } catch { /* cosmetic */ }
+
     items.push({
       paymentID,
       bookingID: latest.bookingID || null,
       customerName,
+      paidWith,
       createdAt: isoOf(rows[rows.length - 1].createdAt),
       refund: {
         state: stateOfRow(latest),

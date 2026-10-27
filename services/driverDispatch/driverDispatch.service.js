@@ -9,6 +9,7 @@ import { createNotification } from "../../services/notification/notification.ser
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { createPenalty, listPenaltiesForDriver, editPenaltyAsDriver } from "../penalty/penalty.service.js";
 import { sessionStartedAt } from "../../utils/date/sessionDates.js";
+import { getHolidaysBetween, buildCodingSchedule } from "../gps/coding.service.js";
 import { getTermsVersion } from "../terms/terms.service.js";
 import {
   ASSIGNMENT_STATUS, bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getCompletedAssignment,
@@ -819,6 +820,26 @@ const shapeTripsForDriver = async (bookings, { withDocs = false, driverID = null
   const beforeDocsMap = Object.fromEntries(beforeDocsEntries);
   const afterDocsMap  = Object.fromEntries(afterDocsEntries);
 
+  // Holidays for the dated coding schedule on each trip's card. ONE query covering every
+  // trip in this batch that carries coding warnings (not one per trip). If it fails we
+  // still return the schedule, flagged holidaysChecked:false, so the driver's screen can
+  // say "couldn't verify holidays" instead of silently showing a holiday as a coding day.
+  let holidayList = [];
+  let holidaysChecked = true;
+  const codingTrips = bookings
+    .map((b, i) => ({ start: toJSDate(b.startDateTime), end: toJSDate(b.endDateTime), has: Array.isArray(sessions[i]?.data?.codingWarnings) && sessions[i].data.codingWarnings.length > 0 }))
+    .filter((t) => t.has && t.start && t.end && t.end > t.start);
+  if (codingTrips.length) {
+    try {
+      const minStart = new Date(Math.min(...codingTrips.map((t) => t.start.getTime())));
+      const maxEnd   = new Date(Math.max(...codingTrips.map((t) => t.end.getTime())));
+      holidayList = await getHolidaysBetween(minStart, maxEnd);
+    } catch (err) {
+      holidaysChecked = false;
+      console.error("[DRIVER TRIPS] holiday lookup failed:", err.message);
+    }
+  }
+
   return bookings
     .map((b, i) => {
       const bID = b.bookingID || b.id;
@@ -857,6 +878,9 @@ const shapeTripsForDriver = async (bookings, { withDocs = false, driverID = null
         // on the session by the customer backend) — shown on the driver's trip card so the route
         // can be planned around them. [] for older sessions.
         codingWarnings:       Array.isArray(sessions[i]?.data?.codingWarnings) ? sessions[i].data.codingWarnings : [],
+        // The same warnings expanded into the actual DATES inside this trip, with public holidays
+        // flagged as suspended (coding doesn't apply on a holiday) — { days, holidays, holidaysChecked }.
+        codingSchedule:       buildCodingSchedule(sessions[i]?.data?.codingWarnings, toJSDate(b.startDateTime), toJSDate(b.endDateTime), holidayList, holidaysChecked),
         // Nested to match PaymentStatusModal's `payment` prop shape exactly
         // (see MyTrips.jsx: <PaymentStatusModal payment={paymentTrip?.payment} />).
         payment: { ...payInfo, paymentStatus },

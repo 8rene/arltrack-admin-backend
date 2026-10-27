@@ -179,6 +179,92 @@ function parseRuleTime(t) {
   return h * 60 + mn;
 }
 
+// Older rule docs carry "08:00 PM" or stray whitespace -- show them as "8:00 PM".
+const cleanRuleTime = (t) => String(t || "").trim().replace(/^0(\d:)/, "$1");
+
+const MAX_SCHEDULE_DAYS = 62; // safety cap -- a rental is never this long, but a bad date shouldn't loop forever
+
+/**
+ * The booking-time Number Coding warnings (a weekly pattern copied onto the booking session,
+ * see models/booking/bookingSession.model.js) expanded into the DATED restrictions that can
+ * actually affect one trip:
+ *   - only days between the trip's start and end (Manila calendar),
+ *   - only windows that overlap the trip's own start/end instants (a trip starting at 4:45 PM
+ *     on a coding day is only affected from 4:45 PM on),
+ *   - a holiday is still listed but flagged with its name -- coding is suspended on holidays
+ *     (the same rule isCodingRestrictedByCity applies live).
+ * Pure: no Firestore. The caller passes the holidays it looked up (see getHolidaysBetween).
+ *
+ * @param {Array<{city, plateLastDigit, dayOfWeek, startTime, endTime}>} warnings  session.codingWarnings
+ * @param {Date} tripStart
+ * @param {Date} tripEnd
+ * @param {Array<{date: string, name: string}>} holidays  Manila "YYYY-MM-DD" dates
+ * @param {boolean} holidaysChecked  false when the holiday lookup failed (so the UI can say so)
+ * @returns {{ days: Array, holidays: Array, holidaysChecked: boolean }}
+ *   days[]: { date, dayOfWeek, city, plateLastDigit, startTime, endTime, holiday: string|null }
+ */
+export function buildCodingSchedule(warnings, tripStart, tripEnd, holidays = [], holidaysChecked = true) {
+  const empty = { days: [], holidays: [], holidaysChecked };
+  if (!Array.isArray(warnings) || !warnings.length) return empty;
+  if (!(tripStart instanceof Date) || !(tripEnd instanceof Date) || isNaN(tripStart) || isNaN(tripEnd) || tripEnd <= tripStart) return empty;
+
+  // One entry per distinct rule (the same rule can be stored once per stop in a city).
+  const seen = new Set();
+  const rules = [];
+  for (const w of warnings) {
+    if (!w || typeof w !== "object") continue;
+    const dow = Number(w.dayOfWeek);
+    const startMin = parseRuleTime(w.startTime);
+    const endMin = parseRuleTime(w.endTime);
+    if (!(dow >= 1 && dow <= 7) || startMin === null || endMin === null || endMin <= startMin) continue;
+    const key = `${String(w.city || "").trim().toLowerCase()}|${dow}|${startMin}|${endMin}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rules.push({
+      city: String(w.city || "").trim(),
+      plateLastDigit: w.plateLastDigit ?? null,
+      dow, startMin, endMin,
+      startTime: cleanRuleTime(w.startTime),
+      endTime: cleanRuleTime(w.endTime),
+    });
+  }
+
+  const holidayByDate = new Map((holidays || []).map((h) => [h.date, h.name || "Holiday"]));
+  const first = phtParts(tripStart);
+  const last = phtParts(tripEnd);
+  const ymd = (p) => `${p.y}-${pad2(p.m + 1)}-${pad2(p.d)}`;
+  const firstDayStart = Date.UTC(first.y, first.m, first.d) - PHT_OFFSET_MS;
+  const lastDayStart = Date.UTC(last.y, last.m, last.d) - PHT_OFFSET_MS;
+
+  const days = [];
+  for (let dayStart = firstDayStart, n = 0; dayStart <= lastDayStart && n < MAX_SCHEDULE_DAYS; dayStart += DAY_MS, n++) {
+    const parts = phtParts(new Date(dayStart));
+    const date = ymd(parts);
+    for (const r of rules) {
+      if (r.dow !== parts.dow) continue;
+      const winStart = dayStart + r.startMin * 60000;
+      const winEnd = dayStart + r.endMin * 60000;
+      // Only hours the car is actually out on this trip count.
+      if (winEnd <= tripStart.getTime() || winStart >= tripEnd.getTime()) continue;
+      days.push({
+        date,
+        dayOfWeek: r.dow,
+        city: r.city,
+        plateLastDigit: r.plateLastDigit,
+        startTime: r.startTime,
+        endTime: r.endTime,
+        holiday: holidayByDate.get(date) || null,
+        _startMin: r.startMin,
+      });
+    }
+  }
+  days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a._startMin - b._startMin));
+  days.forEach((d) => { delete d._startMin; });
+
+  const inRange = (holidays || []).filter((h) => h.date >= ymd(first) && h.date <= ymd(last));
+  return { days, holidays: inRange, holidaysChecked };
+}
+
 // codingRules store dayOfWeek as Mon=1 ... Sun=7. Legacy docs without a usable
 // number fall back to the day NAME (same fallback codingRules.service uses).
 const ruleDay = (rule) => {

@@ -8,6 +8,7 @@ import {
   markFailedRefundHandedBack,
   retryScheduledRefund,
 } from "../../services/refundRequest/refundRequest.service.js";
+import { syncRefundsForBooking } from "../../services/refundRequest/refundSync.service.js";
 
 export const listRefundRequests = async (req, res) => {
   try {
@@ -130,6 +131,24 @@ export const retryScheduledRefundSend = async (req, res) => {
     return res.status(200).json({ success: true, message: "Refund sent to PayMongo. Final status will update once PayMongo confirms.", data });
   } catch (error) {
     console.error("[REFUND] retry scheduled error:", error.message);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+// PATCH /api/refund-requests/booking/:bookingID/sync-paymongo
+// Staff "Check with PayMongo": asks PayMongo for the final result of every refund of this booking that is still
+// waiting (refund request, discount refund, deposit / discount return) and applies it, exactly as the webhook would.
+export const syncBookingRefunds = async (req, res) => {
+  try {
+    const staffUserID = req.user?.userID || req.user?.uid || null;
+    const data = await syncRefundsForBooking(req.params.bookingID, { actor: staffUserID });
+    const message = data.completed || data.failed
+      ? `Checked with PayMongo: ${data.completed} refund(s) confirmed${data.failed ? `, ${data.failed} reported as failed` : ""}.${data.stillPending ? ` ${data.stillPending} still processing at PayMongo.` : ""}`
+      : data.stillPending
+        ? "PayMongo is still processing this refund. Check again later."
+        : "Nothing changed.";
+    return res.status(200).json({ success: true, message, data });
+  } catch (error) {
+    console.error("[REFUND] sync error:", error.message);
     return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };

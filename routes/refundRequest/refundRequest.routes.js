@@ -1,4 +1,4 @@
-import { listRefundRequests, listDiscountRefunds, listDepositReturns, approveRefund, rejectRefund, manualRefundIssued, failedRefundHandedBack, retryScheduledRefundSend } from "../../controllers/refundRequest/refundRequest.controller.js";
+import { listRefundRequests, listDiscountRefunds, listDepositReturns, approveRefund, rejectRefund, manualRefundIssued, failedRefundHandedBack, retryScheduledRefundSend, syncBookingRefunds } from "../../controllers/refundRequest/refundRequest.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -19,6 +19,9 @@ export const registerRefundRequestRoutes = (app) => {
   app.patch("/api/refund-requests/:id/failed-handback", verifyToken, requireRole(allowed), failedRefundHandedBack);
   // Staff re-send of a scheduled (same-day) refund whose automatic attempts failed.
   app.patch("/api/refund-requests/:id/retry-scheduled", verifyToken, requireRole(allowed), retryScheduledRefundSend);
+  // Staff ask PayMongo for the final result of a booking's refund(s) that are still "Waiting for PayMongo"
+  // (use this when the webhook never reached the customer backend).
+  app.patch("/api/refund-requests/booking/:bookingID/sync-paymongo", verifyToken, requireRole(allowed), syncBookingRefunds);
   // NOTE: a car's upcoming bookings are now force-refunded/cancelled as one
   // batch, entirely server-side, inside PATCH /api/fleet/cars/:carID/status
   // (fleet.controller.js's changeCarStatus) — there's no standalone

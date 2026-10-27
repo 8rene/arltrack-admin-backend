@@ -69,7 +69,7 @@ const methodCode = (v) => {
   if (s === "banktransfer" || s === "bank") return "bank_transfer";
   return lower(v);
 };
-const paidWithOf = (payment) => {
+export const paidWithOf = (payment) => {
   const p = payment || {};
   const dep = methodCode(p.depositPaymongoChannel || p.paymongoChannel || p.paymentMethod);
   const balancePaid = lower(p.balanceStatus) === "paid" || !!p.balancePaymongoPaymentID || !!p.balanceMethod;
@@ -361,17 +361,20 @@ export const getAllRefundRequests = async (status) => {
       const customerName = await resolveCustomerName(data.userID);
       const row = withRefundAliases({ ...data, refundRequestID: data.refundRequestID || doc.id, customerName });
 
-      if (["Pending", "Approved"].includes(data.status) && data.paymentID) {
+      if (data.paymentID) {
         try {
           const pSnap = await db.collection("payments").where("paymentID", "==", data.paymentID).limit(1).get();
           if (!pSnap.empty) {
             const payment = await hydratePaymentData(pSnap.docs[0].data(), pSnap.docs[0].id);
+            // How the customer paid, per phase. Worked out for EVERY status (it used to be only Pending / Approved, so a
+            // request that was Refunded / Rejected / Failed showed "—" in History).
+            row.paidWith = paidWithOf(payment);
+            if (!["Pending", "Approved"].includes(data.status)) return row;
             // A staff discount on this payment, and where its money stands (processing at PayMongo, failed ...), so the
             // two ways of giving money back are visible side by side instead of in two separate screens.
             const dr = await getDiscountRefundState(payment, pSnap.docs[0].id);
             // (A ledger discount is not a refund in flight: it is held and returns with the deposit, so nothing to show here.)
             if (dr && !(dr.view && dr.view.ledger)) row.discount = { amount: Number(payment.discountAmount) || 0, reason: payment.discountReason || "", refund: dr };
-            row.paidWith = paidWithOf(payment);   // how the customer paid, per phase (the screen shows it; QR Ph is hand-back only)
             if (data.status !== "Pending") return row;
             const policy = policyForRequest(data, payment);
             const plan = computeRefundPlan(payment, { forfeit: policy ? policy.forfeit : 0, gatewayFeeKept: policy ? policy.gatewayFeeKept : 0 });
@@ -506,7 +509,7 @@ export const createPaymongoRefund = async ({ paymongoPaymentID, amount, reason }
 // started ("to pay"/"upcoming"): an ongoing/completed trip is never silently
 // cancelled by a refund. Same two writes the admin's own cancel does (status +
 // bookingSession). Returns { cancelled, driverID }.
-const cancelBookingForRefund = async (bookingID, reason, processedBy = null) => {
+export const cancelBookingForRefund = async (bookingID, reason, processedBy = null) => {
   if (!bookingID) return { cancelled: false, driverID: null };
   let ref = db.collection("bookings").doc(bookingID);
   let snap = await ref.get();

@@ -4,7 +4,7 @@ import { notifyStaff, resolveNotification, createNotification } from "../notific
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf, depositWasOnline } from "./paymentBreakdown.js";
-import { createPaymongoRefund, resolveCustomerContact } from "../refundRequest/refundRequest.service.js";
+import { createPaymongoRefund, resolveCustomerContact, paidWithOf } from "../refundRequest/refundRequest.service.js";
 import { sendBalanceReminderEmail } from "../email/email.service.js";
 import { syncPaymentEntries, hydratePayments, hydratePaymentData, getEntriesForPaymentIDs, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolveUserNames } from "../archives/resolveUserName.service.js";
@@ -1129,6 +1129,7 @@ export const getDiscountRefunds = async () => {
       discountAmount: Number(payment.discountAmount) || 0,
       discountReason: payment.discountReason || "",
       discountAt: isoOf(payment.discountAt),
+      paidWith: paidWithOf(payment),            // how the customer paid (shown in the Refunds table)
       ledger,                                   // true: the credit goes back through the deposit-return retry, not the legacy one
       // The Refunds page uses one vocabulary for a finished payout: "refunded". A ledger credit that went back says
       // "returned" in the ledger (and on the Payments page), so it is renamed here only, for this feed.
