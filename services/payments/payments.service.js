@@ -1447,14 +1447,49 @@ export const getPaymentById = async (id) => {
     getPenaltySummaries(payment.paymentID || payment.id),
   ]);
   // Gateway Breakdown, penalty side: the fee the customer paid comes from the penalties (gatewayFeePaid), what PayMongo kept
-  // from the penalty entries. null when no penalty was paid online.
+  // comes from the penalty entries (one line per penalty paid online). null when no penalty was paid online.
+  // Keep PENALTY_FEE_MIN_AMOUNT equal to the customer backend's utils/pricing.js: a penalty carries the online fee only when HIGHER.
   const r2 = (n) => Math.round(n * 100) / 100;
+  const PENALTY_FEE_MIN_AMOUNT = 1000;
+  const entryKey = payment.paymentID || payment.id;
+  const penaltyRows = ((await getEntriesForPaymentIDs([entryKey])).get(entryKey) || [])
+    .filter((e) => e && e.direction !== "out" && e.phase === "penalty" && e.status === "success");
+  const onlineRows = penaltyRows.filter((e) => e.source === "online");
   const feeReceived = r2(penalties.reduce((s, p) => s + (p.gatewayFeePaid || 0), 0));
   const fromEntries = row.penaltyGateway || null;
+
+  const orderOf = new Map(penalties.map((p, i) => [p.penaltyID, i]));
+  const gatewayPenaltyIDs = [...new Set(onlineRows.map((e) => e.penaltyID).filter(Boolean))]
+    .sort((a, b) => (orderOf.get(a) ?? 1e9) - (orderOf.get(b) ?? 1e9));
+  const gatewayItems = gatewayPenaltyIDs.map((pid) => {
+    const p = penalties.find((x) => x.penaltyID === pid) || null;
+    const mine = onlineRows.filter((e) => e.penaltyID === pid);
+    const withFee = mine.filter((e) => e.transactionFee !== undefined && e.transactionFee !== null);
+    const paidOnline = r2(mine.reduce((s, e) => s + (Number(e.amount) || 0), 0));
+    const paymongoFee = withFee.length ? r2(withFee.reduce((s, e) => s + (Number(e.transactionFee) || 0), 0)) : null;
+    const moneyRows = penaltyRows.filter((e) => e.penaltyID === pid).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const fee = p ? p.gatewayFeePaid || 0 : 0;     // the fee the CUSTOMER paid on this penalty
+    return {
+      penaltyID: pid,
+      description: p ? p.description : "Penalty",
+      total: p ? p.amount : null,
+      underThreshold: p ? p.amount <= PENALTY_FEE_MIN_AMOUNT : false,
+      coveredByDeposit: p ? Math.max(0, r2(p.paidAmount - moneyRows)) : 0,
+      paidOnline,
+      rate: p ? p.gatewayFeeRate : null,
+      fee,
+      channel: [...mine].reverse().find((e) => e.method)?.method || null,
+      paymongoFee,
+      sale: paymongoFee === null ? null : r2(fee - paymongoFee),
+    };
+  });
   const penaltyGateway = fromEntries || feeReceived > 0
     ? {
         received: feeReceived,
         paymongoFee: fromEntries ? fromEntries.paymongoFee : null,
+        sale: fromEntries && fromEntries.paymongoFee !== null ? r2(feeReceived - fromEntries.paymongoFee) : null,
+        threshold: PENALTY_FEE_MIN_AMOUNT,
+        items: gatewayItems,
         charged: r2((fromEntries ? fromEntries.paid : 0) + feeReceived),   // penalty money + the fee, i.e. what the customer paid
         count: fromEntries ? fromEntries.count : 0,
       }

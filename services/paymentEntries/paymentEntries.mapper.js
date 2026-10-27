@@ -434,6 +434,14 @@ const hydratePayment = (payment, entries, opts = {}) => {
       paymongoFee: withFee.length ? r2(withFee.reduce((a, e) => a + num(e.transactionFee), 0)) : null,
       paid: r2(penaltyOnline.reduce((a, e) => a + num(e.amount), 0)),
       count: penaltyOnline.length,
+      // one line per online penalty payment, so getPaymentById() can build the per-penalty Penalty Gateway Breakdown
+      lines: penaltyOnline.map((e) => ({
+        penaltyID: e.penaltyID || null,
+        amount: num(e.amount),
+        paymongoFee: e.transactionFee !== undefined && e.transactionFee !== null ? num(e.transactionFee) : null,
+        channel: LEGACY_CHANNEL[e.method] || e.method || null,
+        ref: e.referenceNumber || null,
+      })),
     };
   }
   // Latest charge id + the open checkout session.
