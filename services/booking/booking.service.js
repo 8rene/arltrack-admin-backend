@@ -239,6 +239,78 @@ const resolveTermsVersionNumber = async (id) => {
   }
 };
 
+
+// -- Cancelled bookings: who cancelled, why, when, and what happened to the money --------------------------------
+// Everything the Bookings page's red "Cancelled by ..." banner shows. `all` is the booking's cancellationRequests
+// rows (newest first). The system-written wording ("Cancelled: refund approved.", "Cancelled by user.") is NOT a
+// reason, so it is dropped; on a refund the customer's own words are on the row that carries refundRequestID.
+const SYSTEM_REASON = /^(Cancelled: refund (approved|completed)\.?|Cancelled by user\.?|Cancelled by (admin|staff)\.?)$/i;
+const describeCancellation = (all, reasonRow) => {
+  const approvedReq = all.find((r) => !r.cancelledBy && !r.refundRequestID && r.status === REQUEST_STATUS.APPROVED);
+  const refundRow   = all.find((r) => r.refundRequestID && r.reason);
+  const direct      = all.find((r) => r.cancelledBy) || null;
+  let cancelledBy = null;
+  if (direct) {
+    cancelledBy = ["customer", "refund"].includes(direct.cancelledBy) ? "customer"
+      : ["staff", "admin"].includes(direct.cancelledBy) ? "staff"
+      : direct.cancelledBy === "system" ? "system" : "unknown";
+  } else if (approvedReq) {
+    cancelledBy = "customer";   // the customer asked to end an ongoing trip and staff approved it
+  }
+  let reason = String(reasonRow?.reason || "").trim();
+  reason = reason.replace(/^Cancelled by (staff|admin):\s*/i, "").trim();
+  if (SYSTEM_REASON.test(reason)) reason = "";
+  if (!reason && direct?.cancelledBy === "refund" && refundRow) reason = String(refundRow.reason).trim();
+  // The person behind it: the customer for a customer / refund / approved-request cancel, the staff member for a staff one
+  // (processedBy on the direct row). For a customer cancel that staff approved, processedBy is the approver.
+  // Older staff cancels never stored it, so cancelledByID is null and the page says "name not recorded".
+  const cancelledByID = cancelledBy === "customer" ? (direct?.userID || approvedReq?.userID || null)
+    : cancelledBy === "staff" ? (direct?.processedBy || null)
+    : null;
+  const approvedByID = cancelledBy === "customer" ? (direct?.processedBy || approvedReq?.processedBy || null) : null;
+  return {
+    cancelledBy,
+    cancelledByID,
+    approvedByID,
+    cancelDisplayReason: reason,
+    cancelledAt: direct ? (direct.createdAt || null) : (approvedReq?.processedAt || approvedReq?.updatedAt || null),
+  };
+};
+
+// The booking's latest refund request, boiled down to one of: Pending | Refunded | Failed | No refund.
+// A booking with no refund request gets no refundSummary (the page falls back to the payment fields).
+const attachRefundSummaries = async (rows) => {
+  const cancelled = rows.filter((b) => (b.status || "").toLowerCase() === "cancelled");
+  const keys = [...new Set(cancelled.map((b) => bookingKeyOf(b.id, b)).filter(Boolean))];
+  if (!keys.length) return;
+  const byBooking = new Map();
+  for (let i = 0; i < keys.length; i += 30) {
+    const snap = await db.collection("refundRequests").where("bookingID", "in", keys.slice(i, i + 30)).get();
+    snap.docs.forEach((d) => {
+      const data = d.data();
+      if (!byBooking.has(data.bookingID)) byBooking.set(data.bookingID, []);
+      byBooking.get(data.bookingID).push({ id: d.id, ...data });
+    });
+  }
+  const ms = (v) => (v?.toMillis ? v.toMillis() : v?._seconds ? v._seconds * 1000 : 0);
+  cancelled.forEach((b) => {
+    const list = (byBooking.get(bookingKeyOf(b.id, b)) || []).sort((x, y) => ms(y.createdAt) - ms(x.createdAt));
+    const r = list[0];
+    if (!r) return;
+    const st = String(r.status || "").toLowerCase();
+    const outcome = r.outcome || null;
+    const status = st === "refunded" ? (outcome === "nothing_owed" || outcome === "already_refunded" ? "No refund" : "Refunded")
+      : st === "failed" ? "Failed"
+      : st === "rejected" ? "No refund"
+      : "Pending";                                       // pending / approved (incl. scheduled for after midnight)
+    b.refundSummary = {
+      status,
+      refundRequestID: r.refundRequestID || r.id,
+      amount: Number(r.toRefundAmount ?? r.amount ?? 0) || 0,
+    };
+  });
+};
+
 export const getAllBookings = async (statusFilter) => {
   const filter = statusFilter?.toLowerCase();
 
@@ -284,11 +356,23 @@ export const getAllBookings = async (statusFilter) => {
     const pending = reqs.some((r) => r.status === REQUEST_STATUS.PENDING);
     // Why the booking was cancelled: the direct-cancellation row, else the approved request's reason.
     const reasonRow = all.find((r) => r.cancelledBy) || all.find((r) => r.status === REQUEST_STATUS.APPROVED && r.reason);
-    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs, cancellationReason: reasonRow?.reason || "" };
+    const cancelInfo = describeCancellation(all, reasonRow);
+    const out = { ...b, cancellationRequest: latest, cancellationRequests: reqs, cancellationReason: reasonRow?.reason || "", ...cancelInfo };
     return pending && (b.status || "").toLowerCase() !== "cancelled"
       ? { ...out, actualStatus: b.status, status: "cancellation_request" }
       : out;
   });
+  // Names of whoever cancelled the booking (customer or staff member) and, for a customer cancel, who approved it.
+  const nameKey = (b) => [b.cancelledByID || (b.cancelledBy === "customer" ? b.userID : null), b.approvedByID];
+  const cancellerIDs = [...new Set(rows.flatMap(nameKey).filter(Boolean))];
+  if (cancellerIDs.length) {
+    const nameMap = Object.fromEntries(await Promise.all(cancellerIDs.map((id) => resolveUserInfo(id).then((u) => [id, u?.customerName || null]))));
+    rows.forEach((b) => {
+      const [by, appr] = nameKey(b);
+      if (by) { b.cancelledByID = by; b.cancelledByName = nameMap[by] || null; }
+      if (appr) b.approvedByName = nameMap[appr] || null;
+    });
+  }
   // Show WHO handled a request, not just a uid.
   const staffIDs = [...new Set(rows.map((b) => b.cancellationRequest?.processedBy).filter(Boolean))];
   if (staffIDs.length) {
@@ -298,6 +382,7 @@ export const getAllBookings = async (statusFilter) => {
       if (pb) b.cancellationRequest = { ...b.cancellationRequest, processedByName: staffMap[pb]?.customerName || null };
     });
   }
+  await attachRefundSummaries(rows);
   if (filter && filter !== "all") rows = rows.filter((b) => (b.status || "").toLowerCase() === filter);
 
   rows.sort((a, b) => {

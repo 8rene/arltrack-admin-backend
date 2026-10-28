@@ -266,6 +266,25 @@ export const getMaintenanceConfig = () => ({
   serviceCatalog: SERVICE_CATALOG,
 });
 
+// userID -> display name (first + last name, else username, else email) for the
+// "Created by" / "Last updated by" lines. IDs that no longer exist are left out.
+const getStaffNames = async (ids) => {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (!unique.length) return {};
+  const [details, users] = await Promise.all([
+    db.getAll(...unique.map((id) => db.collection("userDetails").doc(id))),
+    db.getAll(...unique.map((id) => db.collection("user").doc(id))),
+  ]);
+  const names = {};
+  unique.forEach((id, i) => {
+    const d = details[i].exists ? details[i].data() : {};
+    const u = users[i].exists ? users[i].data() : {};
+    const name = [d.firstName, d.lastName].filter(Boolean).join(" ").trim() || u.username || u.email;
+    if (name) names[id] = name;
+  });
+  return names;
+};
+
 // ─────────────────────────────────────────────
 // GET all maintenance records (with car plate/brand/model denormalized in)
 // ─────────────────────────────────────────────
@@ -281,12 +300,17 @@ export const getAllMaintenance = async () => {
   const brandMap = Object.fromEntries(brandSnap.docs.map((d) => [d.id, d.data().brandName]));
   const modelMap = Object.fromEntries(modelSnap.docs.map((d) => [d.id, d.data().modelName]));
 
+  const staffNames = await getStaffNames(maintSnap.docs.flatMap((d) => [d.data().createdBy, d.data().updatedBy]));
+
   return maintSnap.docs.map((d) => {
     const data = d.data();
     const car = carMap[data.carID];
     return {
       id: d.id,
       ...data,
+      // null on records made before these fields existed (shown as "Not recorded")
+      createdByName: staffNames[data.createdBy] || null,
+      updatedByName: staffNames[data.updatedBy] || null,
       plateNumber: car?.plateNumber || "—",
       brandName: car ? brandMap[car.brandID] || "—" : "—",
       modelName: car ? modelMap[car.modelID] || "—" : "—",
@@ -394,6 +418,8 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
     // shape (see PartAddressed in maintenance.model.js). The before/after-trip
     // inspection records are never touched by maintenance: they stay as filed.
     partsAddressed: storedParts,
+    createdBy: editedBy,   // staff userID who created the record — never changes
+    updatedBy: editedBy,   // staff userID of the latest change — overwritten on every edit / status change
     createdAt: timestamp(),
     updatedAt: timestamp(),
   });
@@ -475,7 +501,7 @@ export const updateMaintenance = async (maintenanceID, payload, editedBy = null)
     finalParts = withOutcomes(normalizedParts);
   }
 
-  const update = { updatedAt: timestamp() };
+  const update = { updatedAt: timestamp(), updatedBy: editedBy };
 
   if (carID !== undefined) update.carID = carID;
 
@@ -543,7 +569,7 @@ export const updateMaintenanceStatus = async (maintenanceID, status, editedBy = 
   const record = doc.data();
 
   // Completing gives every part its outcome (default "Good").
-  const statusUpdate = { status, updatedAt: timestamp() };
+  const statusUpdate = { status, updatedAt: timestamp(), updatedBy: editedBy };
   if (status === "Completed" && record.status !== "Completed") {
     statusUpdate.partsAddressed = withOutcomes(
       await normalizePartsAddressed(record.partsAddressed || [], record.carID, record.partsAddressed)

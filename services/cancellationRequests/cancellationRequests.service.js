@@ -176,9 +176,13 @@ export const inferCancelledBy = (reason) => {
 };
 
 /** Writes the cancellation row for a booking that was cancelled outright. Pass a batch to commit it with the booking update. */
-// A direct row is a finished cancellation, so it carries no status / processedBy / processedAt / rejectReason --
-// cancelledBy says who did it. (Old rows that still have those fields are left as they are.)
-export const recordDirectCancellation = (bookingKey, { userID = null, reason = "", cancelledBy = "unknown" } = {}, batch = null) => {
+// A direct row is a finished cancellation, so it is written already approved:
+//   userID       the booking's customer (NOT necessarily who cancelled it)
+//   cancelledBy  customer | staff | admin | system | refund | unknown
+//   processedBy  the staff / admin / owner uid who did it (staff and admin cancels), or who approved the refund that
+//                cancelled it (refund). Left null when nobody on staff was involved (the customer or the system).
+//   status / processedAt / updatedAt  stamped with the cancellation itself; createdAt is the same moment.
+export const recordDirectCancellation = (bookingKey, { userID = null, reason = "", cancelledBy = "unknown", processedBy = null } = {}, batch = null) => {
   if (!bookingKey) return null;
   const ref = db.collection(COL).doc(String(bookingKey));
   const now = admin.firestore.FieldValue.serverTimestamp();
@@ -188,7 +192,11 @@ export const recordDirectCancellation = (bookingKey, { userID = null, reason = "
     userID,
     reason: reason || "",
     cancelledBy,
+    status: REQUEST_STATUS.APPROVED,
+    processedBy: processedBy || null,
+    processedAt: now,
     createdAt: now,
+    updatedAt: now,
   };
   if (batch) { batch.set(ref, data); return null; }
   return ref.set(data);

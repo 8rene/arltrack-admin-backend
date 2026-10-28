@@ -46,6 +46,8 @@ export const Maintenance = {
   maintenanceDate: null,   // Timestamp — when the work is/was scheduled
   status: "Scheduled",     // one of STATUS_OPTIONS
   partsAddressed: [],      // [PartAddressed] — the car parts this job handles (see the PartAddressed shape below)
+  createdBy: null,         // userID of the staff member who created the record (never changes). Absent on older records
+  updatedBy: null,         // userID of the staff member who made the latest change (overwritten on every edit / status change). Absent on older records
   createdAt: null,         // Timestamp — when the record was created
   updatedAt: null,         // Timestamp — when the record was last changed
 };

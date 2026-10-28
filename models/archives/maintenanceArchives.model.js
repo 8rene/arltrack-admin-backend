@@ -32,6 +32,8 @@ export const MaintenanceArchive = {
   maintenanceDate: null,
   status: "",                 // Scheduled | Completed | Cancelled (as it was when the booking was deleted)
   partsAddressed: [],         // [{ carPartID, conditionBefore, conditionAfter, description, price }]
+  createdBy: null,            // userID — absent on older records
+  updatedBy: null,            // userID — absent on older records
   createdAt: null,
   updatedAt: null,
 };
