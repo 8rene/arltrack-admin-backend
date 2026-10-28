@@ -162,6 +162,15 @@ export const submitEditRequest = async (req, res) => {
     const { role, changes } = req.body || {};
     const data = await createEditRequest(req.user.uid, role || req.user.role || "", changes);
 
+    notifyStaff({
+      type: "edit_request",
+      refID: data.id,
+      refCollection: "editRequests",
+      title: "Profile edit request",
+      message: `A profile edit request was submitted (${(changes || []).map(c => c.label || c.field).filter(Boolean).join(", ")}).`,
+      extra: { requesterRole: role || req.user.role || "" },
+    }).catch((err) => console.error("[NOTIF] Failed to notify staff of edit_request:", err.message));
+
     createAuditLog({
       action: "update",
       description: `Submitted a profile edit request (${(changes || []).map(c => c.field).join(", ")}).`,
@@ -219,6 +228,7 @@ export const submitIdResubmitRequest = async (req, res) => {
       refCollection: "idResubmitRequests",
       title: "ID resubmission submitted",
       message: `A ${kindLabel} resubmission was submitted for review.`,
+      extra: { requesterRole: req.user.role || "" },
     }).catch((err) => console.error("[NOTIF] Failed to notify staff of id_resubmit_request:", err.message));
 
     return res.status(201).json({ success: true, data });

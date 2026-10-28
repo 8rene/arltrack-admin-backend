@@ -18,6 +18,7 @@ import { db } from "../config/firebaseConnection/firebase.js";
 import { createNotification, notifyStaff, resolveNotification } from "../services/notification/notification.service.js";
 import { sendLicenseExpiryEmail } from "../services/email/email.service.js";
 import { ROLE_IDS } from "../utils/roles/role.util.js";
+import { auditSafe } from "../services/auditLogs/auditLogs.service.js";
 
 // ── Driver's license expiry check ─────────────────────────────────
 // Piggybacks on this same daily cron, same reasoning as the overdue-booking
@@ -279,4 +280,16 @@ export const runMidnightFlush = async () => {
   console.log(
     `[CRON] ✅ Midnight archive flush complete — ${succeeded} succeeded, ${failed} failed, ${activeSessions.length} active session(s) total, ${retried}/${pendingFinal.length} final save(s) retried.`
   );
+
+  // One summary audit line per run. Skipped on a quiet night (nothing to flush, nothing pending, nothing failed)
+  // so the log is not filled with empty entries.
+  if (activeSessions.length > 0 || pendingFinal.length > 0 || failed > 0) {
+    await auditSafe({
+      action: "system",
+      description: `Midnight flush: ${succeeded} active trip(s) saved, ${failed} failed, ${retried}/${pendingFinal.length} final save(s) retried.`,
+      userID: "system",
+    });
+  }
+
+  return { succeeded, failed, activeSessions: activeSessions.length, retried, pendingFinal: pendingFinal.length };
 };

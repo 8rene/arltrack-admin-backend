@@ -70,6 +70,8 @@ const resolveRefundUserID = async (r) => {
 };
 
 // ── a staff discount refunded online (an "out" row with phase "discount" and no refund request) ──
+const checkedBy = (actor) => (actor === "system" ? "checked automatically by the scheduled job" : "checked from the admin side");
+
 const settleDiscountRow = async (entryDoc, { refundID, refundStatus, actor }) => {
   const rowRef = entryDoc.ref;
   const rowStatus = refundStatus === "succeeded" ? "success" : "failed";
@@ -124,7 +126,7 @@ const settleDiscountRow = async (entryDoc, { refundID, refundStatus, actor }) =>
   }
   auditSafe({
     action: "update",
-    description: `Discount refund of ${peso(out.row.amount)} for booking ${out.row.bookingID}: ${rowStatus === "success" ? "confirmed" : "reported as failed"} by PayMongo (checked from the admin side).`,
+    description: `Discount refund of ${peso(out.row.amount)} for booking ${out.row.bookingID}: ${rowStatus === "success" ? "confirmed" : "reported as failed"} by PayMongo (${checkedBy(actor)}).`,
     userID: actor || null, bookingID: out.row.bookingID || null, paymentID: out.row.paymentID || null,
   });
   return { found: true, discount: true, state: rowStatus };
@@ -214,8 +216,8 @@ const settlePayoutRow = async (entryDoc, { refundID, refundStatus, actor }) => {
   auditSafe({
     action: "update",
     description: rowStatus === "success"
-      ? `${isCredit ? "Discount" : "Deposit"} return of ${peso(amt)} confirmed by PayMongo for booking ${row.bookingID} (checked from the admin side).`
-      : `PayMongo reported the ${word} return of ${peso(amt)} as failed for booking ${row.bookingID} (checked from the admin side).`,
+      ? `${isCredit ? "Discount" : "Deposit"} return of ${peso(amt)} confirmed by PayMongo for booking ${row.bookingID} (${checkedBy(actor)}).`
+      : `PayMongo reported the ${word} return of ${peso(amt)} as failed for booking ${row.bookingID} (${checkedBy(actor)}).`,
     userID: actor || null, bookingID: row.bookingID || null, paymentID: row.paymentID || null,
   });
   return { found: true, [isCredit ? "discountReturn" : "depositReturn"]: true, state: rowStatus };
@@ -333,7 +335,7 @@ const applyRequestPartResult = async ({ refundID, refundStatus, entrySnap, actor
 
     auditSafe({
       action: "update",
-      description: `Refund ${r.refundRequestID} completed — ${peso(refundAmount)} returned for payment ${r.paymentID} (confirmed by PayMongo, checked from the admin side).`,
+      description: `Refund ${r.refundRequestID} completed — ${peso(refundAmount)} returned for payment ${r.paymentID} (confirmed by PayMongo, ${checkedBy(actor)}).`,
       userID: actor || customerID || null, bookingID: r.bookingID || null, paymentID: r.paymentID, refundRequestID: r.refundRequestID,
     });
     if (customerID) {
@@ -346,7 +348,7 @@ const applyRequestPartResult = async ({ refundID, refundStatus, entrySnap, actor
   } else if (partStatus === "failed") {
     auditSafe({
       action: "update",
-      description: `Refund ${r.refundRequestID}: PayMongo reported the ${part.kind || ""} refund as failed (checked from the admin side).`,
+      description: `Refund ${r.refundRequestID}: PayMongo reported the ${part.kind || ""} refund as failed (${checkedBy(actor)}).`,
       userID: actor || customerID || null, bookingID: r.bookingID || null, paymentID: r.paymentID, refundRequestID: r.refundRequestID,
     });
     if (outcome.failedNow && customerID) {
