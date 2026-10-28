@@ -22,8 +22,8 @@ import { notifyStaff, resolveNotification } from "../../services/notification/no
 export const updateUserDocument = async (req, res) => {
   try {
     const { uid } = req.params;
-    // Only these may be changed here. Photos go through PUT /api/users/:uid/document/replace (URL checked), and the
-    // signup selfie is never editable, so a caller cannot point a document at an arbitrary URL.
+    // Only these may be changed here. Photos (license, ID, and the selfie with ID) go through
+    // PUT /api/users/:uid/document/replace (URL checked), so a caller cannot point a document at an arbitrary URL.
     const EDITABLE = ["driverLicenseExpiry", "documentType", "documentNumber", "driversLicenseNumber"];
     const body = req.body || {};
     const fields = Object.fromEntries(EDITABLE.filter((k) => body[k] !== undefined).map((k) => [k, body[k]]));
@@ -197,14 +197,15 @@ export const cancelOwnEditRequest = async (req, res) => {
 };
 
 // POST /api/profile/id-resubmit-requests
-// Body: { documentKind, currentUrl, newUrl, documentType?, documentNumber? }
-// documentType/documentNumber only apply when documentKind === "document"
+// Body: { documentKind, currentUrl, newUrl, documentType?, documentNumber?, currentSelfieUrl?, newSelfieUrl?, driversLicenseNumber? }
+// documentType/documentNumber/newSelfieUrl apply to (and newSelfieUrl is REQUIRED for) documentKind === "document";
+// driversLicenseNumber is optional and only applies to documentKind === "license".
 // — newUrl is the downloadURL from a Storage upload the frontend already
 // did; this endpoint only handles the Firestore doc, same pattern as the
 // fleet image endpoint.
 export const submitIdResubmitRequest = async (req, res) => {
   try {
-    const { documentKind, currentUrl, newUrl, documentType, documentNumber } = req.body || {};
+    const { documentKind, currentUrl, newUrl, documentType, documentNumber, currentSelfieUrl, newSelfieUrl, driversLicenseNumber } = req.body || {};
     const data = await createIdResubmitRequest(
       req.user.uid,
       req.user.role || "",
@@ -212,7 +213,8 @@ export const submitIdResubmitRequest = async (req, res) => {
       currentUrl,
       newUrl,
       documentType,
-      documentNumber
+      documentNumber,
+      { currentSelfieUrl, newSelfieUrl, driversLicenseNumber }
     );
 
     const kindLabel = documentKind === "license" ? "driver's license" : "document";
@@ -240,15 +242,19 @@ export const submitIdResubmitRequest = async (req, res) => {
 
 // PUT /api/profile/document
 // Body: { documentKind, newUrl, driverLicenseExpiry?, documentType?,
-// documentNumber? } — Owner/Admin only (enforced by requireRole at the
+// documentNumber?, newSelfieUrl? (required for "document"), driversLicenseNumber? } — Owner/Admin only (enforced by requireRole at the
 // route level, see profileRequests.routes.js). Applies directly, no
 // approval step, same trust boundary as updateOwnProfileFields'
 // canEditDirectly path. Logs its own single audit entry since there's no
 // separate submit+approve pair for this path — just one action happened.
 export const updateOwnDocument = async (req, res) => {
   try {
-    const { documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber } = req.body || {};
-    await applyOwnDocumentUpdate(req.user.uid, documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber);
+    const { documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber, newSelfieUrl, driversLicenseNumber } = req.body || {};
+    await applyOwnDocumentUpdate(
+      req.user.uid, documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber,
+      newSelfieUrl,
+      driversLicenseNumber === undefined ? undefined : String(driversLicenseNumber).trim(),
+    );
 
     const kindLabel = documentKind === "license" ? "driver's license" : "document";
     createAuditLog({
@@ -309,7 +315,8 @@ export const adminUpdateProfile = async (req, res) => {
 };
 
 // PUT /api/users/:uid/document/replace   (Owner/Admin)
-// Body: { documentKind: "license"|"document", newUrl, driverLicenseExpiry?, documentType?, documentNumber? }
+// Body: { documentKind: "license"|"document", newUrl, driverLicenseExpiry?, documentType?, documentNumber?,
+//         newSelfieUrl? (required for "document"), driversLicenseNumber? }
 export const adminReplaceDocument = async (req, res) => {
   try {
     const { uid } = req.params;

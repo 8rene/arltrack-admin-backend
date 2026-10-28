@@ -128,7 +128,7 @@ const findLiveRequests = async (userID) => {
 const FILE_REFERENCES = [
   ["user", "profileImage"],
   ["userDocument", "documentImageUrl"], ["userDocument", "driverLicenseUrl"], ["userDocument", "selfieWithIdUrl"],
-  ["idResubmitRequests", "newLicenseUrl"], ["idResubmitRequests", "newDocumentUrl"],
+  ["idResubmitRequests", "newLicenseUrl"], ["idResubmitRequests", "newDocumentUrl"], ["idResubmitRequests", "newSelfieUrl"],
 ];
 
 // true when a record that is NOT being purged still points at this file

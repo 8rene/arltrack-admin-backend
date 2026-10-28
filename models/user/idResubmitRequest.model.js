@@ -15,6 +15,10 @@ export const IdResubmitRequest = {
   newDocumentUrl: "",
   documentType: "",
   documentNumber: "",
+  currentSelfieUrl: "", // documentKind === "document" only: the selfie-with-ID on file when the request was made
+  newSelfieUrl: "",     // documentKind === "document" only: the selfie holding the new ID. REQUIRED on requests made from the admin app;
+                        // requests made by the customer app don't carry it, and approving one keeps the selfie already on file
+  driversLicenseNumber: "", // documentKind === "license" only, optional: the number typed with the new license photo
   status: "pending",   // "pending" until staff review it
   requestedBy: "",     // same as userID
   reviewedBy: null,

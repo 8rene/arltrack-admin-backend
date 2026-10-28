@@ -11,7 +11,7 @@ export const UserDocument = {
   documentType: "",         // type of that ID; only changes when the resubmission carried one
   documentNumber: "",       // number of that ID; only changes when the resubmission carried one
   driversLicenseNumber: "", // license number typed at signup (written by the customer backend). NOTE the spelling: "drivers", unlike driverLicenseUrl / driverLicenseExpiry
-  selfieWithIdUrl: "",      // selfie holding the ID, uploaded at signup (customer backend)
-  createdAt: null,          // set only when the admin creates the document
+  selfieWithIdUrl: "",      // selfie holding the ID: uploaded at signup (customer backend); replaced together with the ID photo when the admin replaces / approves a government ID (never for a license)
+  createdAt: null,          // set only when the admin creates the document (which now gets the same field set as signup, including its own userDocumentID)
   updatedAt: null,          // set when the admin edits it
 };

@@ -1,5 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
+import { randomUUID } from "crypto";
 import { resolveNotification, createNotification } from "../notification/notification.service.js";
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
@@ -73,6 +74,19 @@ const requireLiveUser = async (userID) => {
   }
 };
 
+// A photo URL sent by the browser must be a Firebase Storage upload in the given folder, named for this user, so it
+// cannot be an arbitrary or external image. The selfie with ID is uploaded to the same "documentResubmit" folder as the
+// ID photo (the folder the Storage rules already allow for this flow); only its file name tells them apart.
+const assertOwnUpload = (url, folder, userID, label) => {
+  let parsed;
+  try { parsed = new URL(String(url || "")); } catch { badRequest(`${label} must be a valid URL.`); }
+  let objectPath = "";
+  try { objectPath = decodeURIComponent(parsed.pathname.split("/o/")[1] || ""); } catch { /* checked below */ }
+  if (parsed.protocol !== "https:" || parsed.hostname !== "firebasestorage.googleapis.com" || !objectPath.startsWith(`${folder}/${userID}_`)) {
+    badRequest(`${label} must be a Firebase Storage upload for this user.`);
+  }
+};
+
 // ─────────────────────────────────────────────
 // userDocument — one doc per userID. Used directly by ExpiryField
 // (driverLicenseExpiry) and by the ID-resubmit approval flow below
@@ -82,16 +96,26 @@ export const upsertUserDocument = async (userID, fields) => {
   const existing = await db.collection("userDocument").where("userID", "==", userID).limit(1).get();
 
   if (!existing.empty) {
-    await existing.docs[0].ref.update({ ...fields, updatedAt: timestamp() });
+    // A document the admin created before this fix has no userDocumentID of its own; give it one (customer signup always does).
+    const hasOwnID = !!existing.docs[0].data().userDocumentID;
+    await existing.docs[0].ref.update({ ...(hasOwnID ? {} : { userDocumentID: randomUUID() }), ...fields, updatedAt: timestamp() });
     return { id: existing.docs[0].id, userID, ...fields };
   }
 
-  const ref = await db.collection("userDocument").add({
+  // No document yet: create it with the SAME field set the customer signup writes (customer backend,
+  // models/user/userDocument.model.js), so every reader finds every field and the document has its own userDocumentID.
+  const blank = {
+    userDocumentID: randomUUID(),
     userID,
-    ...fields,
-    createdAt: timestamp(),
-  });
-  return { id: ref.id, userID, ...fields };
+    documentType: "",
+    documentNumber: "",
+    documentImageUrl: "",
+    driversLicenseNumber: "",
+    driverLicenseUrl: "",
+    selfieWithIdUrl: "",
+  };
+  const ref = await db.collection("userDocument").add({ ...blank, ...fields, createdAt: timestamp() });
+  return { id: ref.id, userID, ...blank, ...fields };
 };
 
 // ─────────────────────────────────────────────
@@ -179,7 +203,12 @@ export const approveIdResubmitRequest = async (reqID, driverLicenseExpiry, admin
       err.statusCode = 400;
       throw err;
     }
-    await upsertUserDocument(req.userID, { driverLicenseUrl: req.newLicenseUrl, driverLicenseExpiry });
+    await upsertUserDocument(req.userID, {
+      driverLicenseUrl: req.newLicenseUrl,
+      driverLicenseExpiry,
+      // Only when the request carried one (requests from the customer app don't).
+      ...(req.driversLicenseNumber ? { driversLicenseNumber: req.driversLicenseNumber } : {}),
+    });
   } else {
     // documentType/documentNumber were captured at submission time (the
     // requester typed them alongside the photo, same as the original
@@ -190,6 +219,9 @@ export const approveIdResubmitRequest = async (reqID, driverLicenseExpiry, admin
       documentImageUrl: req.newDocumentUrl,
       ...(req.documentType   !== undefined ? { documentType: req.documentType } : {}),
       ...(req.documentNumber !== undefined ? { documentNumber: req.documentNumber } : {}),
+      // The selfie holding the ID travels with a government ID. Requests that came without one (the customer app doesn't
+      // send it) keep the selfie already on file instead of blanking it.
+      ...(req.newSelfieUrl ? { selfieWithIdUrl: req.newSelfieUrl } : {}),
     });
   }
 
@@ -350,7 +382,7 @@ export const cancelEditRequest = async (reqID, requesterUID) => {
 // "document" — the requester types these alongside the new photo (same
 // as the original signup flow), and they're carried straight through to
 // userDocument on approval; see approveIdResubmitRequest.
-export const createIdResubmitRequest = async (userID, role, documentKind, currentUrl, newUrl, documentType, documentNumber) => {
+export const createIdResubmitRequest = async (userID, role, documentKind, currentUrl, newUrl, documentType, documentNumber, extra = {}) => {
   if (!["license", "document"].includes(documentKind)) {
     const err = new Error("documentKind must be 'license' or 'document'.");
     err.statusCode = 400;
@@ -362,13 +394,31 @@ export const createIdResubmitRequest = async (userID, role, documentKind, curren
     throw err;
   }
 
+  // extra: { currentSelfieUrl, newSelfieUrl, driversLicenseNumber }
+  const { currentSelfieUrl, newSelfieUrl, driversLicenseNumber } = extra || {};
+  if (documentKind === "document") {
+    // Same rule as the customer app: a government ID needs its type and number, and the selfie holding it is the proof.
+    // A driver's license needs neither the type nor the selfie.
+    if (!String(documentType || "").trim() || !String(documentNumber || "").trim()) {
+      badRequest("documentType and documentNumber are required for a document resubmission.");
+    }
+    if (!newSelfieUrl) badRequest("A selfie holding the ID is required when submitting a government ID.");
+    assertOwnUpload(newSelfieUrl, "documentResubmit", userID, "newSelfieUrl");
+  }
+
   const urlFields = documentKind === "license"
-    ? { currentLicenseUrl: currentUrl || "", newLicenseUrl: newUrl }
+    ? {
+        currentLicenseUrl: currentUrl || "",
+        newLicenseUrl: newUrl,
+        ...(String(driversLicenseNumber || "").trim() ? { driversLicenseNumber: String(driversLicenseNumber).trim() } : {}),
+      }
     : {
         currentDocumentUrl: currentUrl || "",
         newDocumentUrl: newUrl,
-        documentType: documentType || "",
-        documentNumber: documentNumber || "",
+        documentType: String(documentType).trim(),
+        documentNumber: String(documentNumber).trim(),
+        currentSelfieUrl: currentSelfieUrl || "",
+        newSelfieUrl,
       };
 
   const ref = await db.collection("idResubmitRequests").add({
@@ -395,7 +445,7 @@ export const createIdResubmitRequest = async (userID, role, documentKind, curren
 // One audit entry gets logged by the controller for this, since there's
 // no separate submit+approve pair to log for a direct apply.
 // ─────────────────────────────────────────────
-export const applyOwnDocumentUpdate = async (userID, documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber) => {
+export const applyOwnDocumentUpdate = async (userID, documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber, newSelfieUrl, driversLicenseNumber) => {
   if (!["license", "document"].includes(documentKind)) {
     const err = new Error("documentKind must be 'license' or 'document'.");
     err.statusCode = 400;
@@ -413,10 +463,22 @@ export const applyOwnDocumentUpdate = async (userID, documentKind, newUrl, drive
       err.statusCode = 400;
       throw err;
     }
-    await upsertUserDocument(userID, { driverLicenseUrl: newUrl, driverLicenseExpiry });
+    await upsertUserDocument(userID, {
+      driverLicenseUrl: newUrl,
+      driverLicenseExpiry,
+      ...(driversLicenseNumber !== undefined ? { driversLicenseNumber } : {}),
+    });
   } else {
+    // Government ID: the selfie holding it goes with the photo (a driver's license has no selfie).
+    if (!newSelfieUrl) {
+      const err = new Error("A selfie holding the ID is required when replacing a government ID.");
+      err.statusCode = 400;
+      throw err;
+    }
+    assertOwnUpload(newSelfieUrl, "documentResubmit", userID, "newSelfieUrl");
     await upsertUserDocument(userID, {
       documentImageUrl: newUrl,
+      selfieWithIdUrl: newSelfieUrl,
       ...(documentType   !== undefined ? { documentType } : {}),
       ...(documentNumber !== undefined ? { documentNumber } : {}),
     });
@@ -556,18 +618,12 @@ export const adminUpdateUserProfile = async (userID, rawChanges) => {
 
 // Replace a user's license / ID photo directly (no review step — the admin IS the reviewer). The browser uploads the file to
 // Storage first; the URL must point at that user's own upload folder, so it cannot be an arbitrary or external image.
-export const adminReplaceUserDocument = async (userID, { documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber }) => {
+export const adminReplaceUserDocument = async (userID, { documentKind, newUrl, driverLicenseExpiry, documentType, documentNumber, newSelfieUrl, driversLicenseNumber }) => {
   await requireLiveUser(userID);
   if (!["license", "document"].includes(documentKind)) badRequest("documentKind must be 'license' or 'document'.");
 
-  let parsed;
-  try { parsed = new URL(String(newUrl || "")); } catch { badRequest("newUrl must be a valid URL."); }
-  let objectPath = "";
-  try { objectPath = decodeURIComponent(parsed.pathname.split("/o/")[1] || ""); } catch { /* checked below */ }
   const folder = documentKind === "license" ? "driverLicenseResubmit" : "documentResubmit";
-  if (parsed.protocol !== "https:" || parsed.hostname !== "firebasestorage.googleapis.com" || !objectPath.startsWith(`${folder}/${userID}_`)) {
-    badRequest("newUrl must be a Firebase Storage upload for this user.");
-  }
+  assertOwnUpload(newUrl, folder, userID, "newUrl");
   if (documentKind === "license" && !driverLicenseExpiry) badRequest("driverLicenseExpiry is required when replacing a license.");
   if (documentKind === "document" && (!String(documentType || "").trim() || !String(documentNumber || "").trim())) {
     badRequest("documentType and documentNumber are required when replacing an ID document.");
@@ -577,5 +633,7 @@ export const adminReplaceUserDocument = async (userID, { documentKind, newUrl, d
     userID, documentKind, newUrl, driverLicenseExpiry,
     documentType === undefined ? undefined : String(documentType).trim(),
     documentNumber === undefined ? undefined : String(documentNumber).trim(),
+    newSelfieUrl,
+    driversLicenseNumber === undefined ? undefined : String(driversLicenseNumber).trim(),
   );
 };
