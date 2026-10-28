@@ -1,4 +1,5 @@
 import { db, bucket } from "../../config/firebaseConnection/firebase.js";
+import { roleIDToName } from "../../utils/roles/role.util.js";
 import admin from "firebase-admin";
 import { getSessionById, recordArchiveFlush, getSessionByBookingID, markSessionActive, markSessionEnded, markSessionCancelled, markSessionStolen, markDroppedOff, updateSessionStops } from "../../services/booking/bookingSession.service.js";
 import { toDate, sessionStartedAt, sessionEndedAt } from "../../utils/date/sessionDates.js";
@@ -6,7 +7,8 @@ import { fetchSessionRows } from "../../services/sheets/sheets.service.js";
 import { datesBetweenPHT } from "../../utils/date/phtDate.js";
 import { getPhaseChecklist, describeMissingInspection } from "../../services/vehicleDocumentation/vehicleDocumentation.service.js";
 import { resolveInspectionReminders } from "../../services/inspectionReminders/inspectionReminders.service.js";
-import { computeAmounts, derivePaymentStage } from "../../services/payments/payments.service.js";
+import { computeAmounts, derivePaymentStage, findOpenRefundRequest } from "../../services/payments/payments.service.js";
+import { computeRefundPlan } from "../payments/paymentBreakdown.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { createAuditLog, auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 import { listPenaltiesForBooking, settleBooking } from "../../services/penalty/penalty.service.js";
@@ -148,6 +150,20 @@ export const resolvePaymentInfo = async (bookingID) => {
       depositSettled, depositDeducted: depositDeducted || appliedToPenalties,
     };
   } catch { return EMPTY_PAYMENT_INFO; }
+};
+
+// Role name ("Owner" | "Admin" | "Supervisor" | ...) of a staff uid, for the "Cancelled by ..." lines. null when unknown.
+const resolveRoleName = async (uid) => {
+  if (!uid) return null;
+  try {
+    const snap = await db.collection("user").doc(uid).get();
+    const roleID = snap.exists ? snap.data().roleID : null;
+    if (!roleID) return null;
+    const known = roleIDToName(roleID);
+    if (known) return known;
+    const r = await db.collection("roles").doc(roleID).get();
+    return r.exists ? (r.data().roleName || null) : null;
+  } catch { return null; }
 };
 
 const resolveUserInfo = async (userID) => {
@@ -303,10 +319,18 @@ const attachRefundSummaries = async (rows) => {
       : st === "failed" ? "Failed"
       : st === "rejected" ? "No refund"
       : "Pending";                                       // pending / approved (incl. scheduled for after midnight)
+    const sendAfterDate = r.sendAfter?.toDate ? r.sendAfter.toDate() : r.sendAfter?._seconds ? new Date(r.sendAfter._seconds * 1000) : null;
     b.refundSummary = {
       status,
       refundRequestID: r.refundRequestID || r.id,
       amount: Number(r.toRefundAmount ?? r.amount ?? 0) || 0,
+      bookingPaid: Number(r.bookingPaid) || 0,
+      byStaff: r.source === "staff",   // the page labels a staff refund from depositForfeited / gatewayFeeKept below
+      gatewayFeeKept: Number(r.gatewayFeeKept) || 0,
+      depositForfeited: Number(r.depositForfeited) || 0,
+      // Approved, but PayMongo is only sent after midnight (same-day payment): the page says "Sends after midnight".
+      scheduled: !!sendAfterDate,
+      sendAfter: sendAfterDate ? sendAfterDate.toISOString() : null,
     };
   });
 };
@@ -363,14 +387,19 @@ export const getAllBookings = async (statusFilter) => {
       : out;
   });
   // Names of whoever cancelled the booking (customer or staff member) and, for a customer cancel, who approved it.
+  // Staff also get their role (Owner / Admin / Supervisor).
   const nameKey = (b) => [b.cancelledByID || (b.cancelledBy === "customer" ? b.userID : null), b.approvedByID];
   const cancellerIDs = [...new Set(rows.flatMap(nameKey).filter(Boolean))];
   if (cancellerIDs.length) {
-    const nameMap = Object.fromEntries(await Promise.all(cancellerIDs.map((id) => resolveUserInfo(id).then((u) => [id, u?.customerName || null]))));
+    const staffIDsToRole = new Set(rows.flatMap((b) => [b.cancelledBy === "staff" ? b.cancelledByID : null, b.approvedByID]).filter(Boolean));
+    const info = Object.fromEntries(await Promise.all(cancellerIDs.map(async (id) => {
+      const [u, role] = await Promise.all([resolveUserInfo(id), staffIDsToRole.has(id) ? resolveRoleName(id) : null]);
+      return [id, { name: u?.customerName || null, role }];
+    })));
     rows.forEach((b) => {
       const [by, appr] = nameKey(b);
-      if (by) { b.cancelledByID = by; b.cancelledByName = nameMap[by] || null; }
-      if (appr) b.approvedByName = nameMap[appr] || null;
+      if (by)   { b.cancelledByID = by; b.cancelledByName = info[by]?.name || null; if (b.cancelledBy === "staff") b.cancelledByRole = info[by]?.role || null; }
+      if (appr) { b.approvedByName = info[appr]?.name || null; b.approvedByRole = info[appr]?.role || null; }
     });
   }
   // Show WHO handled a request, not just a uid.
@@ -764,6 +793,25 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
       `Cannot cancel booking ${bookingID || docID}: it is "${oldStatus}". A trip that has already started can't be cancelled -- ` +
       "reject the request instead, or drop the car off and complete the trip, then return the deposit."
     );
+  }
+
+  // The Edit form is not where money is decided. Cancelling here would skip the checks and choices of the Cancel button (an open
+  // customer refund request, the refund type -- full / normal / no-show --, the held deposit, held discount credit), so a booking
+  // that has money collected, or an open refund request, has to be cancelled from there. A booking with nothing paid still
+  // cancels from here.
+  if (filtered.status === "cancelled") {
+    const payKey = bookingID || docID;
+    const paySnap = await db.collection("payments").where("bookingID", "==", payKey).limit(1).get();
+    if (!paySnap.empty) {
+      const pay = await hydratePaymentData(paySnap.docs[0].data(), paySnap.docs[0].id);
+      const open = await findOpenRefundRequest(pay.paymentID || paySnap.docs[0].id).catch(() => null);
+      if (open) {
+        throw new Error(`Cannot cancel booking ${payKey} from here: the customer has an open refund request. Approve or reject it from the Refund Requests page.`);
+      }
+      if (String(pay.status || "").toLowerCase() !== "refunded" && computeRefundPlan(pay).grossPaid > 0) {
+        throw new Error(`Cannot cancel booking ${payKey} from here: the customer has already paid for it. Use the Cancel button on the booking so you can choose Full refund, No-show refund, Normal refund or Cancel only.`);
+      }
+    }
   }
 
   // ── Stolen only makes sense for a trip that is out on the road: the booking must be

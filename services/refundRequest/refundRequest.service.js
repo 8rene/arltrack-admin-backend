@@ -4,7 +4,7 @@ import { createTransactionLog } from "../transactionLogs/transactionLogs.service
 import { resolveNotification, createNotification, notifyStaff } from "../notification/notification.service.js";
 import { ROLE_IDS } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
-import { computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, resolvePickupAt, getDepositAmount, PAYMENT_ID_MISSING_NOTE } from "../payments/paymentBreakdown.js";
+import { computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, getGatewayFeeShare, resolvePickupAt, getDepositAmount, PAYMENT_ID_MISSING_NOTE } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest, getDiscountRefundState } from "../payments/payments.service.js";
 import { getSessionByBookingID, markSessionCancelled } from "../booking/bookingSession.service.js";
 import { sendRefundEmail, sendCancellationEmail } from "../email/email.service.js";
@@ -125,6 +125,34 @@ export const wasPaidTodayManila = (paidAt, now = new Date()) => {
 const fmtManilaDate = (d) => toDateSafe(d)
   ? toDateSafe(d).toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" })
   : "the next day";
+
+// The three ways staff can refund a booking:
+//   full     our fault (or any staff cancellation) -> deposit returned, gateway fee refunded      (the default)
+//   normal   an ordinary refund                    -> deposit returned, gateway fee KEPT
+//   no_show  the customer never picked up          -> deposit KEPT, gateway fee refunded
+// The type is NOT stored: it only picks the figures below. What was kept is saved on the request as depositForfeited / gatewayFeeKept,
+// and a retry reuses those saved amounts.
+export const REFUND_TYPES = ["full", "normal", "no_show"];
+// Label of a saved staff refund, read from what it kept (the type itself is not stored).
+export const refundKindOf = (r) => (Number(r?.depositForfeited) > 0 ? "no_show" : Number(r?.gatewayFeeKept) > 0 ? "normal" : "full");
+const resolveRefundType = (opts = {}) => {
+  const t = lower(opts.refundType);
+  if (t && !REFUND_TYPES.includes(t)) throw fail(`Unknown refund type "${opts.refundType}". Use full, normal or no_show.`, 400);
+  if (opts.forfeitDeposit) {
+    if (t && t !== "no_show") throw fail("A no-show keeps the deposit, so it can't be combined with another refund type.", 400);
+    return "no_show";
+  }
+  return t || "full";
+};
+// What the refund type means in money: how much deposit is forfeited and how much gateway fee is kept.
+const refundTypeFigures = (refundType, payment, booking) => {
+  if (refundType === "no_show") {
+    const pol = getRefundPolicy(payment, { pickupAt: resolvePickupAt(booking), requestedAt: new Date() });
+    return { forfeit: pol.forfeit, gatewayFeeKept: 0 };
+  }
+  if (refundType === "normal") return { forfeit: 0, gatewayFeeKept: getGatewayFeeShare(payment) };
+  return { forfeit: 0, gatewayFeeKept: 0 };
+};
 
 // The cron sends a scheduled refund ONCE and never retries it by itself. Errors that are only temporary (the same-day
 // restriction at a timezone edge, PayMongo balance not ready, PayMongo unreachable) leave the request Approved so staff can
@@ -1028,11 +1056,16 @@ const finishStaffRefund = async (r) => {
   if (cancel.cancelled) {
     const manualAmount = Number(r.manualAmount) || 0;
     const onlineAmount = Number(r.onlineAmount) || 0;
+    const scheduled = !!r.sendAfter;   // same-day payment: PayMongo is sent after midnight, not now
+    const routeSentence = scheduled
+      ? `Because your payment was made today, ${peso(onlineAmount)} will be sent to your original payment method on ${fmtManilaDate(r.sendAfter)}.${manualAmount > 0 ? ` Please visit our store to collect the other ${peso(manualAmount)}.` : ""}`
+      : returnRouteSentence({ onlineAmount, manualAmount });
 
     await notifyCustomer(
       userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Approved",
-      `Your booking was cancelled: ${reason}. A refund of ${peso(refundTotal)} has been approved. ${returnRouteSentence({ onlineAmount, manualAmount })}`
+      `Your booking was cancelled: ${reason}. A refund of ${peso(refundTotal)} has been approved. ${routeSentence}`
       + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
+      + (Number(r.gatewayFeeKept) > 0 ? ` The ${peso(r.gatewayFeeKept)} online payment fee is not refundable.` : "")
       + unrefundableSentence(r.unrefundableAmount)
     );
 
@@ -1045,6 +1078,7 @@ const finishStaffRefund = async (r) => {
         amount: refundTotal,
         manualAmount,
         depositForfeited: Number(r.depositForfeited) || 0,
+        gatewayFeeKept: Number(r.gatewayFeeKept) || 0,
         reason: reason,
       }).catch((err) => console.error("[REFUND] staff refund email failed:", err.message));
     }
@@ -1060,7 +1094,7 @@ const finishStaffRefund = async (r) => {
 
     auditSafe({
       action: "update",
-      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(refundTotal)} refunded — ${r.contextLabel || "car status change"}: ${reason}.`,
+      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(refundTotal)} ${r.sendAfter ? `to be refunded (PayMongo part SCHEDULED for ${fmtManilaDate(r.sendAfter)}, same-day payment)` : "refunded"}[${refundKindOf(r) === "no_show" ? "no-show refund" : refundKindOf(r) === "normal" ? "normal refund" : "full refund"}]${Number(r.gatewayFeeKept) > 0 ? ` (${peso(r.gatewayFeeKept)} gateway fee kept)` : ""}${Number(r.depositForfeited) > 0 ? ` (${peso(r.depositForfeited)} deposit kept)` : ""} — ${r.contextLabel || "car status change"}: ${reason}.`,
       userID: processedBy || null,
       bookingID: r.bookingID,
       paymentID: r.paymentID,
@@ -1079,8 +1113,142 @@ const finishStaffRefund = async (r) => {
     unrefundableAmount: Number(r.unrefundableAmount) || 0,   // paid online, no PayMongo payment ID on record
     paymentID: r.paymentID || null,
     refundRequestID: r.refundRequestID || null,
+    gatewayFeeKept: Number(r.gatewayFeeKept) || 0,
+    depositForfeited: Number(r.depositForfeited) || 0,
+    scheduled: !!r.sendAfter,
+    sendAfter: r.sendAfter || null,
     bookingCancelled: cancel.cancelled,
   };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RETRY OF A FAILED STAFF REFUND -- sends ONLY the part(s) PayMongo refused.
+//
+// A staff refund goes "Failed" when one of its PayMongo parts was refused AFTER an earlier part had already gone out.
+// Retrying the whole refund would pay those earlier parts twice, so this one:
+//   * keeps the refund type, deposit and gateway fee from the stored request (nothing is decided again) and refuses to
+//     continue if the payment no longer adds up to the amount the request promised;
+//   * skips every part whose "out" row already has a PayMongo refund id, and sends only the others;
+//   * writes each new refund id to its row straight away, then approves the request, closes the held credit, settles the
+//     deposit and cancels the booking (finishStaffRefund), exactly like a first attempt that went well.
+// If PayMongo refuses the part again, the request stays Failed and the error is saved on that part's row.
+// ─────────────────────────────────────────────────────────────────────────────
+const retryFailedStaffRefund = async ({ e, refundRequestID, bookingID, reason, staffUserID, contextLabel, skipDriverNotify }) => {
+  const reqRef = db.collection("refundRequests").doc(refundRequestID);
+  const manualMsg = `Finish it manually from the Refund Requests page.`;
+
+  await db.runTransaction(async (t) => {
+    const snap = await t.get(reqRef);
+    if (!snap.exists) throw fail("Refund request not found.", 404);
+    const r = snap.data();
+    if (r.status !== "Failed") throw fail(`Refund for this booking is already ${r.status}.`, 409);
+    if (isLocked(r)) throw fail("This booking's refund is already being processed. Refresh in a moment.", 409);
+    t.update(reqRef, { approvalLockedAt: new Date() });
+  });
+  const release = () => reqRef.update({ approvalLockedAt: admin.firestore.FieldValue.delete() }).catch(() => {});
+
+  try {
+    const paymentSnap = await db.collection("payments").where("paymentID", "==", e.paymentID).limit(1).get();
+    if (paymentSnap.empty) throw fail(`The payment record for ${bookingID} was not found. ${manualMsg}`, 404);
+    const paymentRef = paymentSnap.docs[0].ref;
+    const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
+    const paymentID = e.paymentID;
+    if (!["paid", "approved"].includes(lower(payment.status))) {
+      throw fail(`This payment is now "${payment.status}", so the failed refund can't be retried here. ${manualMsg}`, 409);
+    }
+
+    const forfeit = Number(e.depositForfeited) || 0;
+    const gatewayFeeKept = Number(e.gatewayFeeKept) || 0;
+    const plan = computeRefundPlan(payment, { forfeit, gatewayFeeKept });
+    const outstandingDiscountRefund = payment.discountAmount > 0 && !payment.refundIssued ? plan.breakdown.refundDue : 0;
+    const totalToRefund = plan.total + outstandingDiscountRefund;
+    if (Math.abs(totalToRefund - amountOf(e)) > 0.01) {
+      throw fail(`The payment changed since the failed attempt (it now works out to ${peso(totalToRefund)}, the request promised ${peso(amountOf(e))}). ${manualMsg}`, 409);
+    }
+
+    const rowsSnap = await db.collection(ENTRY_COLLECTION).where("refundReqID", "==", refundRequestID).get();
+    const seq = (id) => Number(String(id || "").match(/(\d+)$/)?.[1] || 0);
+    if (rowsSnap.docs.some((d) => d.data().handBackFor)) {
+      throw fail(`Staff already handed part of this refund back by hand, so it can't be retried automatically. ${manualMsg}`, 409);
+    }
+    const partRows = rowsSnap.docs
+      .filter((d) => d.data().direction === "out" && d.data().source === "online" && d.data().status !== "unrefundable")
+      .sort((a, b) => seq(a.id) - seq(b.id));
+    if (partRows.length > plan.parts.length) throw fail(`The stored refund has more PayMongo parts than the payment allows. ${manualMsg}`, 409);
+
+    // One entry per planned part: what is already sent keeps its refund id; the rest is sent now.
+    const finalParts = [];
+    let retried = 0;
+    for (let i = 0; i < plan.parts.length; i++) {
+      const planned = plan.parts[i];
+      const row = partRows[i] || null;
+      const rd = row ? row.data() : null;
+      if (rd && (rd.referenceNumber || rd.status === "success")) {
+        finalParts.push({ kind: planned.kind, paymongoPaymentID: rd.paymongoPaymentID || planned.paymongoPaymentID, amount: Number(rd.amount) || planned.amount, paymongoRefundID: rd.referenceNumber || null, status: rd.status === "success" ? "succeeded" : "pending" });
+        continue;
+      }
+      const paymongoPaymentID = (rd && rd.paymongoPaymentID) || planned.paymongoPaymentID;
+      const amount = rd ? (Number(rd.amount) || planned.amount) : planned.amount;
+      try {
+        const paymongoRefundID = await createPaymongoRefund({ paymongoPaymentID, amount, reason });
+        finalParts.push({ kind: planned.kind, paymongoPaymentID, amount, paymongoRefundID, status: "pending" });
+        retried += 1;
+        // The refund id is the only link to the money: written to its row before anything else can fail.
+        if (row) await row.ref.update({ referenceNumber: paymongoRefundID, status: "pending", transactionErrorNote: null, processedAt: new Date(), updatedAt: new Date() });
+      } catch (err) {
+        if (row) await row.ref.update({ status: "failed", transactionErrorNote: err.message, updatedAt: new Date() }).catch(() => {});
+        auditSafe({
+          action: "update",
+          description: `Staff refund ${refundRequestID}: retrying the ${planned.kind} part failed again at PayMongo (${err.message}). Parts already refunded were not sent again.`,
+          userID: staffUserID, bookingID, paymentID, refundRequestID,
+        });
+        const out = fail(`PayMongo refused the ${planned.kind} part again: ${err.message}. The parts that already went out were NOT sent again. Retry later, or ${manualMsg.charAt(0).toLowerCase()}${manualMsg.slice(1)}`, 502);
+        out.handled = true;
+        throw out;
+      }
+    }
+
+    const onlineAmount = plan.total - plan.manualAmount;
+    const manualAmount = plan.manualAmount + outstandingDiscountRefund;
+    const manualRefund = manualAmount > 0 ? { amount: manualAmount, issued: false, issuedBy: null, issuedAt: null, method: null } : null;
+    const userID = e.userID || payment.userID || null;
+    const now = new Date();
+    const approvedFields = {
+      status: "Approved",
+      toRefundAmount: totalToRefund,
+      bookingPaid: plan.grossPaid,
+      depositForfeited: forfeit,
+      gatewayFeeKept,
+      processedBy: staffUserID || e.processedBy || null,
+      updatedAt: now,
+    };
+    const batch = db.batch();
+    batch.update(reqRef, { ...approvedFields, approvalLockedAt: admin.firestore.FieldValue.delete(), ...dropOldRefundNames() });
+    closeHeldCreditInBatch(batch, paymentRef, payment, { refundRequestID, bookingID, paymentID, userID, processedBy: staffUserID || null, at: now });
+    await writeRefundEntries(refundRequestID, {
+      request: { refundRequestID, bookingID, paymentID, userID, ...approvedFields, processedAt: now, createdAt: e.createdAt || now },
+      parts: finalParts, manualRefund, unrefundable: plan.unrefundable,
+    }, { batch });
+    await batch.commit();
+
+    await paymentRef.update({ updatedAt: now, ...(outstandingDiscountRefund > 0 ? { refundIssued: true } : {}) });
+    await markDepositAfterRefund(paymentRef, payment, forfeit, { processedBy: staffUserID, refundRequestID, reason });
+    auditSafe({
+      action: "update",
+      description: `Staff refund ${refundRequestID} RETRIED: ${retried} failed PayMongo part(s) sent now, ${finalParts.length - retried} already sent part(s) left alone.`,
+      userID: staffUserID, bookingID, paymentID, refundRequestID,
+    });
+
+    return await finishStaffRefund({
+      refundRequestID, bookingID, paymentID, userID, reason,
+      toRefundAmount: totalToRefund, onlineAmount, manualAmount, manualRefund, unrefundableAmount: plan.unrefundableAmount, contextLabel, skipDriverNotify,
+      depositForfeited: forfeit, gatewayFeeKept,
+      processedBy: staffUserID || null,
+    });
+  } catch (err) {
+    await release();   // always: the request stays Failed (or is already Approved, where the lock was removed with it)
+    throw err;
+  }
 };
 
 export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = {}) => {
@@ -1089,7 +1257,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   const startNotes = opts.notes || "Staff-initiated: car marked Maintenance/Inactive with an upcoming booking on it.";
   // true only for a no-show: the customer's deposit is kept and the rest refunded.
   // Every other staff cancellation is the business's doing → full refund, no forfeit.
-  const forfeitDeposit = !!opts.forfeitDeposit;
+  // opts.refundType: "full" (default) | "normal" (gateway fee kept) | "no_show" (deposit kept; same as forfeitDeposit).
+  const refundType = resolveRefundType(opts);
   if (!bookingID) throw fail("bookingID is required.", 400);
   if (!reason || !reason.trim()) throw fail("A reason is required.", 400);
 
@@ -1108,6 +1277,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
 
   // ── Retry of an attempt that already got past PayMongo ──
+  let earlierAttempt = null;   // a Pending request left by a crashed first attempt (its saved amounts are checked below)
   const existingSnap = await reqRef.get();
   if (existingSnap.exists) {
     const e = await hydrateOne(existingSnap.data(), refundRequestID);
@@ -1115,12 +1285,18 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       return finishStaffRefund({ ...e, refundRequestID, contextLabel, skipDriverNotify }); // money already moved — just finish the cancel
     }
     if (e.status === "Failed") {
+      // Scheduled sends that failed (sendAfter still set) are handled from the Refund Requests page. A failure part-way through
+      // a first attempt is retried here, for the failed part only.
+      if (e.outcome === "refunded" && !e.sendAfter) {
+        return retryFailedStaffRefund({ e: { ...e, refundRequestID }, refundRequestID, bookingID, reason, staffUserID, contextLabel, skipDriverNotify });
+      }
       throw fail(
         `A previous refund attempt for ${bookingID} failed part-way at PayMongo (${(e.parts || []).filter((p) => p.paymongoRefundID).length} part(s) already refunded). Finish it manually from the Refund Requests page — retrying here would refund those parts again.`,
         409
       );
     }
     // status "Pending": an earlier attempt crashed before PayMongo finished; the claim below re-checks the lock.
+    earlierAttempt = e;
   }
 
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
@@ -1146,6 +1322,11 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   const openCustomerRequestRaw = await findOpenRefundRequest(paymentID);
   const openCustomerRequest = openCustomerRequestRaw ? { ...(await hydrateOne(openCustomerRequestRaw, openCustomerRequestRaw.id)), id: openCustomerRequestRaw.id } : openCustomerRequestRaw;
   if (openCustomerRequest && openCustomerRequest.id !== refundRequestID) {
+    // Staff force this cancellation, so the customer's own request is approved as a FULL refund. A Normal refund (gateway fee kept)
+    // or a no-show would be silently ignored on this path, so say so instead of refunding more than staff chose.
+    if (refundType !== "full") {
+      throw fail("The customer already has an open refund request for this booking. Approving it here is always a Full refund. Choose Full refund, or handle their request from the Refund Requests page first.", 409);
+    }
     const cancelReason = `Cancelled by staff: ${reason}`;
 
     // Still waiting on review → approve it right here (same PayMongo + cancel +
@@ -1190,13 +1371,18 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   }
 
   const userID = payment.userID || booking.userID || null;
-  // No-show only: the deposit is forfeited (capped at what was paid); the pickup
-  // has passed so the policy tier is always "no_show" here.
-  const noShowPolicy = forfeitDeposit
-    ? getRefundPolicy(payment, { pickupAt: resolvePickupAt(booking), requestedAt: new Date() })
-    : null;
-  const forfeit = noShowPolicy ? noShowPolicy.forfeit : 0;
-  const plan = computeRefundPlan(payment, { forfeit });
+  // full: nothing kept. no_show: the deposit is forfeited (capped at what was paid; the pickup has passed, so the policy
+  // tier is always "no_show"). normal: the deposit goes back and the gateway fee the customer paid is kept.
+  const { forfeit, gatewayFeeKept } = refundTypeFigures(refundType, payment, booking);
+  const plan = computeRefundPlan(payment, { forfeit, gatewayFeeKept });
+  // A crashed first attempt already saved what it keeps; a retry must not choose different amounts than the ones it started with.
+  if (earlierAttempt && ((Number(earlierAttempt.depositForfeited) || 0) !== forfeit || (Number(earlierAttempt.gatewayFeeKept) || 0) !== plan.gatewayFeeKept)) {
+    const label = (t) => (t === "no_show" ? "no-show" : t === "normal" ? "normal" : "full");
+    throw fail(`An earlier attempt to refund ${bookingID} was already started as a ${label(refundKindOf(earlierAttempt))} refund. Retry it with the same option (${label(refundKindOf(earlierAttempt))}); the amounts can't change once started.`, 409);
+  }
+  if (refundType === "normal" && plan.grossPaid > 0 && !(plan.gatewayFeeKept > 0)) {
+    throw fail("This payment has no online payment fee to keep, so a Normal refund would be the same as a Full refund. Use Refund & cancel instead.", 400);
+  }
   const outstandingDiscountRefund = payment.discountAmount > 0 && !payment.refundIssued ? plan.breakdown.refundDue : 0;
   const totalToRefund = plan.total + outstandingDiscountRefund;
 
@@ -1230,6 +1416,11 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   // The cash/manual bucket also carries any outstanding discount spillover,
   // since PayMongo has no way to return that part either.
   const manualAmount = plan.manualAmount + outstandingDiscountRefund;
+
+  // Same-day rule (see computeRefundSchedule): PayMongo can't PARTIALLY refund a payment made today. A full refund (Fleet, Refund & cancel)
+  // is never affected; a no-show or a normal refund (gateway fee kept) is. Instead of refusing, the refund is approved now with a
+  // sendAfter (the next Manila midnight), the parts are only recorded as pending, and the cron (runScheduledRefunds) sends them.
+  const schedule = computeRefundSchedule(payment, plan, new Date());
 
   // ── 1. claim: create the doc BEFORE touching PayMongo, one at a time ──
   const claimedAt = new Date();
@@ -1266,6 +1457,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         toRefundAmount: totalToRefund,
         bookingPaid: plan.grossPaid,
         depositForfeited: forfeit,
+        gatewayFeeKept: plan.gatewayFeeKept,
         processedBy: staffUserID || null,
         returnDeposit: forfeit === 0,   // false only for a no-show where the deposit is kept
         status: "Pending",
@@ -1279,8 +1471,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   const parts = [];
   let approvedSaved = false; // once true the doc is "Approved" and must never be deleted
   try {
-    // ── 2. PayMongo refunds, one per online charge ──
-    for (const part of plan.parts) {
+    // ── 2. PayMongo refunds, one per online charge (none now when the same-day rule defers them to the cron) ──
+    for (const part of (schedule.deferred ? [] : plan.parts)) {
       try {
         const paymongoRefundID = await createPaymongoRefund({
           paymongoPaymentID: part.paymongoPaymentID,
@@ -1328,7 +1520,11 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       }
     }
 
-    // ── 3. approved — PayMongo has the refunds; the webhook finishes them ──
+    if (schedule.deferred) {
+      for (const part of plan.parts) parts.push({ kind: part.kind, paymongoPaymentID: part.paymongoPaymentID, amount: part.amount, paymongoRefundID: null, status: "pending" });
+    }
+
+    // ── 3. approved — PayMongo has the refunds (or the cron will send them); the webhook finishes them ──
     const manualRefund = manualAmount > 0
       ? { amount: manualAmount, issued: false, issuedBy: null, issuedAt: null, method: null }
       : null;
@@ -1338,7 +1534,10 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
       toRefundAmount: totalToRefund,
       bookingPaid: plan.grossPaid,
       depositForfeited: forfeit,
+      gatewayFeeKept: plan.gatewayFeeKept,
       processedBy: staffUserID || null,
+      // Same-day payment: only the send time lives on the request; what to send is on each part's "out" row.
+      ...(schedule.deferred ? { sendAfter: schedule.sendAfter, scheduledAt: now } : {}),
       updatedAt: now,
     };
     // Same rule as approveRefundRequest: the rows are the record, committed with the status, strict.
@@ -1366,13 +1565,15 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
     return await finishStaffRefund({
       refundRequestID, bookingID, paymentID, userID, reason,
       toRefundAmount: totalToRefund, onlineAmount, manualAmount, manualRefund, unrefundableAmount: plan.unrefundableAmount, contextLabel, skipDriverNotify,
-      depositForfeited: forfeit,
+      depositForfeited: forfeit, gatewayFeeKept: plan.gatewayFeeKept,
+      sendAfter: schedule.deferred ? schedule.sendAfter : null,
       processedBy: staffUserID || null,
     });
   } catch (err) {
     // Unexpected failure (not one handled above): never leave the lock held.
     if (!err.handled && !approvedSaved) {
-      if (parts.length === 0) { await reqRef.delete().catch(() => {}); await dropEarlyCancelRow(bookingID, refundRequestID); }   // nothing moved — retry starts clean
+      // nothing really went to PayMongo (a deferred refund only has pending parts) -> nothing moved, a retry starts clean
+      if (!parts.some((p) => p.paymongoRefundID)) { await reqRef.delete().catch(() => {}); await dropEarlyCancelRow(bookingID, refundRequestID); }
       else await reqRef.update({ approvalLockedAt: admin.firestore.FieldValue.delete() }).catch(() => {});  // parts went out but weren't saved yet
     }
     // approvedSaved: doc is already "Approved" — a retry resumes the cancel/notify.
@@ -1844,16 +2045,172 @@ const notifyAdminCancellation = async ({ docID, bookingID, driverID, customerUse
   } catch (err) { console.error("[REFUND] Failed to notify staff:", err.message); }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// REFUND AFTER A CANCEL-ONLY
+//
+// "Cancel only" cancels a booking and keeps all of the customer's money (and closes the deposit as kept). Staff can later decide
+// that some of it goes back. That is recorded here as a normal staff refund request that is ALL in-store: nothing is sent to
+// PayMongo, the request is Approved with one pending in-person row, and staff hand the money over and record it from the Refund
+// Requests page (markManualRefundIssued), exactly like any other hand-back. Four options, all worked out from what the customer paid:
+//   full      nothing kept                                    (our issue)
+//   normal    the deposit goes back, the gateway fee is kept  (the customer's loss: the fee)
+//   no_show   the deposit is kept, the gateway fee goes back  (no-show or a late cancellation; the loss: the deposit)
+//   manual    staff type the amount, up to what was paid      (the rest is kept)
+// ─────────────────────────────────────────────────────────────────────────────
+export const AFTER_CANCEL_OPTIONS = ["full", "normal", "no_show", "manual"];
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// The booking, its payment, and whether a refund can still be recorded for it. `blocked` says why not.
+const loadAfterCancel = async (docID) => {
+  const { booking, bookingID } = await loadBookingByDocID(docID);
+  const base = { booking, bookingID, blocked: null };
+  if (lower(booking.status) !== "cancelled") return { ...base, blocked: `This booking is "${booking.status}". Only a cancelled booking can be refunded here.` };
+  const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  if (paymentSnap.empty) return { ...base, blocked: "No payment is on record for this booking." };
+  const paymentRef = paymentSnap.docs[0].ref;
+  const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
+  const paymentID = payment.paymentID || paymentSnap.docs[0].id;
+  const found = { ...base, paymentRef, payment, paymentID };
+  if (lower(payment.status) === "refunded") return { ...found, blocked: "This payment was already refunded." };
+  // Any refund request that was not rejected (open, approved, refunded, failed, or a staff refund) means money is already being handled.
+  const reqSnap = await db.collection("refundRequests").where("bookingID", "==", bookingID).get();
+  const existing = reqSnap.docs.map((d) => d.data()).find((r) => lower(r.status) !== "rejected");
+  if (existing) return { ...found, blocked: `This booking already has a refund request (${existing.status}). Handle it from the Refund Requests page.` };
+  if (!(computeRefundPlan(payment).grossPaid > 0)) return { ...found, blocked: "Nothing was paid on this booking, so there is nothing to refund." };
+  return found;
+};
+
+// What each option keeps and returns. `typedAmount` is only read for "manual".
+const afterCancelFigures = (payment, option, typedAmount) => {
+  const gross = round2(computeRefundPlan(payment).grossPaid);
+  let forfeit = 0, gatewayFeeKept = 0, refund = gross, custom = false;
+  if (option === "normal") {
+    gatewayFeeKept = round2(Math.min(getGatewayFeeShare(payment), gross));
+    if (!(gatewayFeeKept > 0)) throw fail("This payment has no online payment fee to keep, so a Normal refund would be the same as a Full refund. Choose Full refund.", 400);
+    refund = round2(gross - gatewayFeeKept);
+  } else if (option === "no_show") {
+    forfeit = round2(Math.min(getDepositAmount(payment), gross));
+    refund = round2(gross - forfeit);
+    if (!(forfeit > 0) || !(refund > 0)) throw fail("The deposit is all that was paid (or there is no deposit), so this option would return nothing.", 400);
+  } else if (option === "manual") {
+    const typed = round2(typedAmount);
+    if (!Number.isFinite(typed) || !(typed > 0)) throw fail("Type the amount to refund.", 400);
+    if (typed > gross) throw fail(`The amount can't be more than what the customer paid (${peso(gross)}).`, 400);
+    refund = typed; custom = true;
+  }
+  return { gross, forfeit, gatewayFeeKept, refund, custom, kept: round2(gross - refund) };
+};
+
+export const getRefundAfterCancelPreview = async (docID) => {
+  const ctx = await loadAfterCancel(docID);
+  const { bookingID, booking, blocked, payment } = ctx;
+  const out = { bookingID, status: booking.status, eligible: !blocked, blockedReason: blocked };
+  if (blocked || !payment) return out;
+  const tryOpt = (o) => { try { return afterCancelFigures(payment, o); } catch { return null; } };
+  const full = tryOpt("full"), normal = tryOpt("normal"), noShow = tryOpt("no_show");
+  return {
+    ...out,
+    paid: full.gross,
+    options: {
+      full:    { total: full.refund },
+      normal:  { available: !!normal, gatewayFeeKept: normal ? normal.gatewayFeeKept : 0, total: normal ? normal.refund : 0 },
+      no_show: { available: !!noShow, forfeit: noShow ? noShow.forfeit : 0, total: noShow ? noShow.refund : 0 },
+      manual:  { max: full.gross },
+    },
+  };
+};
+
+export const refundCancelledBooking = async (docID, { option, amount, reason } = {}, staffUserID = null) => {
+  const opt = lower(option);
+  if (!AFTER_CANCEL_OPTIONS.includes(opt)) throw fail(`Unknown refund option "${option}". Use full, normal, no_show or manual.`, 400);
+  const cleanReason = String(reason || "").trim();
+  if (!cleanReason) throw fail("A reason is required.", 400);
+
+  const ctx = await loadAfterCancel(docID);
+  if (ctx.blocked) throw fail(ctx.blocked, 409);
+  const { booking, bookingID, paymentRef, payment, paymentID } = ctx;
+  const f = afterCancelFigures(payment, opt, amount);
+
+  const userID = payment.userID || booking.userID || null;
+  const refundRequestID = `staff_${String(bookingID).replace(/[^A-Za-z0-9_-]/g, "_")}`;
+  const reqRef = db.collection("refundRequests").doc(refundRequestID);
+  const now = new Date();
+  const requestDoc = {
+    refundRequestID,
+    bookingID,
+    paymentID,
+    source: "staff",
+    outcome: "refunded",
+    toRefundAmount: f.refund,
+    bookingPaid: f.gross,
+    depositForfeited: f.forfeit,
+    gatewayFeeKept: f.gatewayFeeKept,
+    returnDeposit: f.forfeit === 0,
+    processedBy: staffUserID || null,
+    status: "Approved",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const manualRefund = { amount: f.refund, issued: false, issuedBy: null, issuedAt: null, method: null };
+
+  const batch = db.batch();
+  batch.create(reqRef, requestDoc);   // fails if the same booking is refunded twice at once
+  closeHeldCreditInBatch(batch, paymentRef, payment, { refundRequestID, bookingID, paymentID, userID, processedBy: staffUserID || null, at: now });
+  // Cancel-only closed the deposit as kept. When the deposit now goes back, put it right so it is not shown as forfeited.
+  const dep = getDepositView(payment);
+  if (!f.custom && f.forfeit === 0 && dep && dep.status === "Forfeited") {
+    batch.update(paymentRef, { depositStatus: "Refunded", depositSettledAt: now, updatedAt: now });
+    batch.delete(db.collection(ENTRY_COLLECTION).doc(`${paymentID}_deposit_forfeited`));
+  }
+  await writeRefundEntries(refundRequestID, {
+    request: { ...requestDoc, userID, processedAt: now },
+    parts: [], manualRefund, unrefundable: [],
+  }, { batch });
+  try {
+    await batch.commit();
+  } catch (err) {
+    if (err.code === 6 || /already exists/i.test(err.message || "")) throw fail("A refund was already recorded for this booking.", 409);
+    throw err;
+  }
+
+  const label = opt === "no_show" ? "no-show / late cancellation" : opt === "normal" ? "normal" : opt === "manual" ? "custom amount" : "full";
+  await notifyCustomer(
+    userID, bookingID, "refund_approved", "Refund Approved",
+    `A refund of ${peso(f.refund)} has been approved for your cancelled booking: ${cleanReason}. Please visit our store to collect it.`
+    + (f.forfeit > 0 ? ` Your ${peso(f.forfeit)} deposit was kept.` : "")
+    + (f.gatewayFeeKept > 0 ? ` The ${peso(f.gatewayFeeKept)} online payment fee is not refundable.` : "")
+    + (f.custom && f.kept > 0 ? ` ${peso(f.kept)} was kept.` : "")
+  );
+  auditSafe({
+    action: "update",
+    description: `Refund ${refundRequestID} recorded AFTER a cancel-only for booking ${bookingID}: ${peso(f.refund)} to hand back in store [${label}]${f.kept > 0 ? ` (${peso(f.kept)} kept)` : ""}: ${cleanReason}.`,
+    userID: staffUserID, bookingID, paymentID, refundRequestID,
+  });
+  return { outcome: "refunded", bookingID, refundRequestID, paymentID, amount: f.refund, manualAmount: f.refund, retainedAmount: f.kept, gatewayFeeKept: f.gatewayFeeKept, depositForfeited: f.forfeit };
+};
+
 export const getAdminBookingRefundPreview = async (docID) => {
   const { booking, bookingID } = await loadBookingByDocID(docID);
+  const eligible = ["to pay", "upcoming"].includes(lower(booking.status));
+  const options = await getBookingRefundOptions(booking, bookingID);
+  return { bookingID, status: booking.status, eligible, ...options };
+};
+
+// Everything staff need to choose HOW to refund a booking, from the booking document: the figures of a Full refund (the top-level
+// fields of getBookingRefundPreview), plus `noShow` and `normal` blocks. Shared by the Bookings page (above) and the Fleet
+// status-change screen, so both offer the same options with the same numbers.
+export const getBookingRefundOptions = async (booking, bookingID) => {
   const status = lower(booking.status);
-  const eligible = ["to pay", "upcoming"].includes(status);
   const preview = await getBookingRefundPreview(bookingID);
 
-  // What marking this booking as a NO-SHOW would do (deposit kept, rest refunded).
+  // What marking this booking as a NO-SHOW would do (deposit kept, rest refunded), and what a NORMAL refund would do
+  // (deposit returned, gateway fee kept). The top-level figures from getBookingRefundPreview are the FULL refund.
   // pickupPassed is judged by the server (Manila-correct) — the no-show option is
   // only offered once the pickup time has actually passed.
+  // `scheduled` / `sendAfter`: a partial refund of a payment made today can't be sent to PayMongo until after midnight
+  // (see computeRefundSchedule), so the screen says so before staff confirm.
   let noShow = null;
+  let normal = null;
   if (status === "upcoming") {
     const pickupAt = resolvePickupAt(booking);
     const pickupPassed = !!pickupAt && pickupAt.getTime() <= Date.now();
@@ -1863,17 +2220,31 @@ export const getAdminBookingRefundPreview = async (docID) => {
       const gross   = computeRefundPlan(payment).grossPaid;
       const forfeit = Math.min(getDepositAmount(payment), gross);
       const plan    = computeRefundPlan(payment, { forfeit });
-      noShow = { pickupPassed, pickupAt, bookingPaid: gross, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount };
+      const sched   = computeRefundSchedule(payment, plan, new Date());
+      noShow = { pickupPassed, pickupAt, bookingPaid: gross, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount, scheduled: sched.deferred, sendAfter: sched.sendAfter };
+
+      // Normal refund: the deposit goes back, the gateway fee the customer has paid is kept. Same as Full when there was no fee.
+      const gatewayFeeKept = getGatewayFeeShare(payment);
+      const nPlan  = computeRefundPlan(payment, { gatewayFeeKept });
+      const nSched = computeRefundSchedule(payment, nPlan, new Date());
+      normal = { available: gatewayFeeKept > 0 && nPlan.total > 0, bookingPaid: gross, grossPaid: gross, gatewayFeeKept: nPlan.gatewayFeeKept, total: nPlan.total, onlineAmount: nPlan.total - nPlan.manualAmount, manualAmount: nPlan.manualAmount, unrefundableAmount: nPlan.unrefundableAmount, scheduled: nSched.deferred, sendAfter: nSched.sendAfter };
     } else {
-      noShow = { pickupPassed, pickupAt, bookingPaid: 0, grossPaid: 0, forfeit: 0, total: 0, onlineAmount: 0, manualAmount: 0 };
+      noShow = { pickupPassed, pickupAt, bookingPaid: 0, grossPaid: 0, forfeit: 0, total: 0, onlineAmount: 0, manualAmount: 0, scheduled: false, sendAfter: null };
+      normal = { available: false, bookingPaid: 0, grossPaid: 0, gatewayFeeKept: 0, total: 0, onlineAmount: 0, manualAmount: 0, scheduled: false, sendAfter: null };
     }
   }
-  return { bookingID, status: booking.status, eligible, ...preview, noShow };
+  return { ...preview, noShow, normal };
 };
 
-export const adminCancelBooking = async (docID, { refund = true, reason } = {}, adminUserID = null) => {
+// refundType (only used when refund is true): "full" (default: deposit and gateway fee both come back) | "normal" (deposit comes
+// back, the gateway fee is kept). A no-show has its own action, markBookingNoShow, because it is only allowed after pickup.
+export const adminCancelBooking = async (docID, { refund = true, reason, refundType } = {}, adminUserID = null) => {
   const cleanReason = String(reason || "").trim();
   if (!cleanReason) throw fail("A reason is required.", 400);
+  const type = lower(refundType) || "full";
+  if (!["full", "normal"].includes(type)) {
+    throw fail(type === "no_show" ? "A no-show is recorded with the \"Mark as no-show\" option, not here." : `Unknown refund type "${refundType}". Use full or normal.`, 400);
+  }
 
   const { booking, bookingID } = await loadBookingByDocID(docID);
   if (!["to pay", "upcoming"].includes(lower(booking.status))) {
@@ -1882,6 +2253,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason } = {}, 
 
   if (refund) {
     const result = await staffRefundBooking(bookingID, cleanReason, adminUserID, {
+      refundType: type,
       contextLabel: "admin cancellation",
       notes: "Admin-initiated: booking cancelled and refunded from the Bookings page.",
       skipDriverNotify: true, // notified once, below, together with the rest of the team
@@ -1991,6 +2363,7 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
     notes: "Admin-initiated: marked as a no-show after the pickup time passed — deposit forfeited, everything else refunded.",
     skipDriverNotify: true, // notified once, below, together with the rest of the team
     forfeitDeposit: true,
+    refundType: "no_show",
   });
 
   if (result.bookingCancelled) {
@@ -2001,6 +2374,22 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
     });
   }
   return result;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FLEET: resolve one upcoming booking when its car goes to Maintenance / Inactive. Staff pick, per booking, HOW it is settled:
+//   full     our issue: deposit and gateway fee returned                    (staffRefundBooking, the old behaviour and the default)
+//   normal   deposit returned, gateway fee kept                             (staffRefundBooking, refundType normal)
+//   no_show  pickup time passed: deposit kept, rest returned               (markBookingNoShow)
+//   cancel   cancel only: the customer's money is kept                      (adminCancelBooking, refund: false)
+// ─────────────────────────────────────────────────────────────────────────────
+export const FLEET_REFUND_CHOICES = ["full", "normal", "no_show", "cancel"];
+export const staffResolveUpcomingBooking = async ({ docID, bookingID }, choice, reason, staffUserID = null) => {
+  const c = lower(choice) || "full";
+  if (!FLEET_REFUND_CHOICES.includes(c)) throw fail(`Unknown refund choice "${choice}". Use full, normal, no_show or cancel.`, 400);
+  if (c === "cancel") return adminCancelBooking(docID, { refund: false, reason }, staffUserID);
+  if (c === "no_show") return markBookingNoShow(docID, { reason: `No-show: the customer did not pick up the vehicle. (${reason})` }, staffUserID);
+  return staffRefundBooking(bookingID, reason, staffUserID, { refundType: c });
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

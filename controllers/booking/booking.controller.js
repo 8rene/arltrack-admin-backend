@@ -1,7 +1,7 @@
 import { retryDepositReturn, handBackDepositReturn } from "../../services/depositReturn/depositReturn.service.js";
 import { getAllBookings, updateBooking, markBookingDroppedOff, settleDeposit, getReturnChecklist, approveCancellationRequest, rejectCancellationRequest } from "../../services/booking/booking.service.js";
 import { deleteHandler, previewDeleteHandler } from "./bookingDelete.controller.js";
-import { adminCancelBooking, getAdminBookingRefundPreview, markBookingNoShow } from "../../services/refundRequest/refundRequest.service.js";
+import { adminCancelBooking, getAdminBookingRefundPreview, markBookingNoShow, getRefundAfterCancelPreview, refundCancelledBooking } from "../../services/refundRequest/refundRequest.service.js";
 
 export const listBookings = async (req, res) => {
   try {
@@ -114,7 +114,7 @@ export const deleteBookingPreview = previewDeleteHandler;
 
 // ── Admin: refund + cancel (or cancel only) an upcoming / to-pay booking ──
 // GET  /api/bookings/:id/refund-preview            → what a refund would return
-// POST /api/bookings/:id/refund-cancel { reason, refund: true|false }
+// POST /api/bookings/:id/refund-cancel { reason, refund: true|false, refundType: "full"|"normal" }
 export const refundPreview = async (req, res) => {
   try {
     const data = await getAdminBookingRefundPreview(req.params.id);
@@ -134,9 +134,11 @@ export const markNoShow = async (req, res) => {
     const data = await markBookingNoShow(req.params.id, { reason }, adminUserID);
     const followUp = followUpOf(data);
     const message = followUp
-      ? followUpMessage(followUp, "Marked as a no-show. The deposit was kept.")
+      ? followUpMessage(followUp, "Marked as a no-show. The deposit was kept.", data)
       : data.amount > 0
-        ? `Marked as a no-show. The deposit was kept and ${pesoText(data.amount)} is going back through PayMongo.`
+        ? (data.scheduled
+          ? `Marked as a no-show. The deposit was kept. The payment was made today, so ${pesoText(data.amount)} will be sent through PayMongo ${sendDayText(data.sendAfter)}.`
+          : `Marked as a no-show. The deposit was kept and ${pesoText(data.amount)} is going back through PayMongo.`)
         : "Marked as a no-show. The customer only paid the non-refundable deposit, so there is nothing to refund.";
     return res.status(200).json({ success: true, message, data: { ...data, followUp } });
   } catch (error) {
@@ -160,14 +162,26 @@ const followUpOf = (data) => {
     : Math.max(0, (Number(data.amount) || 0) - inStore);
   return { onlineAmount: online, inStoreAmount: inStore, unrefundableAmount: unrefundable, paymentID: data.paymentID || null, refundRequestID: data.refundRequestID || null };
 };
-const followUpMessage = (f, lead) => {
+// "after midnight" / "on <date>": a same-day payment's partial refund is sent by the cron after the next Manila midnight.
+const sendDayText = (sendAfter) => {
+  const d = sendAfter?.toDate ? sendAfter.toDate() : sendAfter?._seconds !== undefined ? new Date(sendAfter._seconds * 1000) : sendAfter ? new Date(sendAfter) : null;
+  return d && !isNaN(d.getTime())
+    ? `on ${d.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" })} (after midnight)`
+    : "after midnight";
+};
+const followUpMessage = (f, lead, data = null) => {
   const parts = [lead];
+  const scheduled = !!(data && data.scheduled);
   if (f.inStoreAmount > 0) {
     parts.push(f.onlineAmount > 0
-      ? `Partial refund sent: ${pesoText(f.onlineAmount)} is going back through PayMongo. The other ${pesoText(f.inStoreAmount)} can't be refunded online, so please settle it in store.`
+      ? (scheduled
+        ? `The payment was made today, so ${pesoText(f.onlineAmount)} will be sent through PayMongo ${sendDayText(data.sendAfter)}. The other ${pesoText(f.inStoreAmount)} can't be refunded online, so please settle it in store.`
+        : `Partial refund sent: ${pesoText(f.onlineAmount)} is going back through PayMongo. The other ${pesoText(f.inStoreAmount)} can't be refunded online, so please settle it in store.`)
       : `Nothing was sent to PayMongo. ${pesoText(f.inStoreAmount)} can't be refunded online, so please settle it in store.`);
   } else if (f.onlineAmount > 0) {
-    parts.push(`${pesoText(f.onlineAmount)} is going back through PayMongo.`);
+    parts.push(scheduled
+      ? `The payment was made today, so ${pesoText(f.onlineAmount)} will be sent through PayMongo ${sendDayText(data.sendAfter)}.`
+      : `${pesoText(f.onlineAmount)} is going back through PayMongo.`);
   }
   if (f.unrefundableAmount > 0) parts.push(`${pesoText(f.unrefundableAmount)} was paid online but has no PayMongo payment ID on record, so refund it from the PayMongo dashboard.`);
   return parts.join(" ");
@@ -175,20 +189,53 @@ const followUpMessage = (f, lead) => {
 
 export const refundAndCancel = async (req, res) => {
   try {
-    const { reason, refund } = req.body || {};
+    const { reason, refund, refundType } = req.body || {};
     const adminUserID = req.user?.userID || req.user?.uid || null;
-    const data = await adminCancelBooking(req.params.id, { reason, refund: refund !== false }, adminUserID);
+    const data = await adminCancelBooking(req.params.id, { reason, refund: refund !== false, refundType }, adminUserID);
     const followUp = data.outcome === "cancelled_no_refund" ? null : followUpOf(data);
+    const feeNote = data.gatewayFeeKept > 0 ? ` The ${pesoText(data.gatewayFeeKept)} online payment fee was kept.` : "";
     const message = data.outcome === "cancelled_no_refund"
       ? "Booking cancelled. No refund was issued."
       : followUp
-        ? followUpMessage(followUp, "Booking cancelled.")
+        ? followUpMessage(followUp, `Booking cancelled.${feeNote}`, data)
         : data.amount > 0
-          ? "Booking cancelled and refund sent to PayMongo. Final status updates once PayMongo confirms."
+          ? (data.scheduled
+            ? `Booking cancelled.${feeNote} The payment was made today, so ${pesoText(data.amount)} will be sent through PayMongo ${sendDayText(data.sendAfter)}.`
+            : `Booking cancelled and refund sent to PayMongo.${feeNote} Final status updates once PayMongo confirms.`)
           : "Booking cancelled. Nothing had been paid, so there was nothing to refund.";
     return res.status(200).json({ success: true, message, data: { ...data, followUp } });
   } catch (error) {
     console.error("[BOOKINGS] refundAndCancel error:", error);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/bookings/:id/refund-after-cancel-preview
+// A booking that was cancelled WITHOUT a refund: can money still go back, and what each option would return.
+export const refundAfterCancelPreview = async (req, res) => {
+  try {
+    const data = await getRefundAfterCancelPreview(req.params.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[BOOKINGS] refundAfterCancelPreview error:", error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/bookings/:id/refund-after-cancel { option: "full"|"normal"|"no_show"|"manual", amount (manual only), reason }
+// Records a refund for an already-cancelled booking. It is handed back in store; nothing is sent to PayMongo.
+export const refundAfterCancel = async (req, res) => {
+  try {
+    const { option, amount, reason } = req.body || {};
+    const adminUserID = req.user?.userID || req.user?.uid || null;
+    const data = await refundCancelledBooking(req.params.id, { option, amount, reason }, adminUserID);
+    return res.status(200).json({
+      success: true,
+      message: `Refund of ${pesoText(data.amount)} recorded. Hand it back in store, then mark it as handed back on the Refund Requests page.`,
+      data,
+    });
+  } catch (error) {
+    console.error("[BOOKINGS] refundAfterCancel error:", error);
     return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };

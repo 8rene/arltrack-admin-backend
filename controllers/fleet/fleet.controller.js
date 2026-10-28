@@ -22,7 +22,8 @@ import {
 } from "../../services/fleet/fleet.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { consumeOtp, peekOtp } from "../otp/otp.controller.js";
-import { staffRefundBooking } from "../../services/refundRequest/refundRequest.service.js";
+import { staffResolveUpcomingBooking, FLEET_REFUND_CHOICES } from "../../services/refundRequest/refundRequest.service.js";
+import { resolvePickupAt } from "../../services/payments/paymentBreakdown.js";
 
 // Statuses that need a reason + OTP + a clean bookings check before they can
 // be written — see changeCarStatus() below. Leaving Maintenance/Inactive
@@ -120,7 +121,10 @@ export const getStatusChangePreview = async (req, res) => {
 };
 
 // PATCH /api/fleet/cars/:carID/status
-// Body: { status, statusReason?, otp? }
+// Body: { status, statusReason?, otp?, refundChoices? }
+//   refundChoices: { [bookingID]: "full" | "normal" | "no_show" | "cancel" } -- how staff chose to settle each upcoming booking
+//   (Full refund, Normal refund = gateway fee kept, No-show refund = deposit kept, Cancel only = no refund). A booking with no
+//   entry is refunded in full, as before. Every choice is checked before anything is refunded.
 //
 // Moving TO Maintenance or Inactive is gated three ways: a reason is
 // required, the acting staff member must supply a fresh OTP sent to their
@@ -146,7 +150,7 @@ export const getStatusChangePreview = async (req, res) => {
 export const changeCarStatus = async (req, res) => {
   try {
     const { carID } = req.params;
-    const { status, statusReason, otp } = req.body;
+    const { status, statusReason, otp, refundChoices } = req.body;
     if (!status) return res.status(400).json({ success: false, message: "status is required." });
 
     if (!GATED_STATUSES.includes(status)) {
@@ -174,11 +178,29 @@ export const changeCarStatus = async (req, res) => {
     if (!otpResult.ok) return res.status(otpResult.status).json({ success: false, code: "OTP_INVALID", message: otpResult.message });
 
     const { upcoming } = await getOpenBookingsForCar(carID);
+
+    // Validate every choice BEFORE any money moves: a typo or a no-show picked before the pickup time must not stop the batch half-way.
+    const choices = refundChoices && typeof refundChoices === "object" && !Array.isArray(refundChoices) ? refundChoices : {};
+    const choiceFor = (b) => String(choices[b.bookingID] || "full").toLowerCase();
+    for (const b of upcoming) {
+      const c = choiceFor(b);
+      if (!FLEET_REFUND_CHOICES.includes(c)) {
+        return res.status(400).json({ success: false, message: `Unknown refund choice "${choices[b.bookingID]}" for ${b.bookingID}. Nothing was changed.` });
+      }
+      if (c === "no_show") {
+        const pickupAt = resolvePickupAt(b);
+        if (!pickupAt || pickupAt.getTime() > Date.now()) {
+          return res.status(400).json({ success: false, message: `${b.bookingID} can't be refunded as a no-show: its pickup time hasn't passed yet. Choose another option. Nothing was changed.` });
+        }
+      }
+    }
+
     const refundResults = [];
     for (const booking of upcoming) {
+      const choice = choiceFor(booking);
       try {
-        const r = await staffRefundBooking(booking.bookingID, cleanReason, req.user?.userID || req.user?.uid || null);
-        refundResults.push({ bookingID: booking.bookingID, outcome: r.outcome, amount: r.amount, manualAmount: r.manualAmount, approvedExisting: !!r.approvedExisting });
+        const r = await staffResolveUpcomingBooking({ docID: booking.id, bookingID: booking.bookingID }, choice, cleanReason, req.user?.userID || req.user?.uid || null);
+        refundResults.push({ bookingID: booking.bookingID, outcome: r.outcome, amount: r.amount, manualAmount: r.manualAmount, approvedExisting: !!r.approvedExisting, choice, gatewayFeeKept: r.gatewayFeeKept || 0, depositForfeited: r.depositForfeited || 0, retainedAmount: r.retainedAmount || 0, scheduled: !!r.scheduled, sendAfter: r.sendAfter || null });
       } catch (e) {
         refundResults.push({ bookingID: booking.bookingID, outcome: "failed", amount: 0, error: e.message });
         // Stop here — anything already resolved above is real and stays

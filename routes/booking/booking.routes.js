@@ -1,4 +1,4 @@
-import { listBookings, editBooking, deleteBooking, deleteBookingPreview, markDroppedOff, settleDepositHandler, retryDepositReturnHandler, handBackDepositReturnHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow } from "../../controllers/booking/booking.controller.js";
+import { listBookings, editBooking, deleteBooking, deleteBookingPreview, markDroppedOff, settleDepositHandler, retryDepositReturnHandler, handBackDepositReturnHandler, returnChecklist, approveCancellation, rejectCancellation, refundPreview, refundAndCancel, markNoShow, refundAfterCancelPreview, refundAfterCancel } from "../../controllers/booking/booking.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -25,6 +25,9 @@ export const registerBookingRoutes = (app) => {
   // own refund request from the Refund Requests page).
   app.get("/api/bookings/:id/refund-preview", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundPreview);
   app.post("/api/bookings/:id/refund-cancel", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAndCancel);
+  // A booking that was cancelled without a refund: record that some of the money goes back (handed back in store).
+  app.get("/api/bookings/:id/refund-after-cancel-preview", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAfterCancelPreview);
+  app.post("/api/bookings/:id/refund-after-cancel", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAfterCancel);
   // No-show after the pickup time: deposit kept, everything else refunded (see refundRequest.service.js → markBookingNoShow).
   app.post("/api/bookings/:id/no-show", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), markNoShow);
   // Supervisor, Admin, Owner. Preview first (what goes + what is in the way); only Owner/Admin can force past blockers.

@@ -1,6 +1,6 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { getBookingRefundPreview, getStaffRefundOutcome } from "../refundRequest/refundRequest.service.js";
+import { getBookingRefundPreview, getBookingRefundOptions, getStaffRefundOutcome } from "../refundRequest/refundRequest.service.js";
 import { getStaffCancelledBookingKeys } from "../cancellationRequests/cancellationRequests.service.js";
 import { getPaymentDetailsByBookingID } from "../payments/payments.service.js";
 
@@ -304,7 +304,8 @@ export const getCarBookingsForStatusChange = async (carID) => {
       ...serializeBooking(b),
       vehicleLabel: carInfo?.label || null,
       plateNumber: carInfo?.plateNumber || null,
-      refundPreview: await getBookingRefundPreview(b.bookingID).catch(() => ({ total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false })),
+      // The Full refund figures at the top level (as before) plus `noShow` and `normal`, so staff choose how each booking is refunded.
+      refundPreview: await getBookingRefundOptions(b, b.bookingID).catch(() => ({ total: 0, onlineAmount: 0, manualAmount: 0, alreadyRefunded: false })),
       paymentDetails: await getPaymentDetailsByBookingID(b.bookingID).catch(() => null),
     }))
   );
