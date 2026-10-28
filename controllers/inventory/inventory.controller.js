@@ -74,7 +74,7 @@ export const saveBefore = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[INVENTORY] saveBefore error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };
 
@@ -94,6 +94,6 @@ export const saveAfter = async (req, res) => {
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[INVENTORY] saveAfter error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.status || 500).json({ success: false, message: error.message });
   }
 };

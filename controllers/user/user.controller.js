@@ -506,7 +506,13 @@ export const verifyUserDocument = async (req, res) => {
       }
     }
 
-    await userDocRef.update({ isVerified });
+    // idReviewedBy / idReviewedAt: who made this call and when — shown as "Reviewed By" in the admin
+    // panel's New ID view. Additive fields; older approvals simply don't have them.
+    await userDocRef.update({
+      isVerified,
+      idReviewedBy: req.user?.uid || null,
+      idReviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
     const name = userDoc.data().username || userDoc.data().email || uid;
     createAuditLog({

@@ -324,7 +324,7 @@ export const getAllBookings = async (statusFilter) => {
   // without a separate Driver Dispatch lookup.
   const driverIDs      = [...new Set(rows.map((b) => b.driverID).filter(Boolean))];
 
-  const [vehicleEntries, paymentEntries, userEntries, driverEntries, serviceTypeEntries, historyEntries, beforeDocsEntries, afterDocsEntries] = await Promise.all([
+  const [vehicleEntries, paymentEntries, userEntries, driverEntries, serviceTypeEntries, historyEntries, beforeDocsEntries, afterDocsEntries, linkedWork] = await Promise.all([
     Promise.all(carIDs.map((id) => resolveVehicleName(id).then((v) => [id, v]))),
     Promise.all(bookingIDs.map((id) => resolvePaymentInfo(id).then((p) => [id, p]))),
     Promise.all(userIDs.map((id) => resolveUserInfo(id).then((u) => [id, u]))),
@@ -333,6 +333,7 @@ export const getAllBookings = async (statusFilter) => {
     Promise.all(bookingIDs.map((id) => resolveHistoryInfo(id).then((h) => [id, h]))),
     Promise.all(bookingIDs.map((id) => getPhaseChecklist(id, "before").then((v) => [id, v]))),
     Promise.all(bookingIDs.map((id) => getPhaseChecklist(id, "after").then((v) => [id, v]))),
+    getLinkedWorkCounts(bookingIDs),
   ]);
 
   const vehicleMap     = Object.fromEntries(vehicleEntries);
@@ -425,9 +426,50 @@ export const getAllBookings = async (statusFilter) => {
       afterDocsComplete:  afterDocsMap[bID]?.complete ?? false,
       beforeInspection:   beforeDocsMap[bID] ?? { photos: false, parts: false, complete: false },
       afterInspection:    afterDocsMap[bID] ?? { photos: false, parts: false, complete: false },
+      // Open maintenance / penalties tied to this booking — lets the Bookings list show which step it is on.
+      ...(linkedWork.get(bID) || EMPTY_LINKED_WORK),
     };
   });
 };
+
+// Maintenance + penalty summary per booking for the Bookings list's "Phase" (current step) column. Same facts the
+// booking popup fetches one booking at a time, here in batches of 30 ids (Firestore's "in" limit).
+//   maintenanceTotal / maintenancePending  records filed / not yet "Completed"
+//   penaltyCount / penaltyReview           penalties noted / waiting for a supervisor's review
+// Never throws: on any error the list still loads and those steps just aren't flagged.
+const EMPTY_LINKED_WORK = { maintenanceTotal: 0, maintenancePending: 0, penaltyCount: 0, penaltyReview: 0 };
+async function getLinkedWorkCounts(bookingIDs) {
+  const out = new Map();
+  const entry = (id) => {
+    if (!out.has(id)) out.set(id, { ...EMPTY_LINKED_WORK });
+    return out.get(id);
+  };
+  const chunks = [];
+  for (let i = 0; i < bookingIDs.length; i += 30) chunks.push(bookingIDs.slice(i, i + 30));
+  try {
+    await Promise.all(chunks.map(async (ids) => {
+      const [mSnap, pSnap] = await Promise.all([
+        db.collection("maintenance").where("bookingID", "in", ids).get(),
+        db.collection("penalties").where("bookingID", "in", ids).get(),
+      ]);
+      mSnap.forEach((d) => {
+        const m = d.data();
+        const e = entry(m.bookingID);
+        e.maintenanceTotal += 1;
+        if (m.status !== "Completed") e.maintenancePending += 1;
+      });
+      pSnap.forEach((d) => {
+        const p = d.data();
+        const e = entry(p.bookingID);
+        e.penaltyCount += 1;
+        if (p.status === "UnderReview") e.penaltyReview += 1;
+      });
+    }));
+  } catch (err) {
+    console.warn("[BOOKING] getLinkedWorkCounts failed:", err.message);
+  }
+  return out;
+}
 
 // ─────────────────────────────────────────────
 // Deposit/penalty position for a booking, read-only. Shared by the Return

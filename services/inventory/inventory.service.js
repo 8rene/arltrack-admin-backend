@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
 import { syncCarPartConditions } from "../carParts/carPartConditions.service.js";
+import { assertDriverAssignedForInspection } from "../vehicleDocumentation/vehicleDocumentation.service.js";
 
 const HISTORY_COLLECTIONS = {
   before: "inventoryBeforeTrip",
@@ -142,6 +143,7 @@ export const saveBeforeTrip = async ({ bookingID, carID, parts }) => {
   if (!bookingID || !carID || !Array.isArray(parts)) {
     throw new Error("bookingID, carID, and parts[] are required.");
   }
+  await assertDriverAssignedForInspection(bookingID);
 
   const damageParts = parts.filter(p => p.status !== "Good" && p.status !== "New");
   const inventoryOverallStatus = damageParts.length > 0 ? "has damage" : "good";
@@ -188,6 +190,7 @@ export const saveAfterTrip = async ({ bookingID, carID, parts, userID }) => {
   if (!bookingID || !carID || !Array.isArray(parts)) {
     throw new Error("bookingID, carID, and parts[] are required.");
   }
+  await assertDriverAssignedForInspection(bookingID);
 
   // ── Guard: After Trip can only be saved if booking is completed ──
   const bookingSnap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();

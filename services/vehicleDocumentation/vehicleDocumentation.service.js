@@ -263,6 +263,7 @@ const stripMediaFields = (fields = {}) => {
  * @param {object} params.photoFields  — { frontViewUrl, sideViewUrl, backViewUrl, leftMirrorUrl, … }
  */
 export const saveVehicleDocBefore = async ({ bookingID, carID, photoFields: rawPhotoFields }) => {
+  await assertDriverAssignedForInspection(bookingID);
   if (!bookingID || !carID) throw new Error("bookingID and carID are required.");
   const photoFields = stripMediaFields(rawPhotoFields);
 
@@ -311,6 +312,7 @@ export const saveVehicleDocBefore = async ({ bookingID, carID, photoFields: rawP
  * @param {object} params.photoFields  — { frontViewUrl, sideViewUrl, backViewUrl, leftMirrorUrl, … }
  */
 export const saveVehicleDocAfter = async ({ bookingID, carID, photoFields: rawPhotoFields }) => {
+  await assertDriverAssignedForInspection(bookingID);
   if (!bookingID || !carID) throw new Error("bookingID and carID are required.");
   const photoFields = stripMediaFields(rawPhotoFields);
 
@@ -359,6 +361,7 @@ export const saveVehicleDocAfter = async ({ bookingID, carID, photoFields: rawPh
 // moves the write itself, same as everywhere else in this migration.
 // ─────────────────────────────────────────────
 export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallStatus, damageParts }) => {
+  await assertDriverAssignedForInspection(bookingID);
   if (!bookingID || !carID) throw new Error("bookingID and carID are required.");
   if (tripType !== "before" && tripType !== "after") throw new Error("tripType must be 'before' or 'after'.");
 
@@ -411,6 +414,48 @@ export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallS
 // parts record). Stamps the phase record and notifies the assigned driver, or the customer when there is no driver. Once per phase: a second press is refused, so the
 // customer is never notified twice for the same inspection.
 // ---------------------------------------------
+/**
+ * A chauffeur ("With Chauffeur") booking needs its driver assigned BEFORE anyone records its vehicle inspection:
+ * the driver is who gets the inspection notification, and the inspection belongs to the person handling the car.
+ * Self-drive bookings have no driver, so they are never blocked.
+ *
+ * "Has a driver" = the booking has a driverAssignments row that is "assigned" OR "completed". A finished trip's row
+ * flips to "completed" at Return, so counting only "assigned" would wrongly block the after-trip inspection of a
+ * trip that was driven by a driver. An "unassigned" row (driver taken off) does not count.
+ *
+ * Only live bookings are checked: cancelled / stolen ones are left alone so nothing gets stuck, and a booking that
+ * can't be found is left to each caller's own validation. Admin corrections to a CLOSED trip's history
+ * (adminUpdateHistoryPartStatus / editHistoryPhoto) deliberately don't call this.
+ *
+ * Throws an Error with status 400 and a message staff can act on.
+ */
+export const assertDriverAssignedForInspection = async (bookingKey) => {
+  if (!bookingKey) return;
+
+  let booking = null;
+  const byField = await db.collection("bookings").where("bookingID", "==", bookingKey).limit(1).get();
+  if (!byField.empty) booking = byField.docs[0].data();
+  else {
+    const byID = await db.collection("bookings").doc(String(bookingKey)).get();
+    if (byID.exists) booking = byID.data();
+  }
+  if (!booking) return;
+
+  const status = String(booking.status || "").toLowerCase();
+  if (status === "cancelled" || status === "stolen") return;
+  if (!String(booking.modeOfDriving || "").toLowerCase().includes("chauffeur")) return;
+
+  const snap = await db.collection("driverAssignments").where("bookingID", "==", bookingKey).get();
+  const hasDriver = snap.docs.some((d) => ["assigned", "completed"].includes(d.data().status));
+  if (!hasDriver) {
+    const err = new Error(
+      "This booking is With Chauffeur but has no driver assigned yet. Assign a driver in Driver Dispatch first, then record the inspection."
+    );
+    err.status = 400;
+    throw err;
+  }
+};
+
 const findBookingByKey = async (key) => {
   const byField = await db.collection("bookings").where("bookingID", "==", key).limit(1).get();
   if (!byField.empty) return { id: byField.docs[0].id, ...byField.docs[0].data() };
@@ -422,6 +467,7 @@ export const confirmInspection = async ({ phase, bookingID, carID, confirmedBy }
   const collectionName = DOC_COLLECTIONS[phase];
   if (!collectionName) { const e = new Error('phase must be "before" or "after".'); e.status = 400; throw e; }
   if (!bookingID) { const e = new Error("bookingID is required."); e.status = 400; throw e; }
+  await assertDriverAssignedForInspection(bookingID);
 
   const checklist = await getPhaseChecklist(bookingID, phase);
   if (!checklist.complete) {
@@ -568,6 +614,7 @@ export const addInspectionMedia = async ({ phase, kind, bookingID, carID, url, d
   const { field, max, label } = mediaConfig(kind);
   if (!bookingID || !carID) throw new Error("bookingID and carID are required.");
   if (!url) throw new Error("url is required.");
+  await assertDriverAssignedForInspection(bookingID);
 
   // The URL must be a file in OUR bucket, inside this booking's folder for this phase.
   const path = storagePathFromUrl(url);
