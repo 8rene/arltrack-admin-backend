@@ -212,9 +212,11 @@ const heldCreditOf = (p) =>
 // Gateway fee on a refund.
 //
 // The online payment (gateway) fee is charged on top of the booking (payment.gatewayFee). Policy:
-//   deposit goes BACK to the customer (asked 48h+ before pickup, or inside the 2-hour grace) -> the gateway fee is KEPT
-//   deposit is KEPT (late / no-show)                                                         -> the gateway fee is REFUNDED
+//   customer asked for the refund (any time: 48h+ before pickup, inside the 2-hour grace, late, or after pickup)
+//                                                                                            -> the gateway fee is KEPT
+//                                                                                               (when the deposit is kept too, both are kept)
 //   staff-initiated refunds / cancellations, and a waived forfeit                            -> the gateway fee is REFUNDED
+//                                                                                               (staff "Normal" and "after cancel" refunds choose to keep it)
 // Only the part of the fee the customer has actually paid is ever kept: a Partial booking that has only paid its first
 // half has paid only that share of the fee (fee x amountPaid / amount). round2 keeps it to centavos.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,9 +388,8 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
   const wouldForfeit = (tier === "full" || graceApplied) ? 0 : Math.min(depositAmount, amountPaid);
   const forfeit = waiveForfeit ? 0 : wouldForfeit;
 
-  // The deposit goes back (full tier, or the 2-hour grace) -> the gateway fee is kept. A staff waiver keeps neither.
-  const depositReturned = (tier === "full" || graceApplied) && !waiveForfeit;
-  const gatewayFeeKept = depositReturned ? getGatewayFeeShare(payment) : 0;
+  // The customer asked, so the gateway fee is kept whether the deposit goes back or is kept too. A staff waiver keeps neither.
+  const gatewayFeeKept = waiveForfeit ? 0 : getGatewayFeeShare(payment);
 
   return {
     graceApplied,
@@ -420,8 +421,9 @@ const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false,
     hoursBeforePickup: null,
     depositAmount,
     // The request stores the gateway fee that was kept when it was made (0 on requests made before this rule existed),
-    // so approving later never changes the amount the customer was shown.
-    gatewayFeeKept: keep || waiveForfeit ? 0 : Math.max(0, num(gatewayFeeKept)),
+    // so approving later never changes the amount the customer was shown. A request that keeps the deposit but stored no
+    // fee (made before the fee was kept with the deposit) falls back to the fee share the customer has paid.
+    gatewayFeeKept: waiveForfeit ? 0 : (Math.max(0, num(gatewayFeeKept)) || (keep ? getGatewayFeeShare(payment) : 0)),
     forfeit: waiveForfeit ? 0 : wouldForfeit,
     waived: !!waiveForfeit && wouldForfeit > 0,
     waivedAmount: waiveForfeit ? wouldForfeit : 0,

@@ -2,7 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { createTransactionLog } from "../transactionLogs/transactionLogs.service.js";
 import { resolveNotification, createNotification, notifyStaff } from "../notification/notification.service.js";
-import { ROLE_IDS } from "../../utils/roles/role.util.js";
+import { ROLE_IDS, roleIDToName } from "../../utils/roles/role.util.js";
 import { auditSafe } from "../auditLogs/auditLogs.service.js";
 import { computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, getGatewayFeeShare, resolvePickupAt, getDepositAmount, PAYMENT_ID_MISSING_NOTE } from "../payments/paymentBreakdown.js";
 import { PAYMENT_METHODS, findOpenRefundRequest, getDiscountRefundState } from "../payments/payments.service.js";
@@ -129,7 +129,7 @@ const fmtManilaDate = (d) => toDateSafe(d)
 // The three ways staff can refund a booking:
 //   full     our fault (or any staff cancellation) -> deposit returned, gateway fee refunded      (the default)
 //   normal   an ordinary refund                    -> deposit returned, gateway fee KEPT
-//   no_show  "No Deposit Refund" (any time)         -> deposit KEPT, gateway fee refunded
+//   no_show  "No Deposit Refund" (any time)         -> deposit KEPT, gateway fee refunded   (key kept for the API; shown as "No deposit refund")
 // The type is NOT stored: it only picks the figures below. What was kept is saved on the request as depositForfeited / gatewayFeeKept,
 // and a retry reuses those saved amounts.
 export const REFUND_TYPES = ["full", "normal", "no_show"];
@@ -139,7 +139,7 @@ const resolveRefundType = (opts = {}) => {
   const t = lower(opts.refundType);
   if (t && !REFUND_TYPES.includes(t)) throw fail(`Unknown refund type "${opts.refundType}". Use full, normal or no_show.`, 400);
   if (opts.forfeitDeposit) {
-    if (t && t !== "no_show") throw fail("A no-show keeps the deposit, so it can't be combined with another refund type.", 400);
+    if (t && t !== "no_show") throw fail("A no deposit refund keeps the deposit, so it can't be combined with another refund type.", 400);
     return "no_show";
   }
   return t || "full";
@@ -379,6 +379,24 @@ const findBooking = async (id) => {
 // paid or collected since the customer asked) — so staff see "₱2,500 via PayMongo
 // + ₱2,501 to hand back in cash" before they click Approve.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Name + role (Owner / Admin / Supervisor ...) of a staff uid: the "Updated by" column and the Cancellation block on the
+// Refunds page. Cosmetic, so a lookup problem just leaves the name / role empty.
+const resolveStaffInfo = async (uid) => {
+  if (!uid) return null;
+  const name = await resolveCustomerName(uid);
+  let role = null;
+  try {
+    const snap = await db.collection("user").doc(uid).get();
+    const roleID = snap.exists ? snap.data().roleID : null;
+    if (roleID) {
+      role = roleIDToName(roleID);
+      if (!role) { const r = await db.collection("roles").doc(roleID).get(); role = r.exists ? (r.data().roleName || null) : null; }
+    }
+  } catch { /* role is cosmetic */ }
+  return { name: name && name !== "—" ? name : null, role };
+};
+
 export const getAllRefundRequests = async (status) => {
   let query = db.collection("refundRequests");
   if (status) query = query.where("status", "==", status);
@@ -432,6 +450,16 @@ export const getAllRefundRequests = async (status) => {
   );
 
   const hydrated = (await hydrateRefundRequests(requests)).map(withRefundAliases);   // parts / manualRefund / unrefundable from the rows
+
+  // Who last acted on each request (approved / rejected / handed back), by name, for "Updated by". One lookup per staff member.
+  const staffById = new Map();
+  const staffInfo = (uid) => { if (!staffById.has(uid)) staffById.set(uid, resolveStaffInfo(uid)); return staffById.get(uid); };
+  await Promise.all(hydrated.map(async (r) => {
+    if (!r.processedBy) return;
+    const staff = await staffInfo(r.processedBy);
+    r.updatedByName = staff?.name || null;
+    r.updatedByRole = staff?.role || null;
+  }));
 
   hydrated.sort((a, b) => {
     const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
@@ -1379,7 +1407,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   const plan = computeRefundPlan(payment, { forfeit, gatewayFeeKept });
   // A crashed first attempt already saved what it keeps; a retry must not choose different amounts than the ones it started with.
   if (earlierAttempt && ((Number(earlierAttempt.depositForfeited) || 0) !== forfeit || (Number(earlierAttempt.gatewayFeeKept) || 0) !== plan.gatewayFeeKept)) {
-    const label = (t) => (t === "no_show" ? "no-show" : t === "normal" ? "normal" : "full");
+    const label = (t) => (t === "no_show" ? "no deposit" : t === "normal" ? "normal" : "full");
     throw fail(`An earlier attempt to refund ${bookingID} was already started as a ${label(refundKindOf(earlierAttempt))} refund. Retry it with the same option (${label(refundKindOf(earlierAttempt))}); the amounts can't change once started.`, 409);
   }
   if (refundType === "normal" && plan.grossPaid > 0 && !(plan.gatewayFeeKept > 0)) {
@@ -1461,7 +1489,7 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
         depositForfeited: forfeit,
         gatewayFeeKept: plan.gatewayFeeKept,
         processedBy: staffUserID || null,
-        returnDeposit: forfeit === 0,   // false only for a no-show where the deposit is kept
+        returnDeposit: forfeit === 0,   // false only for a no deposit refund (the deposit is kept)
         status: "Pending",
         approvalLockedAt: claimedAt,
         createdAt: claimedAt,
@@ -2175,7 +2203,7 @@ export const refundCancelledBooking = async (docID, { option, amount, reason } =
     throw err;
   }
 
-  const label = opt === "no_show" ? "no-show / late cancellation" : opt === "normal" ? "normal" : opt === "manual" ? "custom amount" : "full";
+  const label = opt === "no_show" ? "no deposit refund" : opt === "normal" ? "normal" : opt === "manual" ? "custom amount" : "full";
   await notifyCustomer(
     userID, bookingID, "refund_approved", "Refund Approved",
     `A refund of ${peso(f.refund)} has been approved for your cancelled booking: ${cleanReason}. Please visit our store to collect it.`
@@ -2244,7 +2272,7 @@ export const adminCancelBooking = async (docID, { refund = true, reason, refundT
   if (!cleanReason) throw fail("A reason is required.", 400);
   const type = lower(refundType) || "full";
   if (!["full", "normal"].includes(type)) {
-    throw fail(type === "no_show" ? "A no-show is recorded with the \"Mark as no-show\" option, not here." : `Unknown refund type "${refundType}". Use full or normal.`, 400);
+    throw fail(type === "no_show" ? "A no deposit refund has its own option (\"No Deposit Refund\"), not this one." : `Unknown refund type "${refundType}". Use full or normal.`, 400);
   }
 
   const { booking, bookingID } = await loadBookingByDocID(docID);
@@ -2339,7 +2367,7 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
 
   const { booking, bookingID } = await loadBookingByDocID(docID);
   if (lower(booking.status) !== "upcoming") {
-    throw fail(`This booking is "${booking.status}". Only an upcoming booking can be marked as a no-show.`, 409);
+    throw fail(`This booking is "${booking.status}". Only an upcoming booking can be cancelled with no deposit refund.`, 409);
   }
 
   // No pickup-time check: "No Deposit Refund" can be used before or after the pickup time.
@@ -2349,12 +2377,12 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
     const payment = paymentSnap.docs[0].data();
     const open = await findOpenRefundRequest(payment.paymentID || paymentSnap.docs[0].id).catch(() => null);
     if (open) {
-      throw fail("The customer has an open refund request for this booking. Approve or reject it from the Refund Requests page first (a request made after the pickup time is already treated as a no-show).", 409);
+      throw fail("The customer has an open refund request for this booking. Approve or reject it from the Refund Requests page first (a request made less than 48 hours before the pickup time, or after it, already has its deposit kept).", 409);
     }
   }
 
   const result = await staffRefundBooking(bookingID, cleanReason, adminUserID, {
-    contextLabel: "no-show",
+    contextLabel: "no deposit refund",
     notes: "Admin-initiated: No Deposit Refund — deposit kept, everything else refunded.",
     skipDriverNotify: true, // notified once, below, together with the rest of the team
     forfeitDeposit: true,

@@ -1,11 +1,14 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
-import { resolveRoleID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
+import { resolveRoleID, roleIDToName, CUSTOMER_ROLE_ID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
 import { consumeOtp } from "../otp/otp.controller.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { resolveNotification } from "../../services/notification/notification.service.js";
 import { upsertUserDocument, closePendingRequestsForUser } from "../../services/profileRequests/profileRequests.service.js";
 import { generateUniqueReferralCode } from "../../utils/referral/referral.util.js";
+
+// Role name for a stored roleID, including Customer (which roleIDToName deliberately doesn't know about).
+const roleNameOf = (roleID) => roleIDToName(roleID) ?? (roleID === CUSTOMER_ROLE_ID ? "Customer" : null);
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
 
@@ -377,10 +380,11 @@ export const getUserByUid = async (req, res) => {
       const snap = await db.collection("user").where("uid", "==", uid).limit(1).get();
       if (snap.empty) return res.status(404).json({ success: false, message: "User not found." });
       const [found] = await attachReferralInfo([{ id: snap.docs[0].id, ...snap.docs[0].data() }]);
-      return res.status(200).json({ success: true, data: found });
+      // `role` (name) is derived from the stored roleID; the doc itself only keeps roleID. The Audit Logs page uses it.
+      return res.status(200).json({ success: true, data: { ...found, role: roleNameOf(found.roleID) } });
     }
     const [withReferral] = await attachReferralInfo([{ id: userDoc.id, uid: userDoc.id, ...userDoc.data() }]);
-    return res.status(200).json({ success: true, data: withReferral });
+    return res.status(200).json({ success: true, data: { ...withReferral, role: roleNameOf(withReferral.roleID) } });
   } catch (error) {
     console.error("[USER] getUserByUid error:", error);
     return res.status(500).json({ success: false, message: error.message });

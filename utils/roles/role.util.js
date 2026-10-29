@@ -40,7 +40,7 @@ export function roleIDToName(roleID) {
 // ROLE_IDS above, so it likely has no doc in the `roles` collection either.
 // This is the ONE place its ID should live (nothing else in the backend or
 // frontend should hardcode a separate copy of it).
-const CUSTOMER_ROLE_ID = "9vD6ZU1s2qUtmyu0RXKD";
+export const CUSTOMER_ROLE_ID = "9vD6ZU1s2qUtmyu0RXKD";
 
 // In-memory cache so a live Firestore lookup only happens once per process,
 // not on every request.
