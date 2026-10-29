@@ -126,7 +126,7 @@ export const refundPreview = async (req, res) => {
 };
 
 // POST /api/bookings/:id/no-show { reason? }
-// Upcoming booking whose pickup time has passed: deposit kept, everything else refunded.
+// "No Deposit Refund" on an upcoming booking (before or after pickup): deposit kept, everything else refunded.
 export const markNoShow = async (req, res) => {
   try {
     const { reason } = req.body || {};
@@ -134,12 +134,12 @@ export const markNoShow = async (req, res) => {
     const data = await markBookingNoShow(req.params.id, { reason }, adminUserID);
     const followUp = followUpOf(data);
     const message = followUp
-      ? followUpMessage(followUp, "Marked as a no-show. The deposit was kept.", data)
+      ? followUpMessage(followUp, "Cancelled with No Deposit Refund. The deposit was kept.", data)
       : data.amount > 0
         ? (data.scheduled
-          ? `Marked as a no-show. The deposit was kept. The payment was made today, so ${pesoText(data.amount)} will be sent through PayMongo ${sendDayText(data.sendAfter)}.`
-          : `Marked as a no-show. The deposit was kept and ${pesoText(data.amount)} is going back through PayMongo.`)
-        : "Marked as a no-show. The customer only paid the non-refundable deposit, so there is nothing to refund.";
+          ? `Cancelled with No Deposit Refund. The deposit was kept. The payment was made today, so ${pesoText(data.amount)} will be sent through PayMongo ${sendDayText(data.sendAfter)}.`
+          : `Cancelled with No Deposit Refund. The deposit was kept and ${pesoText(data.amount)} is going back through PayMongo.`)
+        : "Cancelled with No Deposit Refund. The customer only paid the non-refundable deposit, so there is nothing to refund.";
     return res.status(200).json({ success: true, message, data: { ...data, followUp } });
   } catch (error) {
     console.error("[BOOKINGS] markNoShow error:", error);

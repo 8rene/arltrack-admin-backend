@@ -1449,9 +1449,7 @@ export const getPaymentById = async (id) => {
   ]);
   // Gateway Breakdown, penalty side: the fee the customer paid comes from the penalties (gatewayFeePaid), what PayMongo kept
   // comes from the penalty entries (one line per penalty paid online). null when no penalty was paid online.
-  // Keep PENALTY_FEE_MIN_AMOUNT equal to the customer backend's utils/pricing.js: a penalty carries the online fee only when HIGHER.
   const r2 = (n) => Math.round(n * 100) / 100;
-  const PENALTY_FEE_MIN_AMOUNT = 1000;
   const entryKey = payment.paymentID || payment.id;
   const penaltyRows = ((await getEntriesForPaymentIDs([entryKey])).get(entryKey) || [])
     .filter((e) => e && e.direction !== "out" && e.phase === "penalty" && e.status === "success");
@@ -1474,7 +1472,7 @@ export const getPaymentById = async (id) => {
       penaltyID: pid,
       description: p ? p.description : "Penalty",
       total: p ? p.amount : null,
-      underThreshold: p ? p.amount <= PENALTY_FEE_MIN_AMOUNT : false,
+      underThreshold: p ? !(fee > 0) : false,    // no fee was charged on it (it was at or under the penalty threshold, or paid while the fee was off)
       coveredByDeposit: p ? Math.max(0, r2(p.paidAmount - moneyRows)) : 0,
       paidOnline,
       rate: p ? p.gatewayFeeRate : null,
@@ -1489,7 +1487,6 @@ export const getPaymentById = async (id) => {
         received: feeReceived,
         paymongoFee: fromEntries ? fromEntries.paymongoFee : null,
         sale: fromEntries && fromEntries.paymongoFee !== null ? r2(feeReceived - fromEntries.paymongoFee) : null,
-        threshold: PENALTY_FEE_MIN_AMOUNT,
         items: gatewayItems,
         charged: r2((fromEntries ? fromEntries.paid : 0) + feeReceived),   // penalty money + the fee, i.e. what the customer paid
         count: fromEntries ? fromEntries.count : 0,

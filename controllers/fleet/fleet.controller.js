@@ -23,7 +23,6 @@ import {
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { consumeOtp, peekOtp } from "../otp/otp.controller.js";
 import { staffResolveUpcomingBooking, FLEET_REFUND_CHOICES } from "../../services/refundRequest/refundRequest.service.js";
-import { resolvePickupAt } from "../../services/payments/paymentBreakdown.js";
 
 // Statuses that need a reason + OTP + a clean bookings check before they can
 // be written — see changeCarStatus() below. Leaving Maintenance/Inactive
@@ -123,7 +122,7 @@ export const getStatusChangePreview = async (req, res) => {
 // PATCH /api/fleet/cars/:carID/status
 // Body: { status, statusReason?, otp?, refundChoices? }
 //   refundChoices: { [bookingID]: "full" | "normal" | "no_show" | "cancel" } -- how staff chose to settle each upcoming booking
-//   (Full refund, Normal refund = gateway fee kept, No-show refund = deposit kept, Cancel only = no refund). A booking with no
+//   (Full refund, Normal refund = gateway fee kept, No Deposit Refund = deposit kept, Cancel only = no refund). A booking with no
 //   entry is refunded in full, as before. Every choice is checked before anything is refunded.
 //
 // Moving TO Maintenance or Inactive is gated three ways: a reason is
@@ -179,19 +178,13 @@ export const changeCarStatus = async (req, res) => {
 
     const { upcoming } = await getOpenBookingsForCar(carID);
 
-    // Validate every choice BEFORE any money moves: a typo or a no-show picked before the pickup time must not stop the batch half-way.
+    // Validate every choice BEFORE any money moves: a typo must not stop the batch half-way.
     const choices = refundChoices && typeof refundChoices === "object" && !Array.isArray(refundChoices) ? refundChoices : {};
     const choiceFor = (b) => String(choices[b.bookingID] || "full").toLowerCase();
     for (const b of upcoming) {
       const c = choiceFor(b);
       if (!FLEET_REFUND_CHOICES.includes(c)) {
         return res.status(400).json({ success: false, message: `Unknown refund choice "${choices[b.bookingID]}" for ${b.bookingID}. Nothing was changed.` });
-      }
-      if (c === "no_show") {
-        const pickupAt = resolvePickupAt(b);
-        if (!pickupAt || pickupAt.getTime() > Date.now()) {
-          return res.status(400).json({ success: false, message: `${b.bookingID} can't be refunded as a no-show: its pickup time hasn't passed yet. Choose another option. Nothing was changed.` });
-        }
       }
     }
 

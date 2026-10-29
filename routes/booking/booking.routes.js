@@ -28,7 +28,7 @@ export const registerBookingRoutes = (app) => {
   // A booking that was cancelled without a refund: record that some of the money goes back (handed back in store).
   app.get("/api/bookings/:id/refund-after-cancel-preview", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAfterCancelPreview);
   app.post("/api/bookings/:id/refund-after-cancel", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), refundAfterCancel);
-  // No-show after the pickup time: deposit kept, everything else refunded (see refundRequest.service.js → markBookingNoShow).
+  // No Deposit Refund (before or after pickup): deposit kept, everything else refunded (see refundRequest.service.js → markBookingNoShow).
   app.post("/api/bookings/:id/no-show", verifyToken, requireRole([roles.ADMIN, roles.OWNER]), markNoShow);
   // Supervisor, Admin, Owner. Preview first (what goes + what is in the way); only Owner/Admin can force past blockers.
   app.get("/api/bookings/:id/delete-preview", verifyToken, requireRole(allowed), deleteBookingPreview);

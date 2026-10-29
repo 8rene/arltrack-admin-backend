@@ -129,7 +129,7 @@ const fmtManilaDate = (d) => toDateSafe(d)
 // The three ways staff can refund a booking:
 //   full     our fault (or any staff cancellation) -> deposit returned, gateway fee refunded      (the default)
 //   normal   an ordinary refund                    -> deposit returned, gateway fee KEPT
-//   no_show  the customer never picked up          -> deposit KEPT, gateway fee refunded
+//   no_show  "No Deposit Refund" (any time)         -> deposit KEPT, gateway fee refunded
 // The type is NOT stored: it only picks the figures below. What was kept is saved on the request as depositForfeited / gatewayFeeKept,
 // and a retry reuses those saved amounts.
 export const REFUND_TYPES = ["full", "normal", "no_show"];
@@ -147,8 +147,10 @@ const resolveRefundType = (opts = {}) => {
 // What the refund type means in money: how much deposit is forfeited and how much gateway fee is kept.
 const refundTypeFigures = (refundType, payment, booking) => {
   if (refundType === "no_show") {
-    const pol = getRefundPolicy(payment, { pickupAt: resolvePickupAt(booking), requestedAt: new Date() });
-    return { forfeit: pol.forfeit, gatewayFeeKept: 0 };
+    // "No Deposit Refund": the deposit is always kept (capped at what was paid), before or after the pickup time. It is NOT read
+    // from getRefundPolicy, which returns a 0 forfeit when the booking is 48+ hours before pickup.
+    const gross = computeRefundPlan(payment).grossPaid;
+    return { forfeit: Math.min(getDepositAmount(payment), gross), gatewayFeeKept: 0 };
   }
   if (refundType === "normal") return { forfeit: 0, gatewayFeeKept: getGatewayFeeShare(payment) };
   return { forfeit: 0, gatewayFeeKept: 0 };
@@ -932,7 +934,7 @@ const staffCancelWithNoRefund = async (bookingID, booking, payment, reason, staf
   auditSafe({
     action: "update",
     description: outcome === "deposit_forfeited"
-      ? `Booking ${bookingID} cancelled as a no-show — the payment only covered the non-refundable deposit, so nothing to refund. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
+      ? `Booking ${bookingID} cancelled with no deposit refund — the payment only covered the non-refundable deposit, so nothing to refund. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
       : outcome === "already_refunded"
       ? `Booking ${bookingID} cancelled — its payment was already refunded earlier but the booking itself hadn't been. ${contextLabel[0].toUpperCase() + contextLabel.slice(1)}: ${reason}.`
       : outcome === "no_payment"
@@ -1064,7 +1066,7 @@ const finishStaffRefund = async (r) => {
     await notifyCustomer(
       userID, r.bookingID, "refund_approved", "Booking Cancelled — Refund Approved",
       `Your booking was cancelled: ${reason}. A refund of ${peso(refundTotal)} has been approved. ${routeSentence}`
-      + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was kept because the pickup did not happen (no-show).` : "")
+      + (Number(r.depositForfeited) > 0 ? ` Your ${peso(r.depositForfeited)} deposit was not refunded.` : "")
       + (Number(r.gatewayFeeKept) > 0 ? ` The ${peso(r.gatewayFeeKept)} online payment fee is not refundable.` : "")
       + unrefundableSentence(r.unrefundableAmount)
     );
@@ -1094,7 +1096,7 @@ const finishStaffRefund = async (r) => {
 
     auditSafe({
       action: "update",
-      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(refundTotal)} ${r.sendAfter ? `to be refunded (PayMongo part SCHEDULED for ${fmtManilaDate(r.sendAfter)}, same-day payment)` : "refunded"}[${refundKindOf(r) === "no_show" ? "no-show refund" : refundKindOf(r) === "normal" ? "normal refund" : "full refund"}]${Number(r.gatewayFeeKept) > 0 ? ` (${peso(r.gatewayFeeKept)} gateway fee kept)` : ""}${Number(r.depositForfeited) > 0 ? ` (${peso(r.depositForfeited)} deposit kept)` : ""} — ${r.contextLabel || "car status change"}: ${reason}.`,
+      description: `Refund ${r.refundRequestID}: booking ${r.bookingID} cancelled and ${peso(refundTotal)} ${r.sendAfter ? `to be refunded (PayMongo part SCHEDULED for ${fmtManilaDate(r.sendAfter)}, same-day payment)` : "refunded"}[${refundKindOf(r) === "no_show" ? "no deposit refund" : refundKindOf(r) === "normal" ? "normal refund" : "full refund"}]${Number(r.gatewayFeeKept) > 0 ? ` (${peso(r.gatewayFeeKept)} gateway fee kept)` : ""}${Number(r.depositForfeited) > 0 ? ` (${peso(r.depositForfeited)} deposit kept)` : ""} — ${r.contextLabel || "car status change"}: ${reason}.`,
       userID: processedBy || null,
       bookingID: r.bookingID,
       paymentID: r.paymentID,
@@ -1371,8 +1373,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   }
 
   const userID = payment.userID || booking.userID || null;
-  // full: nothing kept. no_show: the deposit is forfeited (capped at what was paid; the pickup has passed, so the policy
-  // tier is always "no_show"). normal: the deposit goes back and the gateway fee the customer paid is kept.
+  // full: nothing kept. no_show ("No Deposit Refund"): the deposit is kept (capped at what was paid), whatever the pickup time.
+  // normal: the deposit goes back and the gateway fee the customer paid is kept.
   const { forfeit, gatewayFeeKept } = refundTypeFigures(refundType, payment, booking);
   const plan = computeRefundPlan(payment, { forfeit, gatewayFeeKept });
   // A crashed first attempt already saved what it keeps; a retry must not choose different amounts than the ones it started with.
@@ -2205,8 +2207,7 @@ export const getBookingRefundOptions = async (booking, bookingID) => {
 
   // What marking this booking as a NO-SHOW would do (deposit kept, rest refunded), and what a NORMAL refund would do
   // (deposit returned, gateway fee kept). The top-level figures from getBookingRefundPreview are the FULL refund.
-  // pickupPassed is judged by the server (Manila-correct) — the no-show option is
-  // only offered once the pickup time has actually passed.
+  // pickupPassed is still reported (Manila-correct) for information, but it no longer gates the No Deposit Refund option.
   // `scheduled` / `sendAfter`: a partial refund of a payment made today can't be sent to PayMongo until after midnight
   // (see computeRefundSchedule), so the screen says so before staff confirm.
   let noShow = null;
@@ -2237,7 +2238,7 @@ export const getBookingRefundOptions = async (booking, bookingID) => {
 };
 
 // refundType (only used when refund is true): "full" (default: deposit and gateway fee both come back) | "normal" (deposit comes
-// back, the gateway fee is kept). A no-show has its own action, markBookingNoShow, because it is only allowed after pickup.
+// back, the gateway fee is kept). No Deposit Refund has its own action, markBookingNoShow.
 export const adminCancelBooking = async (docID, { refund = true, reason, refundType } = {}, adminUserID = null) => {
   const cleanReason = String(reason || "").trim();
   if (!cleanReason) throw fail("A reason is required.", 400);
@@ -2324,30 +2325,24 @@ export const adminCancelBooking = async (docID, { refund = true, reason, refundT
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ADMIN "Mark as no-show" from the Bookings page.
+// ADMIN "No Deposit Refund" from the Bookings page (the route is still POST /no-show).
 //
-// For an UPCOMING booking whose pickup time has passed without the customer
-// showing up (the T&C: "No-show on pickup date — deposit forfeited"). The
-// customer's deposit is KEPT and everything else they paid (rental, fees, any
-// balance) is refunded — same money flow as staffRefundBooking(), with the
-// forfeit applied. If the customer had already asked for a refund after the
-// pickup time, that request is a no-show too and is handled from the Refund
-// Requests page, so this is blocked while one is open (they can't contradict
-// each other).
+// For an UPCOMING booking, before OR after its pickup time. The customer's
+// deposit is KEPT and everything else they paid (rental, fees, any balance) is
+// refunded — same money flow as staffRefundBooking(), with the forfeit applied.
+// If the customer already has an open refund request, that request is handled
+// from the Refund Requests page, so this is blocked while one is open (they
+// can't contradict each other).
 // ─────────────────────────────────────────────────────────────────────────────
 export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = null) => {
-  const cleanReason = String(reason || "").trim() || "No-show: the customer did not pick up the vehicle.";
+  const cleanReason = String(reason || "").trim() || "Cancelled with no deposit refund.";
 
   const { booking, bookingID } = await loadBookingByDocID(docID);
   if (lower(booking.status) !== "upcoming") {
     throw fail(`This booking is "${booking.status}". Only an upcoming booking can be marked as a no-show.`, 409);
   }
 
-  const pickupAt = resolvePickupAt(booking);
-  if (!pickupAt) throw fail("This booking has no pickup time, so it can't be judged as a no-show.", 400);
-  if (pickupAt.getTime() > Date.now()) {
-    throw fail(`The pickup time (${pickupAt.toLocaleString("en-PH", { timeZone: "Asia/Manila" })}) hasn't passed yet — a no-show can only be recorded after it.`, 409);
-  }
+  // No pickup-time check: "No Deposit Refund" can be used before or after the pickup time.
 
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   if (!paymentSnap.empty) {
@@ -2360,7 +2355,7 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
 
   const result = await staffRefundBooking(bookingID, cleanReason, adminUserID, {
     contextLabel: "no-show",
-    notes: "Admin-initiated: marked as a no-show after the pickup time passed — deposit forfeited, everything else refunded.",
+    notes: "Admin-initiated: No Deposit Refund — deposit kept, everything else refunded.",
     skipDriverNotify: true, // notified once, below, together with the rest of the team
     forfeitDeposit: true,
     refundType: "no_show",
@@ -2380,7 +2375,7 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
 // FLEET: resolve one upcoming booking when its car goes to Maintenance / Inactive. Staff pick, per booking, HOW it is settled:
 //   full     our issue: deposit and gateway fee returned                    (staffRefundBooking, the old behaviour and the default)
 //   normal   deposit returned, gateway fee kept                             (staffRefundBooking, refundType normal)
-//   no_show  pickup time passed: deposit kept, rest returned               (markBookingNoShow)
+//   no_show  No Deposit Refund: deposit kept, rest returned                (markBookingNoShow)
 //   cancel   cancel only: the customer's money is kept                      (adminCancelBooking, refund: false)
 // ─────────────────────────────────────────────────────────────────────────────
 export const FLEET_REFUND_CHOICES = ["full", "normal", "no_show", "cancel"];
@@ -2388,7 +2383,7 @@ export const staffResolveUpcomingBooking = async ({ docID, bookingID }, choice, 
   const c = lower(choice) || "full";
   if (!FLEET_REFUND_CHOICES.includes(c)) throw fail(`Unknown refund choice "${choice}". Use full, normal, no_show or cancel.`, 400);
   if (c === "cancel") return adminCancelBooking(docID, { refund: false, reason }, staffUserID);
-  if (c === "no_show") return markBookingNoShow(docID, { reason: `No-show: the customer did not pick up the vehicle. (${reason})` }, staffUserID);
+  if (c === "no_show") return markBookingNoShow(docID, { reason: `No Deposit Refund. (${reason})` }, staffUserID);
   return staffRefundBooking(bookingID, reason, staffUserID, { refundType: c });
 };
 

@@ -43,6 +43,10 @@ const DEFAULTS = {
   // and the customer backend pads chauffeur bookings with it when checking if a driver is still free,
   // so both sides read this one value. 0 = trips may touch.
   driverBufferMinutes: 120,
+
+  // Penalty gateway-fee threshold (pesos): a penalty carries the online payment fee only when its own amount is HIGHER than
+  // this. Was a hardcoded 1000 in the customer backend (utils/pricing.js) and in this backend's receipts / payments service.
+  penaltyThreshold: 1000,
 };
 
 // Percentage fields: must be a number between 0 and 100.
@@ -57,6 +61,7 @@ const NUMERIC_FIELDS = [
   "lateFeeRatePerHour",
   "lateFeeGraceMinutes",
   "driverBufferMinutes",
+  "penaltyThreshold",
 ];
 
 // ─────────────────────────────────────────────

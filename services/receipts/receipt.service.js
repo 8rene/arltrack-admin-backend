@@ -137,15 +137,14 @@ const lineOf = (e) => ({
 // row's amount is penalty money only): it is the fee on that amount at the penalty's saved gatewayFeeRate, or the current
 // System Settings % for a penalty from before the rate was saved -- the same figure the checkout charged. Same as the
 // customer backend's penaltyFeeOf (utils/receipt/receipt.util.js), so both sides show the same total.
-// A penalty carries the fee only when its own amount is HIGHER than PENALTY_FEE_MIN_AMOUNT, the same number as the customer
-// backend's utils/pricing.js (keep the two equal); a penalty with no online fee recorded (gatewayFeePaid is 0) shows none.
-const PENALTY_FEE_MIN_AMOUNT = 1000;
+// Whether a fee applied at all (the penalty threshold in System Settings) was already decided at checkout and is recorded as
+// the penalty's gatewayFeePaid, so the receipt does not look at the threshold: a penalty with no online fee recorded
+// (gatewayFeePaid is 0) shows none.
 const feePct = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? Math.min(n, 100) : 0; };
 const penaltyFeeOf = (row, penaltyDoc, settings) => {
   if (!row || row.direction !== "in" || row.phase !== "penalty" || row.source !== "online" || row.status !== "success") return 0;
-  if (penaltyDoc && !(num(penaltyDoc.gatewayFeePaid) > 0)) return 0;
+  if (!penaltyDoc || !(num(penaltyDoc.gatewayFeePaid) > 0)) return 0;
   const base = Math.max(0, round2(num(row.amount)));
-  if (!((penaltyDoc && penaltyDoc.amount != null ? num(penaltyDoc.amount) : base) > PENALTY_FEE_MIN_AMOUNT)) return 0;
   const saved = penaltyDoc ? penaltyDoc.gatewayFeeRate : undefined;
   const rate = saved !== undefined && saved !== null && saved !== "" ? saved : settings?.gatewayFeePercent;
   return Math.round(base * feePct(rate) / 100);

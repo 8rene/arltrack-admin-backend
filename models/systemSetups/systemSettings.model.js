@@ -72,6 +72,12 @@ export const PricingSettings = {
   // customer backend's chauffeur-availability check, so both agree. 0 = trips may touch.
   driverBufferMinutes: 120,
 
+  // Penalty gateway-fee threshold (pesos). When a customer pays a penalty online, the online payment (gateway) fee is
+  // added ONLY if the penalty's own amount is HIGHER than this. At or below it there is no fee (the business absorbs
+  // PayMongo's cut). It used to be a hardcoded 1000 in both backends. Read by the customer backend at checkout
+  // (utils/pricing.js); changing it re-prices penalties that are still unpaid. Receipts use gatewayFeePaid, not this.
+  penaltyThreshold: 1000,
+
   systemSettingsID: null,  // mirrors this doc's own Firestore ID
   createdAt: null,         // Firestore server timestamp
   updatedBy: null,         // { userID, name } of the staff member who saved this snapshot

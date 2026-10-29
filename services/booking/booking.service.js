@@ -796,7 +796,7 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
   }
 
   // The Edit form is not where money is decided. Cancelling here would skip the checks and choices of the Cancel button (an open
-  // customer refund request, the refund type -- full / normal / no-show --, the held deposit, held discount credit), so a booking
+  // customer refund request, the refund type -- full / normal / no deposit refund --, the held deposit, held discount credit), so a booking
   // that has money collected, or an open refund request, has to be cancelled from there. A booking with nothing paid still
   // cancels from here.
   if (filtered.status === "cancelled") {
@@ -809,7 +809,7 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
         throw new Error(`Cannot cancel booking ${payKey} from here: the customer has an open refund request. Approve or reject it from the Refund Requests page.`);
       }
       if (String(pay.status || "").toLowerCase() !== "refunded" && computeRefundPlan(pay).grossPaid > 0) {
-        throw new Error(`Cannot cancel booking ${payKey} from here: the customer has already paid for it. Use the Cancel button on the booking so you can choose Full refund, No-show refund, Normal refund or Cancel only.`);
+        throw new Error(`Cannot cancel booking ${payKey} from here: the customer has already paid for it. Use the Cancel button on the booking so you can choose Full refund, Normal refund, No Deposit Refund or Cancel only.`);
       }
     }
   }
