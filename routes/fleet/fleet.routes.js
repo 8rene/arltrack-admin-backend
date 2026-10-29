@@ -13,9 +13,11 @@ import {
   replaceCarPricing,
   getBrands,
   createBrand,
+  updateBrand,
   removeBrand,
   getModels,
   createModel,
+  updateModel,
   removeModel,
   setCarImage,
 } from "../../controllers/fleet/fleet.controller.js";
@@ -47,10 +49,12 @@ export const registerFleetRoutes = (app) => {
   // ── Brands ────────────────────────────────────────
   app.get   ("/api/fleet/brands",                        verifyToken, requireRole(allowed), getBrands);
   app.post  ("/api/fleet/brands",                        verifyToken, requireRole(allowed), createBrand);
+  app.put   ("/api/fleet/brands/:brandID",               verifyToken, requireRole(allowed), updateBrand);
   app.delete("/api/fleet/brands/:brandID",               verifyToken, requireRole(allowed), removeBrand);
 
   // ── Models ────────────────────────────────────────
   app.get   ("/api/fleet/models",                        verifyToken, requireRole(allowed), getModels);
   app.post  ("/api/fleet/models",                        verifyToken, requireRole(allowed), createModel);
+  app.put   ("/api/fleet/models/:modelID",               verifyToken, requireRole(allowed), updateModel);
   app.delete("/api/fleet/models/:modelID",               verifyToken, requireRole(allowed), removeModel);
 };

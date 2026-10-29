@@ -506,6 +506,47 @@ export const deleteModel = async (modelID) => {
 };
 
 // ─────────────────────────────────────────────
+// BRANDS — Rename brand
+// Cars only store brandID and the name is looked up when they are read, so a rename shows up
+// everywhere (fleet, bookings, receipts) without touching any car.
+// ─────────────────────────────────────────────
+export const renameBrand = async (brandID, brandName) => {
+  const clean = (brandName || "").trim();
+  if (!clean) throw new Error("brandName is required.");
+
+  const ref = db.collection("brand").doc(brandID);
+  const doc = await ref.get();
+  if (!doc.exists) throw new Error("Brand not found.");
+
+  const all = await db.collection("brand").get();
+  const taken = all.docs.some(d => d.id !== brandID && (d.data().brandName || "").trim().toLowerCase() === clean.toLowerCase());
+  if (taken) throw conflict(`"${clean}" already exists.`);
+
+  await ref.update({ brandName: clean });
+  return { id: brandID, brandName: clean };
+};
+
+// ─────────────────────────────────────────────
+// MODELS — Rename model (name must stay unique within its brand)
+// ─────────────────────────────────────────────
+export const renameModel = async (modelID, modelName) => {
+  const clean = (modelName || "").trim();
+  if (!clean) throw new Error("modelName is required.");
+
+  const ref = db.collection("model").doc(modelID);
+  const doc = await ref.get();
+  if (!doc.exists) throw new Error("Model not found.");
+
+  const { brandID } = doc.data();
+  const siblings = await db.collection("model").where("brandID", "==", brandID).get();
+  const taken = siblings.docs.some(d => d.id !== modelID && (d.data().modelName || "").trim().toLowerCase() === clean.toLowerCase());
+  if (taken) throw conflict(`"${clean}" already exists under this brand.`);
+
+  await ref.update({ modelName: clean });
+  return { id: modelID, modelName: clean, brandID };
+};
+
+// ─────────────────────────────────────────────
 // IMAGES — Upsert the primary image for a car
 // (Upload to Storage still happens client-side with the Firebase SDK —
 // only the resulting Firestore carImages doc write moves here.)

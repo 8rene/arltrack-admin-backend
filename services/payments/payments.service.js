@@ -409,6 +409,12 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     paymongoPaymentID: payment.paymongoPaymentID || null,
     status,
     paymentStage,
+    // What the customer actually paid, even after a refund. amountPaid is 0 once refunded (the money is no longer
+    // held), so the Payments list shows this instead: "how much did this person pay?", with the Refunded badge
+    // beside it. Gross = before any discount, because that is the money the customer really handed over.
+    paidBeforeRefund: String(payment.status || "").toLowerCase() === "refunded"
+      ? getPaymentBreakdown({ ...payment, status: "paid", discountAmount: 0 }).amountPaid
+      : null,
     // Cancelled but the customer's money is still held (e.g. auto-cancelled with
     // a paid deposit and no refund opened): staff need to see that.
     heldAfterCancel: bookingStatus === "cancelled" && amountPaid > 0 && String(payment.status || "").toLowerCase() !== "refunded" && !openRefund,

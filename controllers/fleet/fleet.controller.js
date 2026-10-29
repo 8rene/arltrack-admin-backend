@@ -13,9 +13,11 @@ import {
   getAllBrands,
   addBrand,
   deleteBrand,
+  renameBrand,
   getAllModels,
   addModel,
   deleteModel,
+  renameModel,
   setPrimaryCarImage,
   getOpenBookingsForCar,
   getCarBookingsForStatusChange,
@@ -356,6 +358,21 @@ export const removeBrand = async (req, res) => {
   }
 };
 
+// PUT /api/fleet/brands/:brandID
+// Body: { brandName }
+export const updateBrand = async (req, res) => {
+  try {
+    const { brandID } = req.params;
+    const { brandName } = req.body;
+    const data = await renameBrand(brandID, brandName);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[FLEET] updateBrand error:", error);
+    const status = error.statusCode || (error.message === "Brand not found." ? 404 : 400);
+    return res.status(status).json({ success: false, message: error.message });
+  }
+};
+
 // ─────────────────────────────────────────────
 // MODELS
 // ─────────────────────────────────────────────
@@ -394,6 +411,21 @@ export const removeModel = async (req, res) => {
   } catch (error) {
     console.error("[FLEET] removeModel error:", error);
     const status = error.statusCode || (error.message === "Model not found." ? 404 : 500);
+    return res.status(status).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/fleet/models/:modelID
+// Body: { modelName }
+export const updateModel = async (req, res) => {
+  try {
+    const { modelID } = req.params;
+    const { modelName } = req.body;
+    const data = await renameModel(modelID, modelName);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[FLEET] updateModel error:", error);
+    const status = error.statusCode || (error.message === "Model not found." ? 404 : 400);
     return res.status(status).json({ success: false, message: error.message });
   }
 };
