@@ -27,11 +27,15 @@ export const restoreUserArchiveHandler = async (req, res) => {
       description: `Restored archived user ${userArchivesId}.`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[USER ARCHIVE] Failed to write audit log:", err));
-    return res.status(200).json({
-      success: true,
-      message: "User restored successfully. Note: they will need to sign up again (or have their login recreated) before they can log in.",
-      data: result,
-    });
+    const { authRecreated, emailSent } = result;
+    const message = authRecreated
+      ? (emailSent
+          ? "User restored. Their login was recreated and an email was sent asking them to reset their password."
+          : "User restored and login recreated, but the email could not be sent. Ask them to use Forgot password.")
+      : (emailSent
+          ? "User restored. Their login is active again with their existing password, and they were emailed."
+          : "User restored. Their login is active again with their existing password, but the email could not be sent.");
+    return res.status(200).json({ success: true, message, data: result });
   } catch (error) {
     console.error("[USER ARCHIVE] restore error:", error);
     return res.status(400).json({ success: false, message: error.message });

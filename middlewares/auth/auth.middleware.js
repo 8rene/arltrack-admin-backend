@@ -39,8 +39,12 @@ export const verifyToken = async (req, res, next) => {
     const userSnap = await db.collection("user").doc(decoded.uid).get();
 
     if (!userSnap.exists) {
+      // An archived (deleted) account keeps its record in userArchives; say so instead of the generic message.
+      const archived = await db.collection("userArchives").doc(decoded.uid).get();
       return res.status(403).json({
-        message: "No user record found for this account. Please contact your administrator.",
+        message: archived.exists
+          ? "Your account has been archived. Please contact your administrator."
+          : "No user record found for this account. Please contact your administrator.",
       });
     }
 

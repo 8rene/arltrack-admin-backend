@@ -36,19 +36,19 @@ export const getRegions = async (req, res) => {
 
 /**
  * GET /api/location/provinces?regionID=xxx
- * Returns all provinces for a given region.
+ * Returns all provinces for a given region. Without regionID it returns every province in
+ * one go (each carries its regionID), so a form can filter by region in the browser
+ * instead of making one request per region.
  */
 export const getProvinces = async (req, res) => {
   const { regionID } = req.query;
-  if (!regionID) return res.status(400).json({ error: "regionID is required" });
+  const key = regionID || "__all__";
 
   try {
-    if (cache.provinces[regionID]) return res.json(cache.provinces[regionID]);
+    if (cache.provinces[key]) return res.json(cache.provinces[key]);
 
-    const snapshot = await db
-      .collection("provinces")
-      .where("regionID", "==", regionID)
-      .get();
+    const ref = db.collection("provinces");
+    const snapshot = await (regionID ? ref.where("regionID", "==", regionID) : ref).get();
 
     const provinces = snapshot.docs.map((doc) => ({
       provinceID: doc.data().provinceID,
@@ -57,7 +57,7 @@ export const getProvinces = async (req, res) => {
     }));
     provinces.sort((a, b) => a.provinceName.localeCompare(b.provinceName));
 
-    cache.provinces[regionID] = provinces;
+    cache.provinces[key] = provinces;
     res.json(provinces);
   } catch (error) {
     console.error("getProvinces error:", error);

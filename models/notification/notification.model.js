@@ -25,6 +25,8 @@ export const Notification = {
   //   "discount_applied" | "penalty_created" | "penalty_review" | "maintenance_created" | "booking_cancelled"
   //   Customer / driver-facing (one doc for that person):
   //   "terms_updated" | "inspection_confirmed" | "discount_applied" | "discount_edited" |
+  //   "account_flagged" | "account_unflagged" |   (staff flagged / un-flagged this customer; refCollection "user", refID = the customer;
+  //                                                see updateUserStatus in controllers/user/user.controller.js)
   //   "refund_approved" | "refund_rejected" | "refund_failed" | "refund_completed" |
   //   "deposit_return_processing" | "booking_cancelled" |
   //   "PenaltyConfirmed" | "PenaltyWaived" | "PenaltyVoided"   (penalty customer notices keep their old PascalCase names)

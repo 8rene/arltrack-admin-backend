@@ -1,6 +1,7 @@
 import {
   upsertUserDocument,
   applyProfileChanges,
+  assertValidContactFields,
   approveProfileRequest,
   approveIdResubmitRequest,
   applyOwnDocumentUpdate,
@@ -138,6 +139,7 @@ export const updateOwnProfileFields = async (req, res) => {
       return res.status(400).json({ success: false, message: "changes must be a non-empty array." });
     }
 
+    assertValidContactFields(changes);
     await applyProfileChanges(req.user.uid, changes);
 
     createAuditLog({

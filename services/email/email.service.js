@@ -165,6 +165,31 @@ export const sendRefundEmail = async ({ toEmail, toName, bookingID, amount, manu
   });
 };
 
+// Sent after an archived customer is restored.
+//   needsPasswordReset = false -> their login was only disabled, so it was switched back on with the SAME password.
+//   needsPasswordReset = true  -> an older archive whose login was deleted: it was recreated WITHOUT a password, so they
+//                                 must use "Forgot password" once before signing in.
+// No link in the email on purpose. Always goes through the shared general-purpose template (EMAILJS_TEMPLATE_ID).
+// Never throws: returns { success, reason?, error? }.
+export const sendAccountRestoredEmail = async ({ toEmail, toName, needsPasswordReset = true }) => {
+  const displayName = toName || toEmail.split("@")[0];
+  return sendTransactionalEmail({
+    label: "Account restored",
+    dedicatedTemplateID: undefined,
+    toEmail, toName,
+    subject: "Your ARL Car Rental account has been restored",
+    text:
+      `Hi ${displayName},\n\n` +
+      `Your ARL Car Rental account has been restored.\n\n` +
+      (needsPasswordReset
+        ? `Before you can sign in, please reset your password: open the app, tap "Forgot password", ` +
+          `and enter this email address. If you don't see the reset email, check your spam folder.\n\n`
+        : `You can sign in again with your existing email and password.\n\n`) +
+      `If you weren't expecting this, please contact us.\n\n` +
+      `Best regards,\nARL Car Rental Team`,
+  });
+};
+
 // Sent when staff press "Notify customer to pay" on a booking with a remaining balance -- the email
 // counterpart to the "balance_reminder" bell notification (see notifyBalanceDue in payments.service.js).
 // Always goes through the shared general-purpose template (EMAILJS_TEMPLATE_ID): no extra template needed.

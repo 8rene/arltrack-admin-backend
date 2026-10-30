@@ -144,6 +144,14 @@ export const login = async (req, res) => {
       console.error("[AUTH] Failed to write session log:", err);
     }
 
+    // 9b. STAMP lastLoginAt on the user record (powers the Last Active column in Users).
+    // Written here instead of derived from sessionLogs because those get archived.
+    // Fire-and-forget: never worth failing a real login over. Uses userSnap.ref
+    // so it hits the exact "user" doc that was just read.
+    userSnap.ref
+      .update({ lastLoginAt: admin.firestore.FieldValue.serverTimestamp() })
+      .catch((err) => console.error("[AUTH] Failed to write lastLoginAt:", err));
+
     // 10. RESPOND
     return res.status(200).json({
       message: "Login successful. Welcome back.",

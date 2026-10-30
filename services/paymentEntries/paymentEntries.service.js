@@ -158,8 +158,7 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
         });
       }
 
-      const dep = getDepositView(pay);
-      let left = dep.settled ? num(dep.deducted) : 0;     // what the deposit actually paid toward penalties
+      let left = dep?.settled ? num(dep.deducted) : 0; // what the deposit actually paid toward penalties
       if (left <= 0) continue;
       const mine = penalties
         .filter((p) => (p.paymentID || null) === payIDOf(pay))

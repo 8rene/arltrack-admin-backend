@@ -1,6 +1,7 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { collectStorageUrls, deleteStorageFiles } from "../../utils/storage/storageFiles.js";
+import { sendAccountRestoredEmail } from "../email/email.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -48,19 +49,23 @@ const findLiveUserDocument = async (userID) => {
 };
 
 // ── RESTORE ───────────────────────────────────────────────────────────────
-// 1. Restore user → user collection
-// 2. Delete the userArchives record
+// 1. Bring the Firebase Auth login back
+// 2. Restore user → user collection
+// 3. Delete the userArchives record
+// 4. Email the customer that their account is back
 //
 // userDetails/userAddress/userDocument need no restore step — they were
 // never removed in the first place (see deleteUser()), so there's nothing
 // to bring back for them.
 //
-// NOTE — Firebase Auth: deleteUser() permanently deletes the Auth account
-// (admin.auth().deleteUser), which cannot be undone via the Admin SDK the
-// same way Firestore docs can. Restoring here brings back the Firestore
-// user profile, but the customer will need to sign up again (or an admin
-// recreates the Auth account with the same uid) before they can log in.
-// authRestoreRequired flags this so the UI can warn about it.
+// Firebase Auth: deleteUser() only DISABLES the login (it keeps the same uid, email and password), so restoring
+// just switches it back on and the customer signs in as before. Archives made BEFORE that change had their login
+// deleted: for those it is recreated here under the SAME uid but without a password, and the email tells the
+// customer to use "Forgot password". The Auth step goes FIRST so a failure leaves the archive untouched and the
+// restore can simply be retried.
+//
+// If an old-style archive's customer already signed up again with the same email, Auth refuses a second account
+// with it — use Merge instead (mergeUserArchive below).
 export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") => {
   const archiveRef = db.collection("userArchives").doc(userArchivesId);
   const archiveDoc = await archiveRef.get();
@@ -76,22 +81,55 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
     ...originalData
   } = archiveDoc.data();
 
-  // ── 1. Restore user ──
-  const userActiveRef = originalId
-    ? db.collection("user").doc(originalId)
-    : db.collection("user").doc();
+  // ── 1. Bring the login back ──
+  let authEnabled = false;   // the disabled login was switched back on (same password)
+  let authRecreated = false; // an older archive: the login had been deleted, so it was created again (no password)
+  try {
+    await admin.auth().updateUser(originalId, { disabled: false });
+    authEnabled = true;
+  } catch (err) {
+    if (err.code !== "auth/user-not-found") throw err;
+    try {
+      await admin.auth().createUser({
+        uid: originalId,
+        email: originalData.email,
+        emailVerified: !!originalData.isVerified,
+        disabled: false,
+      });
+      authRecreated = true;
+    } catch (createErr) {
+      if (createErr.code === "auth/email-already-exists") {
+        throw new Error("This email already has a login under a different account. Use Merge instead of Restore.");
+      }
+      throw createErr;
+    }
+  }
 
-  await userActiveRef.set({
+  // ── 2. Restore user ──
+  await db.collection("user").doc(originalId).set({
     ...originalData,
     status: "active",
   });
 
-  // ── 2. Delete the archive record ──
+  // ── 3. Delete the archive record ──
   await archiveRef.delete();
 
-  return {
-    authRestoreRequired: true,
-  };
+  // ── 4. Tell the customer (never blocks the restore) ──
+  let emailSent = false;
+  if (originalData.email) {
+    try {
+      const r = await sendAccountRestoredEmail({
+        toEmail: originalData.email,
+        toName: originalData.username,
+        needsPasswordReset: authRecreated,
+      });
+      emailSent = !!r.success;
+    } catch (err) {
+      console.error("[USER ARCHIVE] restore email failed:", err.message);
+    }
+  }
+
+  return { authEnabled, authRecreated, emailSent };
 };
 
 // ── PERMANENT DELETE ─────────────────────────────────────────────────────
@@ -185,6 +223,17 @@ export const deleteUserArchive = async (userArchivesId) => {
     await removeFiles(urls);
   }
 
+  // The login was only DISABLED when the account was archived (see deleteUser()); this is the point of no return, so
+  // delete it now. That also frees the email for a new signup. Archives made before that change have no login left,
+  // which is fine. Any other failure stops here, BEFORE the archive record goes, so the same delete can be run again.
+  let deletedLogin = false;
+  try {
+    await admin.auth().deleteUser(originalId);
+    deletedLogin = true;
+  } catch (err) {
+    if (err.code !== "auth/user-not-found") throw err;
+  }
+
   await archiveRef.delete();
   await removeFiles(collectStorageUrls(data)); // the profile picture on the archived user copy
 
@@ -194,6 +243,7 @@ export const deleteUserArchive = async (userArchivesId) => {
     deletedDocument: documentDocs.length,
     deletedEditRequests:  editDocs.length,
     deletedIdRequests:    idRequestDocs.length,
+    deletedLogin,
     deletedFiles,
     failedFiles,
   };

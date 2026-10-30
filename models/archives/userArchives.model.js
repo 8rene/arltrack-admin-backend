@@ -23,11 +23,10 @@
 // NOTE: restore deletes this doc — see restoreUserArchive in
 // services/archives/userArchives.service.js — rather than marking
 // restoredAt/restoredBy, matching bookingArchives and
-// bookingSessionArchives. Restoring a user does NOT recreate their Firebase
-// Auth account (Auth deletion can't be undone via the Admin SDK the same
-// way Firestore docs can) — authRestoreRequired on the restore response
-// flags that a customer will need to sign up again, or an admin manually
-// recreates the Auth account with the same uid, before they can log in.
+// bookingSessionArchives. Archiving only DISABLES the user's Firebase Auth login (same uid, email and password;
+// they can't sign in while it is disabled), so restoring just switches it back on. The login is deleted for good only
+// when this archive is permanently deleted (deleteUserArchive). Archives made before that change had their login
+// deleted: restore recreates it under the same uid without a password and emails the customer to reset it.
 //
 // Restoring writes no restore stamp onto the live user doc either, so a user
 // who is deleted (archived) again later carries none.

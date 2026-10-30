@@ -5,6 +5,8 @@ import { resolveNotification, createNotification } from "../notification/notific
 
 const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 
+const plainText = (v) => String(v ?? "").trim();
+
 const notFound = (message) => {
   const err = new Error(message);
   err.statusCode = 404;
@@ -28,16 +30,64 @@ const ALLOWED_PROFILE_FIELDS = {
   userDetails: new Set(["firstName", "middleName", "lastName", "suffix", "birthDate"]),
   userAddress: new Set([
     "street", "barangay", "municipality", "city", "province",
-    "postalCode", "village", "region",
+    "postalCode", "region",
   ]),
 };
 
 // Fields that used to be editable but were retired. zipCode was merged into postalCode (see
-// scripts/migrateZipToPostal.js). Old pending edit requests and stale open browser tabs can still
-// send it, so it is dropped quietly instead of erroring or writing the field back onto the address.
-const RETIRED_FIELDS = new Set(["userAddress.zipCode"]);
+// scripts/migrateZipToPostal.js); village was removed from the address altogether. Old pending edit
+// requests and stale open browser tabs can still send them, so they are dropped quietly instead of
+// erroring or writing the field back onto the address.
+const RETIRED_FIELDS = new Set(["userAddress.zipCode", "userAddress.village"]);
 const dropRetiredFields = (changes) =>
   (Array.isArray(changes) ? changes : []).filter((c) => !RETIRED_FIELDS.has(`${c?.collection}.${c?.field}`));
+
+// Profile rules for a NEW edit request / direct edit. Also checked in the Account form; repeated here so the
+// API can't be used to skip them. Deliberately NOT applied when an admin approves an old pending request.
+//   required (can't be empty): username, phone, first name, last name, birth date, region, province,
+//                              city / municipality, barangay, street, postal code
+//                              (middle name and suffix stay optional)
+//   birth date:  valid YYYY-MM-DD, at least 18 years old (Philippine time)
+//   postal code: exactly 4 digits (Philippine ZIP)
+//   phone:       digits only with an optional leading +, 10-13 digits
+const MIN_AGE = 18;
+const requiredText = (label) => (v) => (v ? null : `${label} is required.`);
+const birthDateError = (v) => {
+  if (!v) return "Birth date is required.";
+  const m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "Birth date must be a valid date (YYYY-MM-DD).";
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const check = new Date(Date.UTC(y, mo - 1, d));
+  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return "Birth date must be a valid date (YYYY-MM-DD).";
+  const now = new Date(Date.now() + 8 * 60 * 60 * 1000); // today in the Philippines (UTC+8)
+  let age = now.getUTCFullYear() - y;
+  if (now.getUTCMonth() < mo - 1 || (now.getUTCMonth() === mo - 1 && now.getUTCDate() < d)) age -= 1;
+  if (age < MIN_AGE) return `You must be at least ${MIN_AGE} years old.`;
+  if (age > 120) return "Birth date must be a valid date (YYYY-MM-DD).";
+  return null;
+};
+const CONTACT_RULES = {
+  "user.username":          requiredText("Username"),
+  "user.phone":             (v) => (!v ? "Phone number is required." : /^\+?\d{10,13}$/.test(v) ? null : "Phone number must be numbers only (it may start with +), 10 to 13 digits."),
+  "userDetails.firstName":  requiredText("First name"),
+  "userDetails.lastName":   requiredText("Last name"),
+  "userDetails.birthDate":  birthDateError,
+  "userAddress.region":     requiredText("Region"),
+  "userAddress.province":   requiredText("Province"),
+  "userAddress.municipality": requiredText("City / Municipality"),
+  "userAddress.barangay":   requiredText("Barangay"),
+  "userAddress.street":     requiredText("Street"),
+  "userAddress.postalCode": (v) => (!v ? "Postal code is required." : /^\d{4}$/.test(v) ? null : "Postal code must be 4 digits (numbers only)."),
+};
+export const assertValidContactFields = (rawChanges) => {
+  const changes = dropRetiredFields(rawChanges);
+  for (const c of changes) {
+    const rule = CONTACT_RULES[`${c?.collection}.${c?.field}`];
+    if (!rule) continue;
+    const msg = rule(plainText(c.newValue));
+    if (msg) badRequest(msg);
+  }
+};
 
 const assertAllowedChanges = (changes) => {
   for (const c of changes) {
@@ -135,6 +185,11 @@ export const applyProfileChanges = async (userID, rawChanges = []) => {
   changes.forEach((c) => {
     if (byCollection[c.collection]) byCollection[c.collection][c.field] = c.newValue;
   });
+  // City and municipality are one value in the edit forms (the location list only has municipalities, cities included),
+  // so a new municipality also becomes the city. An explicit city in the same change set (old requests) wins.
+  if ("municipality" in byCollection.userAddress && !("city" in byCollection.userAddress)) {
+    byCollection.userAddress.city = byCollection.userAddress.municipality;
+  }
 
   if (Object.keys(byCollection.user).length) {
     await db.collection("user").doc(userID).update({ ...byCollection.user, updatedAt: timestamp() });
@@ -333,6 +388,7 @@ export const createEditRequest = async (userID, role, rawChanges) => {
   }
 
   assertAllowedChanges(changes);
+  assertValidContactFields(changes);
 
   const ref = await db.collection("editRequests").add({
     userID,

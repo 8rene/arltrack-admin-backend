@@ -3,7 +3,7 @@ import admin from "firebase-admin";
 import { resolveRoleID, roleIDToName, CUSTOMER_ROLE_ID, ROLE_LIST_VIEWABLE_BY, ROLE_IDS } from "../../utils/roles/role.util.js";
 import { consumeOtp } from "../otp/otp.controller.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
-import { resolveNotification } from "../../services/notification/notification.service.js";
+import { resolveNotification, createNotification } from "../../services/notification/notification.service.js";
 import { upsertUserDocument, closePendingRequestsForUser } from "../../services/profileRequests/profileRequests.service.js";
 import { generateUniqueReferralCode } from "../../utils/referral/referral.util.js";
 
@@ -11,6 +11,20 @@ import { generateUniqueReferralCode } from "../../utils/referral/referral.util.j
 const roleNameOf = (roleID) => roleIDToName(roleID) ?? (roleID === CUSTOMER_ROLE_ID ? "Customer" : null);
 
 const STAFF_ROLES = new Set([ROLE_IDS.ADMIN, ROLE_IDS.DRIVER, ROLE_IDS.SUPERVISOR]);
+
+// What a customer is told when staff flag / unflag their account. Kept here (not in the frontend) so the wording
+// is the same no matter which screen made the change. The restrictions themselves (no cancelling bookings, no
+// reviews) are enforced by the customer backend, which reads user.isFlagged.
+const FLAGGED_NOTICE = {
+  title: "Your account has been flagged",
+  message:
+    "We're sorry to let you know that your account has been flagged. For now, you won't be able to cancel bookings " +
+    "or leave reviews. If you think this is a mistake, please contact us or visit us in store.",
+};
+const UNFLAGGED_NOTICE = {
+  title: "Your account flag was removed",
+  message: "Good news — the flag on your account has been removed. You can cancel bookings and leave reviews again.",
+};
 
 // Mirrors Users.jsx's KNOWN_STATUSES on the frontend — kept here too since
 // PATCH /api/users/:uid/status is a real HTTP route, not something only
@@ -77,6 +91,53 @@ async function syncStaffUser(uid, newRoleID, email) {
     // login is blocked going forward.
     await Promise.all(existingSnap.docs.map((d) => d.ref.delete()));
   }
+}
+
+/**
+ * Adds `lastActivityAt` (ISO string, or null) to each user in a role list: the newest of
+ *   customers -> bookings (made / completed), cancellations, successful payments, penalties
+ *   staff     -> their audit log entries
+ *   everyone  -> last login (user.lastLoginAt)
+ * Same events the Activity tab uses, so the column and the tab agree. One grouped read per
+ * collection (same approach as attachReferralInfo's full-list branch), only the fields needed.
+ */
+async function attachLastActivity(users, isCustomerList) {
+  if (!users.length) return users;
+  const toMs = (v) => {
+    if (!v) return 0;
+    if (v.toMillis) return v.toMillis();
+    if (v._seconds !== undefined) return v._seconds * 1000;
+    const ms = new Date(v).getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  };
+  const latest = new Map(); // userID -> newest ms
+  const bump = (uid, ...vals) => {
+    if (!uid) return;
+    const ms = Math.max(0, ...vals.map(toMs));
+    if (ms > (latest.get(uid) || 0)) latest.set(uid, ms);
+  };
+
+  const reads = isCustomerList
+    ? [
+        db.collection("bookings").select("userID", "createdAt", "completedAt").get()
+          .then((s) => s.forEach((d) => { const x = d.data(); bump(x.userID, x.createdAt, x.completedAt); })),
+        db.collection("cancellationRequests").select("userID", "createdAt", "requestedAt").get()
+          .then((s) => s.forEach((d) => { const x = d.data(); bump(x.userID, x.createdAt, x.requestedAt); })),
+        db.collection("paymentEntries").select("userID", "status", "createdAt", "settledAt").get()
+          .then((s) => s.forEach((d) => { const x = d.data(); if (x.status === "success") bump(x.userID, x.createdAt, x.settledAt); })),
+        db.collection("penalties").select("userID", "createdAt").get()
+          .then((s) => s.forEach((d) => { const x = d.data(); bump(x.userID, x.createdAt); })),
+      ]
+    : [
+        db.collection("auditLogs").select("userID", "createdAt").get()
+          .then((s) => s.forEach((d) => { const x = d.data(); bump(x.userID, x.createdAt); })),
+      ];
+  await Promise.all(reads);
+
+  return users.map((u) => {
+    const ms = Math.max(latest.get(u.id) || 0, toMs(u.lastLoginAt));
+    return { ...u, lastActivityAt: ms ? new Date(ms).toISOString() : null };
+  });
 }
 
 /**
@@ -291,7 +352,8 @@ export const getUsersByRole = async (req, res) => {
     if (!roleID) return res.status(404).json({ success: false, message: `Could not resolve an ID for role "${role}".` });
 
     const snap = await db.collection("user").where("roleID", "==", roleID).get();
-    const users = await attachReferralInfo(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    const withReferral = await attachReferralInfo(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    const users = await attachLastActivity(withReferral, roleID === CUSTOMER_ROLE_ID);
 
     return res.status(200).json({ success: true, data: users });
   } catch (error) {
@@ -300,10 +362,56 @@ export const getUsersByRole = async (req, res) => {
   }
 };
 
+// Delete guard: bookings that are still in play. A deleted account can't log in and can't be notified, so a customer or
+// driver tied to one of these must not be deleted until the booking is finished or cancelled.
+// ("completed", "cancelled" and "stolen" are over, so they don't block.)
+const ACTIVE_BOOKING_STATUSES = ["to pay", "upcoming", "ongoing", "cancellation_request"];
+
+// Returns { customerBookings: [bookingID...], driverBookings: [bookingID...] } of the active bookings tied to this uid.
+// Filtering on status is done in code (not in the query) so no composite index is needed.
+const findActiveBookingsFor = async (uid) => {
+  const isActive = (status) => ACTIVE_BOOKING_STATUSES.includes(String(status || "").toLowerCase());
+
+  // As a customer: bookings made by this user.
+  const ownSnap = await db.collection("bookings").where("userID", "==", uid).get();
+  const customerBookings = ownSnap.docs
+    .filter((d) => isActive(d.data().status))
+    .map((d) => d.data().bookingID || d.id);
+
+  // As a driver: "assigned" rows whose booking is still active (a stale row on a finished booking doesn't block).
+  const assignSnap = await db.collection("driverAssignments")
+    .where("driverID", "==", uid).where("status", "==", "assigned").get();
+  const driverBookings = [];
+  for (const a of assignSnap.docs) {
+    const bID = a.data().bookingID;
+    if (!bID) continue;
+    const bDoc = await db.collection("bookings").doc(bID).get();
+    if (bDoc.exists && isActive(bDoc.data().status)) driverBookings.push(bDoc.data().bookingID || bDoc.id);
+  }
+
+  return { customerBookings, driverBookings };
+};
+
+const listIDs = (ids) => (ids.length <= 3 ? ids.join(", ") : `${ids.slice(0, 3).join(", ")} and ${ids.length - 3} more`);
+
 export const deleteUser = async (req, res) => {
   try {
     const { uid } = req.params;
     if (!uid) return res.status(400).json({ success: false, message: "User ID required." });
+
+    // Block the delete while this customer/driver still has an active or upcoming booking.
+    const { customerBookings, driverBookings } = await findActiveBookingsFor(uid);
+    if (customerBookings.length || driverBookings.length) {
+      const parts = [];
+      if (customerBookings.length) parts.push(`${customerBookings.length} active or upcoming booking(s) as the customer (${listIDs(customerBookings)})`);
+      if (driverBookings.length) parts.push(`${driverBookings.length} active or upcoming booking(s) as the assigned driver (${listIDs(driverBookings)})`);
+      return res.status(409).json({
+        success: false,
+        code: "ACTIVE_BOOKINGS",
+        message: `This account can't be deleted yet: it has ${parts.join(" and ")}. Complete or cancel ${customerBookings.length + driverBookings.length > 1 ? "them" : "it"}${driverBookings.length ? " (or reassign the driver)" : ""} first, then try again.`,
+        data: { customerBookings, driverBookings },
+      });
+    }
 
     const userDocRef = db.collection("user").doc(uid);
     const userDoc = await userDocRef.get();
@@ -321,6 +429,20 @@ export const deleteUser = async (req, res) => {
         archivedAt: admin.firestore.FieldValue.serverTimestamp(),
         archivedBy: req.user?.uid || null, // userID of the staff member who deleted the account
       });
+
+      // DISABLE the Firebase Auth login instead of deleting it: the account can't sign in (Firebase answers
+      // "auth/user-disabled"), its password and email stay in place, and a restore only has to switch it back on.
+      // The email also stays taken, so the customer can't sign up again as a second account. Done BEFORE the user doc
+      // is removed so a failure here leaves everything as it was and the delete can simply be retried. The login is
+      // deleted for good only when the archive is permanently deleted (deleteUserArchive).
+      try {
+        await admin.auth().updateUser(uid, { disabled: true });
+        await admin.auth().revokeRefreshTokens(uid); // signed-in devices can't renew their session
+      } catch (authErr) {
+        // an account that never had a login (very old data) has nothing to disable
+        if (authErr.code !== "auth/user-not-found") throw authErr;
+        console.warn("[USER] No Auth account to disable:", authErr.message);
+      }
 
       // NOTE: userDetails, userAddress, and userDocument are deliberately
       // left untouched here. They're not read anywhere the app exposes
@@ -348,12 +470,15 @@ export const deleteUser = async (req, res) => {
       }
     }
 
-    // Delete from Firebase Auth (uses UID which is the Firestore doc ID)
-    try {
-      await admin.auth().deleteUser(uid);
-    } catch (authErr) {
-      // Don't fail if auth user doesn't exist
-      console.warn("[USER] Auth delete warning:", authErr.message);
+    // No user doc means nothing was archived, so there is nothing to restore: clean up a leftover login (as before).
+    // (An archived account's login was disabled above instead.)
+    if (!userDoc.exists) {
+      try {
+        await admin.auth().deleteUser(uid);
+      } catch (authErr) {
+        // Don't fail if auth user doesn't exist
+        console.warn("[USER] Auth delete warning:", authErr.message);
+      }
     }
 
     createAuditLog({
@@ -547,6 +672,10 @@ export const updateUserStatus = async (req, res) => {
     const { uid } = req.params;
     const { status, isFlagged } = req.body;
 
+    if (isFlagged !== undefined && typeof isFlagged !== "boolean") {
+      return res.status(400).json({ success: false, message: "isFlagged must be true or false." });
+    }
+
     if (status !== undefined && !VALID_USER_STATUSES.has(String(status).toLowerCase())) {
       return res.status(400).json({
         success: false,
@@ -559,6 +688,9 @@ export const updateUserStatus = async (req, res) => {
     if (!userDoc.exists) return res.status(404).json({ success: false, message: "User not found." });
 
     const wasLocked = String(userDoc.data().status).toLowerCase() === "locked";
+    // Only an actual change counts — re-saving an already-flagged account must not re-send the notice.
+    const wasFlagged = userDoc.data().isFlagged === true;
+    const flagChanged = isFlagged !== undefined && isFlagged !== wasFlagged;
     const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
     if (status !== undefined) update.status = status;
     if (isFlagged !== undefined) update.isFlagged = isFlagged;
@@ -574,12 +706,30 @@ export const updateUserStatus = async (req, res) => {
         .catch((err) => console.error("[USER] Failed to resolve notification:", err.message));
     }
 
+    // Tell the customer (staff/driver accounts get the flag but no customer-facing notice).
+    // renotify: if they were flagged before and an old notice is still active, it rings again instead of being dropped.
+    if (flagChanged && userDoc.data().roleID === CUSTOMER_ROLE_ID) {
+      const notice = isFlagged ? FLAGGED_NOTICE : UNFLAGGED_NOTICE;
+      if (!isFlagged) {
+        await resolveNotification("account_flagged", uid).catch((err) => console.error("[USER] Failed to resolve flag notice:", err.message));
+      }
+      createNotification({
+        type: isFlagged ? "account_flagged" : "account_unflagged",
+        refID: uid,
+        refCollection: "user",
+        userID: uid,
+        title: notice.title,
+        message: notice.message,
+        renotify: true,
+      }).catch((err) => console.error("[USER] Failed to notify customer about flag change:", err.message));
+    }
+
     const name = userDoc.data().username || userDoc.data().email || uid;
     const unlocking = wasLocked && status !== undefined && String(status).toLowerCase() !== "locked";
     const refNote = unlocking ? await referrerNote(userDoc.id) : "";
     createAuditLog({
       action: "update",
-      description: `Updated account for ${name}${status !== undefined ? ` (status: ${status})` : ""}${isFlagged ? " — flagged" : ""}${refNote}.`,
+      description: `Updated account for ${name}${status !== undefined ? ` (status: ${status})` : ""}${flagChanged ? (isFlagged ? " — FLAGGED (customer notified)" : " — flag removed") : ""}${refNote}.`,
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[USER] Failed to write audit log:", err));
 
