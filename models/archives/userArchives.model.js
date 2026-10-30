@@ -49,10 +49,6 @@ export const UserArchive = {
   referralCode: null,
   termsVersionID: null,
   termsAcceptedAt: null,
-  // Present only if this account had absorbed an archived account before it was deleted (see user.model.js "Account merge").
-  mergedFromUserIDs: [],
-  mergedAt: null,
-  mergedBy: "",
   // ---- bookkeeping ----
   archivedAt: null,
   archivedBy: "",

@@ -2,6 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import admin from "firebase-admin";
 import { collectStorageUrls, deleteStorageFiles } from "../../utils/storage/storageFiles.js";
 import { sendAccountRestoredEmail } from "../email/email.service.js";
+import { syncStaffUser, STAFF_ROLES } from "../staffUser/staffUser.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -54,6 +55,9 @@ const findLiveUserDocument = async (userID) => {
 // 3. Delete the userArchives record
 // 4. Email the customer that their account is back
 //
+// Staff (Admin / Supervisor / Driver): deleteUser() removes their staffUser doc (the email -> userID lookup the admin
+// login uses), so step 2 also puts it back from the restored role. Without it a restored staff member could not log in.
+//
 // userDetails/userAddress/userDocument need no restore step — they were
 // never removed in the first place (see deleteUser()), so there's nothing
 // to bring back for them.
@@ -65,7 +69,7 @@ const findLiveUserDocument = async (userID) => {
 // restore can simply be retried.
 //
 // If an old-style archive's customer already signed up again with the same email, Auth refuses a second account
-// with it — use Merge instead (mergeUserArchive below).
+// with it, so that archive cannot be restored (there is no merge any more).
 export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") => {
   const archiveRef = db.collection("userArchives").doc(userArchivesId);
   const archiveDoc = await archiveRef.get();
@@ -99,7 +103,7 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
       authRecreated = true;
     } catch (createErr) {
       if (createErr.code === "auth/email-already-exists") {
-        throw new Error("This email already has a login under a different account. Use Merge instead of Restore.");
+        throw new Error("This email already has a login under a different account, so this archived user cannot be restored.");
       }
       throw createErr;
     }
@@ -110,6 +114,12 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
     ...originalData,
     status: "active",
   });
+
+  // ── 2b. Staff only: bring back the staffUser doc the admin login looks up (no-op for customers) ──
+  // Before the archive record is deleted, so a failure here leaves the archive in place and the restore can be retried.
+  const staffAccessRestored = STAFF_ROLES.has(originalData.roleID)
+    ? await syncStaffUser(originalId, originalData.roleID, originalData.email || "")
+    : false;
 
   // ── 3. Delete the archive record ──
   await archiveRef.delete();
@@ -129,7 +139,7 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
     }
   }
 
-  return { authEnabled, authRecreated, emailSent };
+  return { authEnabled, authRecreated, staffAccessRestored, emailSent };
 };
 
 // ── PERMANENT DELETE ─────────────────────────────────────────────────────
@@ -146,13 +156,11 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
 // failed run can be repeated. A file that cannot be deleted is counted in
 // failedFiles and never blocks the rest. Only files of THIS bucket are touched.
 //
-// Merge safety: mergeUserArchive() re-points the old account's profile docs to
-// the new uid and deletes the archive record, so a merged account never reaches
-// this function. Profile docs are looked up by the archived uid only, so they
-// can never include the surviving account's docs. As a second guard, any file
-// still referenced by another live record is skipped (see urlStillInUse).
-// The requests this user submitted (profile edits, new license / ID photos). A merge re-points them to the new account,
-// so only an archive that is being permanently deleted ever gets here.
+// Profile docs are looked up by the archived uid only, so they can never include
+// another account's docs. As a second guard, any file still referenced by another
+// live record is skipped (see urlStillInUse).
+// The requests this user submitted (profile edits, new license / ID photos). Only an archive that is being
+// permanently deleted ever gets here.
 const findLiveRequests = async (userID) => {
   if (!userID) return { edits: [], ids: [] };
   const [edits, ids] = await Promise.all([
@@ -247,132 +255,4 @@ export const deleteUserArchive = async (userArchivesId) => {
     deletedFiles,
     failedFiles,
   };
-};
-
-// ── MERGE INTO A NEWER ACCOUNT ───────────────────────────────────────────────
-// Use when a customer was archived (their Auth account deleted), signed up
-// again with the same email and got a NEW uid, and the old history should now
-// belong to that new account. The NEW uid stays; everything that pointed at
-// the OLD uid is re-pointed to it. Nothing is restored under the old uid, so
-// there are never two `user` docs for one email.
-//
-// WHY THE NEW uid IS THE ONE THAT SURVIVES (and the old uid is not brought back):
-// - A customer's login (Firebase Auth) is tied to a uid, and user/{uid} is keyed by that same uid. When the customer
-//   was archived, their old Auth account was permanently deleted (see the note above restoreUserArchive), so nobody
-//   can log in as the old uid any more. Their new login belongs to the NEW uid, which already has its own user doc.
-// - Restoring the old uid as the main account would leave a user doc with no matching login. An admin would then have
-//   to recreate that login by hand under the old uid and delete the new account, and until then the customer could
-//   not sign in with the account they actually use.
-// - Moving the history to the new uid avoids all of that: the old history gets re-pointed (USER_ID_LINKS below), the
-//   new account and its login are never touched, and the old archive record is deleted once everything has moved.
-//   The old uid therefore stops existing anywhere after a merge, which is the intent.
-//
-// Safe to re-run: the archive record is deleted LAST, so if a batch fails
-// midway the record is still there and running the merge again just picks up
-// whatever still points at the old uid.
-
-// [collection, field] pairs that hold the old uid.
-const USER_ID_LINKS = [
-  ["bookings", "userID"], ["bookings", "driverID"],
-  ["driverAssignments", "driverID"], ["cancellationRequests", "userID"],
-  ["refundRequests", "userID"], ["penalties", "userID"], ["reviews", "userID"],
-  ["payments", "userID"], ["paymentEntries", "userID"], ["paymentsArchives", "userID"],
-  ["transactionLogs", "userID"], ["sessionLogs", "userID"],
-  ["notifications", "userID"], ["editRequests", "userID"], ["idResubmitRequests", "userID"],
-  ["auditLogs", "userID"],
-  ["bookingArchives", "userID"], ["refundArchives", "userID"], ["penaltyArchives", "userID"],
-  ["reviewsArchives", "userID"], ["transactionLogArchives", "userID"],
-  ["sessionLogArchives", "userID"], ["auditLogsArchives", "userID"],
-  // rows archived with a booking: they come back with the old uid unless re-pointed too
-  ["paymentEntryArchives", "userID"], ["cancellationRequestArchives", "userID"], ["driverAssignmentArchives", "driverID"],
-  ["referrals", "referrerUserID"], ["referrals", "referredUserID"],
-];
-
-// Profile docs: the new account already has its own from signup, so those win.
-// Old ones are only moved across when the new account has none.
-const PROFILE_COLLECTIONS = ["userDetails", "userAddress", "userDocument"];
-
-const commitInChunks = async (ops) => {
-  for (let i = 0; i < ops.length; i += 400) {
-    const batch = db.batch();
-    ops.slice(i, i + 400).forEach((fn) => fn(batch));
-    await batch.commit();
-  }
-};
-
-export const findMergeCandidate = async (userArchivesId) => {
-  const archiveDoc = await db.collection("userArchives").doc(userArchivesId).get();
-  if (!archiveDoc.exists) throw new Error("Archived user not found.");
-  const { email } = archiveDoc.data();
-  const originalId = archiveDoc.id;
-  if (!email) return null;
-
-  const snap = await db.collection("user").where("email", "==", email).get();
-  const match = snap.docs.find((d) => d.id !== originalId);
-  if (!match) return null;
-  const u = match.data();
-  return { userID: match.id, email: u.email, username: u.username || "", createdAt: toISO(u.createdAt) };
-};
-
-export const mergeUserArchive = async (userArchivesId, targetUserID, mergedBy = "admin") => {
-  const archiveRef = db.collection("userArchives").doc(userArchivesId);
-  const archiveDoc = await archiveRef.get();
-  if (!archiveDoc.exists) throw new Error("Archived user not found.");
-
-  const archived = archiveDoc.data();
-  const oldUID = archiveDoc.id; // the archive's document ID is the old uid
-  if (!oldUID) throw new Error("Archived record has no original user ID to merge from.");
-  if (!targetUserID) throw new Error("Target user ID is required.");
-  if (targetUserID === oldUID) throw new Error("Cannot merge an account into itself.");
-
-  const targetRef = db.collection("user").doc(targetUserID);
-  const targetDoc = await targetRef.get();
-  if (!targetDoc.exists) throw new Error("Target account not found.");
-
-  const target = targetDoc.data();
-  if ((target.email || "").toLowerCase() !== (archived.email || "").toLowerCase()) {
-    throw new Error("Emails do not match — only accounts with the same email can be merged.");
-  }
-  if (target.roleID !== archived.roleID) {
-    throw new Error("Roles do not match — only accounts with the same role can be merged.");
-  }
-
-  const counts = {};
-  let referralsMoved = 0;
-
-  // 1. Re-point every link from the old uid to the new one.
-  for (const [col, field] of USER_ID_LINKS) {
-    const snap = await db.collection(col).where(field, "==", oldUID).get();
-    if (snap.empty) continue;
-    counts[`${col}.${field}`] = snap.size;
-    if (col === "referrals" && field === "referrerUserID") referralsMoved = snap.size;
-    await commitInChunks(snap.docs.map((d) => (b) => b.update(d.ref, { [field]: targetUserID })));
-  }
-
-  // 2. Profile docs — keep the new account's own, move old ones only if missing.
-  const profileKept = [];
-  for (const col of PROFILE_COLLECTIONS) {
-    const [oldSnap, newSnap] = await Promise.all([
-      db.collection(col).where("userID", "==", oldUID).get(),
-      db.collection(col).where("userID", "==", targetUserID).limit(1).get(),
-    ]);
-    if (oldSnap.empty) continue;
-    if (newSnap.empty) {
-      counts[`${col}.userID`] = oldSnap.size;
-      await commitInChunks(oldSnap.docs.map((d) => (b) => b.update(d.ref, { userID: targetUserID })));
-    } else {
-      profileKept.push(col); // old doc left untouched, nothing overwritten or deleted
-    }
-  }
-
-  // 3. Stamp the surviving account and drop the archive record. (Referrals need no
-  // separate counter — they were re-pointed above and are counted from the table.)
-  await targetRef.update({
-    mergedFromUserIDs: admin.firestore.FieldValue.arrayUnion(oldUID),
-    mergedAt: admin.firestore.FieldValue.serverTimestamp(),
-    mergedBy,
-  });
-  await archiveRef.delete();
-
-  return { oldUserID: oldUID, newUserID: targetUserID, repointed: counts, profileKeptOnNewAccount: profileKept, referralsMoved };
 };
