@@ -158,6 +158,7 @@ export const makeEntriesView = ({ db, resolveName = async (id) => id }) => {
         });
       }
 
+      const dep = getDepositView(pay); // the payment's deposit settlement (flat or old nested storage); null if none was ever recorded
       let left = dep?.settled ? num(dep.deducted) : 0; // what the deposit actually paid toward penalties
       if (left <= 0) continue;
       const mine = penalties

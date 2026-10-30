@@ -4,6 +4,7 @@ import { collectStorageUrls, deleteStorageFiles } from "../../utils/storage/stor
 import { sendAccountRestoredEmail } from "../email/email.service.js";
 import { syncStaffUser, STAFF_ROLES } from "../staffUser/staffUser.service.js";
 import { resolveNotification } from "../notification/notification.service.js";
+import { roleIDToName, CUSTOMER_ROLE_ID } from "../../utils/roles/role.util.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -48,6 +49,79 @@ const findLiveUserDocument = async (userID) => {
   if (!userID) return [];
   const snap = await db.collection("userDocument").where("userID", "==", userID).get();
   return snap.docs;
+};
+
+// ── PROFILE (what the customer's live Users page shows) ─────────────────────
+// userDetails / userAddress / userDocument are left live while the account sits in userArchives (see deleteUser()), so
+// the archive page can show the same profile the Users page does. Read-only; nothing here writes.
+const serializeDoc = (data) => {
+  const out = {};
+  for (const [k, v] of Object.entries(data || {})) out[k] = v?.toDate ? v.toDate().toISOString() : v;
+  return out;
+};
+const firstDoc = (docs) => (docs[0] ? { id: docs[0].id, ...serializeDoc(docs[0].data()) } : null);
+
+// One person on a referral link: { id, username, name, code, status, state } where state is
+// "active" (live account) | "archived" (sitting in userArchives) | "removed" (gone).
+const lookupPerson = async (id) => {
+  let state = "active";
+  let userDoc = await db.collection("user").doc(id).get();
+  if (!userDoc.exists) {
+    userDoc = await db.collection("userArchives").doc(id).get();
+    state = userDoc.exists ? "archived" : "removed";
+  }
+  const u = userDoc.exists ? userDoc.data() : {};
+  let name = null;
+  if (userDoc.exists) {
+    const d = await findLiveUserDetails(id);
+    if (d[0]) name = [d[0].data().firstName, d[0].data().lastName].filter(Boolean).join(" ") || null;
+  }
+  return { id, username: u.username || null, name, code: u.referralCode || null, status: u.status || null, state };
+};
+
+export const getUserArchiveProfile = async (userArchivesId) => {
+  const archiveDoc = await db.collection("userArchives").doc(userArchivesId).get();
+  if (!archiveDoc.exists) throw new Error("Archived user not found.");
+  const uid = archiveDoc.id; // the archive's document ID is the user's uid
+  const archive = archiveDoc.data();
+
+  const [detailsDocs, addressDocs, documentDocs, referredSnap, invitedSnap, bookingsSnap] = await Promise.all([
+    findLiveUserDetails(uid),
+    findLiveUserAddress(uid),
+    findLiveUserDocument(uid),
+    db.collection("referrals").where("referredUserID", "==", uid).limit(1).get(),
+    db.collection("referrals").where("referrerUserID", "==", uid).get(),
+    db.collection("bookings").where("userID", "==", uid).select("status").get(),
+  ]);
+
+  const referrerID = referredSnap.empty ? null : referredSnap.docs[0].data().referrerUserID;
+  const invitedIDs = [...new Set(invitedSnap.docs.map((d) => d.data().referredUserID).filter(Boolean))].slice(0, 50);
+  const [referredBy, invited] = await Promise.all([
+    referrerID ? lookupPerson(referrerID) : null,
+    Promise.all(invitedIDs.map(lookupPerson)),
+  ]);
+
+  const counts = { total: 0, upcoming: 0, completed: 0, cancelled: 0 };
+  bookingsSnap.forEach((d) => {
+    const st = String(d.data().status || "").toLowerCase();
+    counts.total += 1;
+    if (st === "completed") counts.completed += 1;
+    else if (st === "upcoming" || st === "ongoing") counts.upcoming += 1;
+    else if (st === "cancelled") counts.cancelled += 1;
+  });
+
+  const roleID = archive.roleID;
+  return {
+    role: roleIDToName(roleID) ?? (roleID === CUSTOMER_ROLE_ID ? "Customer" : null),
+    isCustomer: roleID === CUSTOMER_ROLE_ID,
+    details: firstDoc(detailsDocs) || {},
+    address: firstDoc(addressDocs) || {},
+    document: firstDoc(documentDocs) || {},
+    referral: { code: archive.referralCode || null, referredBy, invited, invitedCount: invited.length },
+    bookings: counts,
+    termsAcceptedAt: toISO(archive.termsAcceptedAt),
+    updatedAt: toISO(archive.updatedAt),
+  };
 };
 
 // ── RESTORE ───────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import {
   restoreBookingArchive,
   deleteBookingArchive,
   getInspectionRecordsForBooking,
+  getBookingArchiveDetails,
 } from "../../services/archives/bookingArchives.service.js";
 import { createAuditLog } from "../../services/auditLogs/auditLogs.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
@@ -55,6 +56,19 @@ export const getLinkedPenaltiesHandler       = linkedRecordsHandler("penaltyArch
 export const getLinkedRefundRequestsHandler  = linkedRecordsHandler("refundArchives",      "refund requests");
 export const getLinkedReviewsHandler         = linkedRecordsHandler("reviewsArchives",     "reviews");
 export const getLinkedMaintenanceHandler     = linkedRecordsHandler("maintenanceArchives", "maintenance records");
+
+// GET /api/archives/bookings/:bookingArchivesId/details
+// Everything the live Bookings window shows that the archive copy of the booking doesn't carry itself: vehicle, service
+// type, driver, customer contact, fee breakdown, cancellation, refund, Terms version and the pickup / drop-off places.
+export const getBookingArchiveDetailsHandler = async (req, res) => {
+  try {
+    const data = await getBookingArchiveDetails(req.params.bookingArchivesId);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[BOOKING ARCHIVE] details error:", error);
+    return res.status(/not found/i.test(error.message) ? 404 : 500).json({ success: false, message: error.message });
+  }
+};
 
 export const listBookingArchives = async (req, res) => {
   try {

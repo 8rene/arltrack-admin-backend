@@ -1,5 +1,6 @@
 import {
   listBookingArchives,
+  getBookingArchiveDetailsHandler,
   restoreBookingArchiveHandler,
   deleteBookingArchiveHandler,
   getLinkedPaymentArchiveHandler,
@@ -26,6 +27,7 @@ export const registerBookingArchiveRoutes = (app) => {
   // "View Payment" / "View Vehicle Inspection" / "View Booking Session"
   // modals on the Booking Archive page — read-only, same access level as
   // viewing the archive itself (Owner + Admin).
+  app.get("/api/archives/bookings/:bookingArchivesId/details",             verifyToken, requireRole(allowed), getBookingArchiveDetailsHandler);
   app.get("/api/archives/bookings/:bookingArchivesId/payment",             verifyToken, requireRole(allowed), getLinkedPaymentArchiveHandler);
   app.get("/api/archives/bookings/:bookingArchivesId/vehicle-inspection",  verifyToken, requireRole(allowed), getLinkedVehicleInspectionHandler);
   app.get("/api/archives/bookings/:bookingArchivesId/booking-session",     verifyToken, requireRole(allowed), getLinkedBookingSessionHandler);

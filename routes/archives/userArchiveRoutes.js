@@ -1,5 +1,6 @@
 import {
   listUserArchives,
+  getUserArchiveProfileHandler,
   restoreUserArchiveHandler,
   deleteUserArchiveHandler,
 } from "../../controllers/archives/userArchiveController.js";
@@ -13,6 +14,7 @@ const deleteAllowed = [roles.OWNER];
 
 export const registerUserArchiveRoutes = (app) => {
   app.get("/api/archives/users",                          verifyToken, requireRole(allowed), listUserArchives);
+  app.get("/api/archives/users/:userArchivesId/profile",  verifyToken, requireRole(allowed), getUserArchiveProfileHandler);
   app.post("/api/archives/users/:userArchivesId/restore",  verifyToken, requireRole(allowed), restoreUserArchiveHandler);
   app.delete("/api/archives/users/:userArchivesId",        verifyToken, requireRole(deleteAllowed), deleteUserArchiveHandler);
 };

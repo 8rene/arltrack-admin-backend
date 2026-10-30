@@ -1,5 +1,6 @@
 import {
   getAllUserArchives,
+  getUserArchiveProfile,
   restoreUserArchive,
   deleteUserArchive,
 } from "../../services/archives/userArchives.service.js";
@@ -12,6 +13,17 @@ export const listUserArchives = async (req, res) => {
   } catch (error) {
     console.error("[USER ARCHIVE] list error:", error);
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getUserArchiveProfileHandler = async (req, res) => {
+  try {
+    const data = await getUserArchiveProfile(req.params.userArchivesId);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("[USER ARCHIVE] profile error:", error);
+    const notFound = /not found/i.test(error.message);
+    return res.status(notFound ? 404 : 500).json({ success: false, message: error.message });
   }
 };
 
