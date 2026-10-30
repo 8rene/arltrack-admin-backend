@@ -3,6 +3,7 @@ import admin from "firebase-admin";
 import { collectStorageUrls, deleteStorageFiles } from "../../utils/storage/storageFiles.js";
 import { sendAccountRestoredEmail } from "../email/email.service.js";
 import { syncStaffUser, STAFF_ROLES } from "../staffUser/staffUser.service.js";
+import { resolveNotification } from "../notification/notification.service.js";
 
 const toISO = (val) => (val?.toDate ? val.toDate().toISOString() : val ?? null);
 
@@ -124,6 +125,10 @@ export const restoreUserArchive = async (userArchivesId, restoredBy = "admin") =
   // ── 3. Delete the archive record ──
   await archiveRef.delete();
 
+  // The customer's "please check my archived account" request (written by the customer backend) is answered now:
+  // clear it from every Owner/Admin's bell. Never blocks the restore.
+  resolveNotification("archive_appeal", originalId).catch((err) => console.error("[USER ARCHIVE] resolve appeal failed:", err.message));
+
   // ── 4. Tell the customer (never blocks the restore) ──
   let emailSent = false;
   if (originalData.email) {
@@ -244,6 +249,9 @@ export const deleteUserArchive = async (userArchivesId) => {
 
   await archiveRef.delete();
   await removeFiles(collectStorageUrls(data)); // the profile picture on the archived user copy
+
+  // Nothing left to review: clear any open "check my archived account" request from the staff bells. Never blocks the delete.
+  resolveNotification("archive_appeal", originalId).catch((err) => console.error("[USER ARCHIVE] resolve appeal failed:", err.message));
 
   return {
     deletedDetails:  detailsDocs.length,

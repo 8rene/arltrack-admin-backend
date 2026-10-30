@@ -2,6 +2,7 @@ import { login, logout } from "../../controllers/auth/auth.controller.js";
 import { sendOTP, checkOTP } from "../../controllers/otp/otp.controller.js";
 import { sendPasswordResetOTP, resetAdminPassword } from "../../controllers/auth/passwordReset.controller.js";
 import { changePassword } from "../../controllers/auth/changePassword.controller.js";
+import { requestArchivedReview } from "../../controllers/auth/archivedReview.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { rateLimit } from "../../middlewares/rateLimit/rateLimit.middleware.js";
 
@@ -38,6 +39,10 @@ export const registerAuthRoutes = (app) => {
   // this is where those accounts are meant to reset their password instead.
   app.post("/api/auth/forgot-password/send-otp", authLimit("admin-forgot-otp", 10), sendPasswordResetOTP);
   app.post("/api/auth/forgot-password/reset",    authLimit("admin-forgot-reset", 10), resetAdminPassword);
+
+  // "Ask the administrator to check my account" -- the button shown with the archived-login message. Not behind
+  // verifyToken (an archived account can't sign in). Always answers the same; see the controller.
+  app.post("/api/auth/archived-review", authLimit("admin-archived-review", 5), requestArchivedReview);
 
   // Logged-in "change my own password" flow, from Account settings.
   // Reuses POST /api/auth/send-otp above (with { purpose: "change-password" }

@@ -34,7 +34,9 @@ export const Notification = {
   //   "driver_assigned" | "driver_unassigned" | "driver_en_route" | "balance_reminder" | "maintenance_overdue"
   //   Written by the CUSTOMER backend (shares this collection):
   //     to staff:    "new_booking" | "edit_request" | "penalty_paid" | "payment_after_cancellation" | "id_resubmit_request" |
-  //                  "cancellation_request" | "new_user" | "refund_request"
+  //                  "cancellation_request" | "new_user" | "refund_request" |
+  //                  "archive_appeal"   (an archived customer asked staff to check their account from the login screen; one doc per Owner/Admin,
+  //                                      refCollection "userArchives", refID = the archived uid; resolved by the admin on restore / permanent delete)
   //     to a driver: "driver_trip_reminder"
   //     to the customer: "payment_successful" | "payment_failed" | "booking_confirmed" | "upcoming_booking" |
   //                  "booking_reminder" | "booking_expired" | "booking_cancelled"
