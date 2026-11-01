@@ -1,8 +1,10 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
 import { getEntriesForPaymentIDs } from "../paymentEntries/paymentEntries.service.js";
 import { hydratePayment } from "../paymentEntries/paymentEntries.mapper.js";
-import { computeAmounts, normalizePaymentStatus } from "../payments/payments.service.js";
-import { resolveUserName } from "../archives/resolveUserName.service.js";
+import { computeAmounts, normalizePaymentStatus, derivePaymentStage } from "../payments/payments.service.js";
+import { getDepositView } from "../payments/paymentHelpers.js";
+import { ENTRY_COLLECTION } from "../../models/paymentEntries/paymentEntry.model.js";
+import { resolveUserName, resolveUserNames } from "../archives/resolveUserName.service.js";
 import { resolveRoleID } from "../../utils/roles/role.util.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,7 +134,7 @@ const loadBookingsByIDs = async (ids) => {
     docs.forEach((doc) => {
       if (!doc.exists) return;
       const b = doc.data();
-      out[doc.id] = { carID: b.carID || null, userID: b.userID || null, status: normalizeBookingStatus(b.status) };
+      out[doc.id] = { carID: b.carID || null, userID: b.userID || null, status: normalizeBookingStatus(b.status), tripStart: toDate(b.startDateTime || b.startDate) };
       if (b.bookingID) out[b.bookingID] = out[doc.id];
     });
   }
@@ -598,7 +600,8 @@ export const generateReport = async (period, selection = {}) => {
  *
  *   cars          one row per car WITH maintenance: total cost, split into recovered (penalties collected on that
  *                 car, capped at its maintenance cost) and absorbed (the rest). Needs no repair-to-penalty link.
- *   customers     one row per customer + car pair, sorted / searched / paged here so the page stays light.
+ *   penaltyRows   one row per Confirmed penalty (customer, car, amount, paid, pending): what the Reports page groups.
+ *   customers     one row per customer + car pair, sorted / searched / paged here (older page layout; kept for compatibility).
  *
  * @param {object} opts { sort: "total" | "unpaid", search, page, pageSize }
  */
@@ -640,14 +643,15 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
   // ── cars: maintenance per car, split recovered / absorbed ──
   const maintByCar = new Map();
   maintenance.forEach((m) => {
-    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0 };
+    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0, jobs: 0 };
     cur.total += m.amount;
+    cur.jobs += 1;
     maintByCar.set(m.carID, cur);
   });
   const cars = [...maintByCar.values()]
     .map((c) => {
       const recovered = Math.min(c.total, collectedByCar[c.carID] || 0);
-      return { carID: c.carID, name: c.name, total: c.total, recovered, absorbed: c.total - recovered };
+      return { carID: c.carID, name: c.name, jobs: c.jobs, total: c.total, recovered, absorbed: c.total - recovered };
     })
     .sort((a, b) => b.total - a.total);
   const totalMaintenance = cars.reduce((s, c) => s + c.total, 0);
@@ -669,6 +673,22 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
     paid: r.paid,
     pending: Math.max(0, r.total - r.paid),
   }));
+  // One row per Confirmed penalty, with names. The Reports page groups these itself (by customer and by car),
+  // so the graph and the table can be sorted, opened and paged without another request.
+  const penaltyRows = penalties.map((p) => {
+    const amount = num(p.amount);
+    const paid = paidOf(p);
+    return {
+      userID: p.userID || null,
+      carID: p.carID || null,
+      customer: userNames[p.userID] || "Unknown",
+      car: carNames[p.carID] || "Unknown Vehicle",
+      amount,
+      paid,
+      pending: Math.max(0, amount - paid),
+    };
+  });
+
   const maxTotal = rows.reduce((m, r) => Math.max(m, r.total), 0);   // fixed scale for the graph, same on every page
 
   if (search) rows = rows.filter((r) => r.customer.toLowerCase().includes(search) || r.car.toLowerCase().includes(search));
@@ -690,9 +710,253 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
       pendingCustomers: pendingUsers.size,
     },
     cars,
+    penaltyRows,
     customers: {
       rows: rows.slice((page - 1) * pageSize, page * pageSize),
       page, pageSize, totalRows, totalPages, maxTotal, sort,
     },
   };
+};
+
+// ── MONEY: Revenue & Expense + Payments & Transactions ──────────────────────
+
+/**
+ * One report that feeds BOTH money tabs (they share the same query, so the page fetches it once).
+ *
+ * MONEY MOVED is read from paymentEntries (one row per movement), dated by settledAt = the day the money moved,
+ * not the day the booking was made. Only status "success" rows count.
+ *
+ *   in         deposit / balance            -> Rentals
+ *              penalty                      -> Penalties
+ *   out        deposit / balance / penalty  -> Refunds
+ *              discount / discount_return   -> Discount returns
+ *   deposit returns come from the PAYMENT (depositStatus Settled: depositReturned, dated by depositSettledAt), not
+ *              from entries, so a return is never counted twice.
+ *   internal   deposit_forfeited            -> money the business kept (informational, nothing moved)
+ *
+ * The booking amount includes the refundable security deposit, so Rentals is money IN and the deposit comes back OUT
+ * as a return. That is why Revenue is money in minus money returned: a deposit still held is not revenue yet, and a
+ * penalty covered by the held deposit stays in the result without being paid twice.
+ *
+ *   Revenue = Rentals + Penalties - Returned          Net = Revenue - Maintenance (Completed only)
+ *
+ * PAYMENT RECORDS are the payments CREATED in the period, labelled with the Payments page's own derivePaymentStage().
+ * Deposits held is a snapshot of right now (every payment whose deposit is still Held), not tied to the period.
+ */
+export const generateMoneyReport = async (period, selection = {}) => {
+  const { start, end, label } = getRange(period, selection);
+  const lower = (v) => String(v ?? "").trim().toLowerCase();
+
+  const [entrySnap, settledSnap, heldSnap, paySnap, refundSnap, maintenance] = await Promise.all([
+    db.collection(ENTRY_COLLECTION).where("settledAt", ">=", start).where("settledAt", "<=", end).get(),
+    db.collection("payments").where("depositSettledAt", ">=", start).where("depositSettledAt", "<=", end).get(),
+    db.collection("payments").where("depositStatus", "==", "Held").get(),
+    db.collection("payments").where("createdAt", ">=", start).where("createdAt", "<=", end).orderBy("createdAt", "asc").get(),
+    db.collection("refundRequests").where("status", "in", ["Pending", "Approved"]).get(),
+    loadMaintenanceExpenses(start, end),
+  ]);
+
+  const entries = entrySnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((e) => lower(e.status) === "success");
+  const paymentDocs = paySnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const settledDocs = settledSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((p) => lower(p.depositStatus) === "settled");
+  const openRefundPaymentIDs = new Set(refundSnap.docs.map((d) => d.data().paymentID).filter(Boolean));
+
+  // ── one flat list of everything that moved ──
+  const flows = [];   // { kind, date, bookingID, userID, amount, source, method }
+  let forfeited = 0;
+  entries.forEach((e) => {
+    const date = toDate(e.settledAt);
+    const amount = num(e.amount);
+    if (!date || amount <= 0) return;
+    const base = { date, bookingID: e.bookingID || null, userID: e.userID || null, amount, method: e.method || null,
+      source: e.source === "in_person" || (!e.source && lower(e.method) === "cash") ? "in_person" : "online" };
+    if (e.direction === "in") {
+      if (e.phase === "penalty") flows.push({ ...base, kind: "penalty" });
+      else if (e.phase === "deposit" || e.phase === "balance") flows.push({ ...base, kind: "rental" });
+    } else if (e.direction === "out") {
+      if (e.phase === "deposit_return") return;   // counted once, from the payment below
+      flows.push({ ...base, kind: e.phase === "discount" || e.phase === "discount_return" ? "discount_return" : "refund" });
+    } else if (e.phase === "deposit_forfeited") {
+      forfeited += amount;
+    }
+  });
+
+  let depositUsed = 0;   // held deposits used to cover penalties: kept, nothing paid again
+  settledDocs.forEach((p) => {
+    const view = getDepositView(p);
+    const date = toDate(p.depositSettledAt);
+    if (!view || !date) return;
+    depositUsed += num(view.deducted);
+    if (num(view.returnedAmount) > 0) {
+      flows.push({ kind: "deposit_return", date, bookingID: p.bookingID || null, userID: p.userID || null, amount: num(view.returnedAmount), source: "in_person", method: null });
+    }
+  });
+
+  let depositsHeld = 0;
+  heldSnap.docs.forEach((d) => { const v = getDepositView(d.data()); if (v && v.status === "Held") depositsHeld += num(v.amount); });
+
+  // ── lookups ──
+  const bookingMap = await loadBookingsByIDs([...flows.map((f) => f.bookingID), ...paymentDocs.map((p) => p.bookingID)]);
+  const entriesByPayment = await getEntriesForPaymentIDs(paymentDocs.map((p) => p.paymentID || p.originalId || p.id));
+  const views = buildPaymentViews(paymentDocs, entriesByPayment, bookingMap);
+
+  flows.forEach((f) => {
+    const b = bookingMap[f.bookingID];
+    f.carID = b?.carID || null;
+    if (!f.userID) f.userID = b?.userID || null;
+  });
+
+  const carIDs = uniq([...flows.map((f) => f.carID), ...maintenance.map((m) => m.carID), ...views.map((v) => v.carID)]);
+  const userIDs = uniq([...flows.map((f) => f.userID), ...views.map((v) => v.userID || v.p.userID)]);
+  const [carNames, userNames] = await Promise.all([resolveVehicleNames(carIDs), resolveUserNames(userIDs)]);
+  const customerOf = (id) => (id && userNames[id] && userNames[id] !== "—" ? userNames[id] : "Unknown");
+
+  // ── totals ──
+  const sum = (kind) => flows.filter((f) => f.kind === kind).reduce((s, f) => s + f.amount, 0);
+  const rentals = sum("rental"), penalties = sum("penalty");
+  const refunds = sum("refund"), depositReturns = sum("deposit_return"), discountReturns = sum("discount_return");
+  const returned = refunds + depositReturns + discountReturns;
+  const revenue = rentals + penalties - returned;
+  const maintenanceTotal = maintenance.reduce((s, m) => s + m.amount, 0);
+  const signed = (f) => (f.kind === "rental" || f.kind === "penalty" ? f.amount : -f.amount);
+
+  // ── time series: days (week / month / day) or months (year), every bucket listed so the chart has no gaps ──
+  const g = period === "yearly" ? "month" : "day";
+  const keyOf = (d) => (g === "month" ? `${d.getFullYear()}-${d.getMonth()}` : `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+  const buckets = new Map();
+  for (let s = bucketStart(g, start); s <= end; s = g === "month" ? new Date(s.getFullYear(), s.getMonth() + 1, 1) : new Date(s.getFullYear(), s.getMonth(), s.getDate() + 1)) {
+    buckets.set(keyOf(s), {
+      key: keyOf(s), label: bucketLabel(g, s),
+      short: g === "month" ? monthShort(s.getMonth()) : period === "daily" ? `${monthShort(s.getMonth())} ${s.getDate()}` : String(s.getDate()),
+      rentals: 0, penalties: 0, refunds: 0, depositReturns: 0, discountReturns: 0, returned: 0, maintenance: 0,
+    });
+  }
+  flows.forEach((f) => {
+    const b = buckets.get(keyOf(f.date));
+    if (!b) return;
+    if (f.kind === "rental") b.rentals += f.amount;
+    else if (f.kind === "penalty") b.penalties += f.amount;
+    else {
+      // money that went back: kept apart so the report can show each one, and `returned` stays their total (Net is unchanged)
+      if (f.kind === "refund") b.refunds += f.amount;
+      else if (f.kind === "deposit_return") b.depositReturns += f.amount;
+      else if (f.kind === "discount_return") b.discountReturns += f.amount;
+      b.returned += f.amount;
+    }
+  });
+  maintenance.forEach((m) => { const b = buckets.get(keyOf(new Date(m.date))); if (b) b.maintenance += m.amount; });
+  const series = [...buckets.values()].map((b) => ({ ...b, revenue: b.rentals + b.penalties - b.returned, net: b.rentals + b.penalties - b.returned - b.maintenance }));
+
+  // ── per car: what it brought in (net of what went back) against what maintenance cost ──
+  const carMap = new Map();
+  const carRow = (carID) => {
+    const id = carID || "unknown";
+    if (!carMap.has(id)) carMap.set(id, { id, carID: carID || null, revenue: 0, maintenance: 0, bookings: new Map(), jobs: [] });
+    return carMap.get(id);
+  };
+  flows.forEach((f) => {
+    const row = carRow(f.carID);
+    row.revenue += signed(f);
+    const bid = f.bookingID || "unknown";
+    const cur = row.bookings.get(bid) || { bookingID: f.bookingID, userID: f.userID, net: 0 };
+    cur.net += signed(f);
+    row.bookings.set(bid, cur);
+  });
+  maintenance.forEach((m) => {
+    const row = carRow(m.carID);
+    row.maintenance += m.amount;
+    row.jobs.push(m);
+  });
+  const cars = [...carMap.values()].map((r) => {
+    const children = [
+      ...[...r.bookings.values()].sort((a, b) => b.net - a.net).map((b) => ({
+        id: `b:${b.bookingID}`, name: `${b.bookingID || "Booking"} · ${customerOf(b.userID)}`, revenue: b.net, maintenance: 0, net: b.net,
+      })),
+      ...r.jobs.sort((a, b) => b.amount - a.amount).map((m) => ({
+        id: `m:${m.id}`, name: `Maintenance · ${m.services || m.basis || "Service"}`, revenue: 0, maintenance: m.amount, net: -m.amount,
+      })),
+    ];
+    return {
+      id: r.id, name: r.carID ? (carNames[r.carID] || "Unknown Vehicle") : "Unknown Vehicle",
+      revenue: r.revenue, maintenance: r.maintenance, net: r.revenue - r.maintenance, bookings: r.bookings.size, children,
+    };
+  });
+
+  // ── money in by method (opens into online / in person), money out by type ──
+  const methodMap = new Map();
+  flows.filter((f) => f.kind === "rental" || f.kind === "penalty").forEach((f) => {
+    const label = methodLabel(f.method) === "—" ? "Other" : methodLabel(f.method);
+    const m = methodMap.get(label) || { id: label, name: label, count: 0, rentals: 0, penalties: 0, total: 0, subs: new Map() };
+    const sub = m.subs.get(f.source) || { id: `${label}:${f.source}`, name: f.source === "online" ? "Online (PayMongo)" : "In person", count: 0, rentals: 0, penalties: 0, total: 0 };
+    [m, sub].forEach((t) => { t.count += 1; t.total += f.amount; if (f.kind === "rental") t.rentals += f.amount; else t.penalties += f.amount; });
+    m.subs.set(f.source, sub);
+    methodMap.set(label, m);
+  });
+  const methods = [...methodMap.values()].map(({ subs, ...m }) => ({ ...m, children: [...subs.values()].sort((a, b) => b.total - a.total) })).sort((a, b) => b.total - a.total);
+
+  const OUT = [["refund", "Refunds"], ["deposit_return", "Deposit returns"], ["discount_return", "Discount returns"]];
+  const outflows = OUT.map(([kind, name]) => {
+    const rows = flows.filter((f) => f.kind === kind);
+    const online = rows.filter((f) => f.source === "online").reduce((s, f) => s + f.amount, 0);
+    const inPerson = rows.filter((f) => f.source !== "online").reduce((s, f) => s + f.amount, 0);
+    // each transaction, newest first: what opens under the row
+    const children = rows.slice().sort((x, y) => y.date - x.date).map((f, i) => ({
+      id: `${kind}:${i}`,
+      name: `${f.bookingID || "—"} · ${customerOf(f.userID)}`,
+      date: f.date.toISOString(),
+      method: methodLabel(f.method),
+      online: f.source === "online" ? f.amount : 0,
+      inPerson: f.source === "online" ? 0 : f.amount,
+      total: f.amount,
+    }));
+    return { id: kind, name, count: rows.length, online, inPerson, total: online + inPerson, children };
+  }).filter((r) => r.total > 0);
+
+  // ── payment records (created in the period) + who still owes ──
+  const records = views.map((v) => {
+    const paymentID = v.p.paymentID || v.p.id;
+    const booking = bookingMap[v.p.bookingID] || null;
+    const stage = derivePaymentStage(v.p, { bookingStatus: booking?.status || "", hasOpenRefund: openRefundPaymentIDs.has(paymentID) });
+    const received = v.entries.filter((e) => e.direction === "in" && lower(e.status) === "success" && (e.phase === "deposit" || e.phase === "balance"));
+    const methodNames = uniq(received.map((e) => methodLabel(e.method)));
+    const userID = v.userID || v.p.userID || null;
+    return {
+      id: v.p.id, paymentID,
+      bookingID: v.p.bookingID || "—",
+      customer: customerOf(userID),
+      car: v.carID ? (carNames[v.carID] || "Unknown Vehicle") : "—",
+      total: num(v.p.amount), paid: v.amountPaid, balance: v.outstanding, refunded: v.refunded,
+      stage,
+      method: methodNames.length ? methodNames.join(" + ") : (v.p.paymentMethod ? methodLabel(v.p.paymentMethod) : "—"),
+      reference: v.p.paymongoPaymentID || "—",
+      createdAt: v.createdAt ? v.createdAt.toISOString() : null,
+      tripStart: booking?.tripStart ? booking.tripStart.toISOString() : null,
+      steps: v.entries
+        .map((e) => ({ phase: e.phase, direction: e.direction, method: e.method ? methodLabel(e.method) : "—", amount: num(e.amount), status: e.status, reference: e.referenceNumber || "—", date: (toDate(e.settledAt) || toDate(e.createdAt))?.toISOString() || null }))
+        .sort((a, b) => String(a.date).localeCompare(String(b.date))),
+    };
+  });
+  const unpaid = records
+    .filter((r) => r.balance > 0 && (r.stage === "Partial" || r.stage === "Pending"))
+    .sort((a, b) => b.balance - a.balance);
+
+  return {
+    period, label,
+    generatedAt: new Date().toISOString(),
+    cards: {
+      rentals, penalties, refunds, depositReturns, discountReturns, returned,
+      revenue, maintenance: maintenanceTotal, net: revenue - maintenanceTotal,
+      moneyIn: rentals + penalties,
+      unpaid: unpaid.reduce((s, r) => s + r.balance, 0), unpaidCount: unpaid.length,
+      depositsHeld, depositsKept: forfeited + depositUsed,
+    },
+    series, cars, methods, outflows, unpaid, payments: records,
+  };
+};
+
+// "gcash" / "GCash" / "Bank Transfer" -> one label. Empty -> "—".
+const METHOD_LABELS = { cash: "Cash", gcash: "GCash", maya: "Maya", qrph: "QR Ph", bank_transfer: "Bank transfer" };
+const methodLabel = (m) => {
+  const key = String(m ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return key ? (METHOD_LABELS[key] || "Other") : "—";
 };
