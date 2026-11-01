@@ -112,6 +112,7 @@ const loadBookingsInRange = async (start, end) => {
         bookingID: b.bookingID || d.id,
         userID: b.userID || null,
         carID: b.carID || null,
+        modeOfDriving: b.modeOfDriving || "",
         status: normalizeBookingStatus(b.status),
         location: b.location || "—",
         totalDays: b.totalDays || 0,
@@ -230,6 +231,22 @@ const buildRentalReport = (bookings) => {
     }
   }
   return { totalRentals: bookings.length, completed, ongoing, upcoming, cancelled };
+};
+
+// ── BOOKING DISPLAY STATUS ──────────────────────────────────────────────────
+
+/** completed | ongoing | upcoming | cancelled — same rules as buildRentalReport. null = counted by none of the four. */
+const displayStatusOf = (b, now = new Date()) => {
+  if (b.status === "completed") return "completed";
+  if (b.status === "cancelled") return "cancelled";
+  if (b.status === "ongoing") return "ongoing";
+  if (b.status === "upcoming") {
+    const started = b.startDateTime ? b.startDateTime <= now : false;
+    const ended   = b.endDateTime ? b.endDateTime < now : false;
+    if (started && !ended) return "ongoing";
+    if (!started) return "upcoming";
+  }
+  return null;
 };
 
 // ── VEHICLES ────────────────────────────────────────────────────────────────
@@ -361,7 +378,7 @@ const loadMaintenanceExpenses = async (start, end) => {
   const names = await resolveVehicleNames(uniq(rows.map((r) => r.carID)));
   return rows
     .sort((a, b) => b.date - a.date)
-    .map((r) => ({ id: r.id, date: r.date.toISOString(), carName: names[r.carID] || "Unknown Vehicle", basis: r.basis, services: r.services, amount: r.amount }));
+    .map((r) => ({ id: r.id, carID: r.carID, date: r.date.toISOString(), carName: names[r.carID] || "Unknown Vehicle", basis: r.basis, services: r.services, amount: r.amount }));
 };
 
 // ── TOTALS PER DAY / WEEK / MONTH / YEAR ────────────────────────────────────
@@ -485,6 +502,16 @@ export const generateReport = async (period, selection = {}) => {
     createdAt: v.createdAt ? v.createdAt.toISOString() : null,
   }));
 
+  // Car and customer names for the Rentals & Customers tab (looked up once per car / customer).
+  const rowCarIDs = uniq(bookings.map((b) => b.carID).filter(Boolean));
+  const rowUserIDs = uniq(bookings.map((b) => b.userID).filter(Boolean));
+  const [rowCarNames, rowUserNames] = await Promise.all([
+    resolveVehicleNames(rowCarIDs),
+    Promise.all(rowUserIDs.map((id) => resolveUserName(id).catch(() => "Unknown"))),
+  ]);
+  const customerNameByID = Object.fromEntries(rowUserIDs.map((id, i) => [id, rowUserNames[i] && rowUserNames[i] !== "—" ? rowUserNames[i] : "Unknown"]));
+  const reportNow = new Date();
+
   const totalByBookingID = {};
   views.forEach((v) => { if (v.p.bookingID) totalByBookingID[v.p.bookingID] = num(v.p.amount); });
   const bookingRows = bookings
@@ -494,7 +521,12 @@ export const generateReport = async (period, selection = {}) => {
       id: b.id,
       bookingID: b.bookingID,
       carID: b.carID,
+      carName: b.carID ? (rowCarNames[b.carID] || "Unknown Vehicle") : "Unknown Vehicle",
+      userID: b.userID,
+      customerName: b.userID ? (customerNameByID[b.userID] || "Unknown") : "Unknown",
+      modeOfDriving: b.modeOfDriving || "",
       status: b.status,
+      displayStatus: displayStatusOf(b, reportNow),
       location: b.location,
       totalFee: totalByBookingID[b.bookingID] || 0,
       totalDays: b.totalDays,
@@ -552,5 +584,115 @@ export const generateReport = async (period, selection = {}) => {
     bookingsByStatus,
     payments: paymentRows,
     bookings: bookingRows,
+  };
+};
+
+// ── MAINTENANCE & PENALTIES ─────────────────────────────────────────────────
+
+/**
+ * Maintenance & Penalties report for the Summary page.
+ *
+ *   Maintenance   Completed maintenance in the period (same rule as the expense on the revenue report).
+ *   Penalties     Confirmed penalties created in the period. Under review / discarded / voided / waived ones are
+ *                 not charges, so they are left out. Paid = paidAmount (capped at the amount); pending = the rest.
+ *
+ *   cars          one row per car WITH maintenance: total cost, split into recovered (penalties collected on that
+ *                 car, capped at its maintenance cost) and absorbed (the rest). Needs no repair-to-penalty link.
+ *   customers     one row per customer + car pair, sorted / searched / paged here so the page stays light.
+ *
+ * @param {object} opts { sort: "total" | "unpaid", search, page, pageSize }
+ */
+export const generateMaintenancePenaltiesReport = async (period, selection = {}, opts = {}) => {
+  const { start, end, label } = getRange(period, selection);
+  const sort = opts.sort === "unpaid" ? "unpaid" : "total";
+  const pageSize = Math.min(Math.max(parseInt(opts.pageSize, 10) || 5, 1), 50);
+  const search = String(opts.search || "").trim().toLowerCase();
+
+  const [maintenance, penSnap] = await Promise.all([
+    loadMaintenanceExpenses(start, end),
+    db.collection("penalties").where("createdAt", ">=", start).where("createdAt", "<=", end).get(),
+  ]);
+
+  const penalties = penSnap.docs.map((d) => d.data()).filter((p) => p.status === "Confirmed");
+  const paidOf = (p) => Math.min(num(p.paidAmount), num(p.amount));
+
+  const collectedByCar = {};
+  const pairs = new Map();
+  let penaltiesCollected = 0;
+  let penaltiesPending = 0;
+  const pendingUsers = new Set();
+
+  penalties.forEach((p) => {
+    const amount = num(p.amount);
+    const paid = paidOf(p);
+    const pending = Math.max(0, amount - paid);
+    penaltiesCollected += paid;
+    penaltiesPending += pending;
+    if (pending > 0 && p.userID) pendingUsers.add(p.userID);
+    if (p.carID) collectedByCar[p.carID] = (collectedByCar[p.carID] || 0) + paid;
+
+    const key = `${p.userID || "?"}|${p.carID || "?"}`;
+    const row = pairs.get(key) || { userID: p.userID || null, carID: p.carID || null, count: 0, total: 0, paid: 0 };
+    row.count += 1; row.total += amount; row.paid += paid;
+    pairs.set(key, row);
+  });
+
+  // ── cars: maintenance per car, split recovered / absorbed ──
+  const maintByCar = new Map();
+  maintenance.forEach((m) => {
+    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0 };
+    cur.total += m.amount;
+    maintByCar.set(m.carID, cur);
+  });
+  const cars = [...maintByCar.values()]
+    .map((c) => {
+      const recovered = Math.min(c.total, collectedByCar[c.carID] || 0);
+      return { carID: c.carID, name: c.name, total: c.total, recovered, absorbed: c.total - recovered };
+    })
+    .sort((a, b) => b.total - a.total);
+  const totalMaintenance = cars.reduce((s, c) => s + c.total, 0);
+
+  // ── customers: one row per customer + car ──
+  const pairRows = [...pairs.values()];
+  const carNames = await resolveVehicleNames(uniq(pairRows.map((r) => r.carID)));
+  const userIDs = uniq(pairRows.map((r) => r.userID));
+  const userNames = {};
+  await Promise.all(userIDs.map(async (id) => { userNames[id] = await resolveUserName(id).catch(() => "Unknown"); }));
+
+  let rows = pairRows.map((r) => ({
+    userID: r.userID,
+    carID: r.carID,
+    customer: userNames[r.userID] || "Unknown",
+    car: carNames[r.carID] || "Unknown Vehicle",
+    penalties: r.count,
+    total: r.total,
+    paid: r.paid,
+    pending: Math.max(0, r.total - r.paid),
+  }));
+  const maxTotal = rows.reduce((m, r) => Math.max(m, r.total), 0);   // fixed scale for the graph, same on every page
+
+  if (search) rows = rows.filter((r) => r.customer.toLowerCase().includes(search) || r.car.toLowerCase().includes(search));
+  rows.sort((a, b) => sort === "unpaid"
+    ? (b.pending - a.pending) || (b.total - a.total)
+    : (b.total - a.total) || (b.pending - a.pending));
+
+  const totalRows = rows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const page = Math.min(Math.max(parseInt(opts.page, 10) || 1, 1), totalPages);
+
+  return {
+    period, label,
+    generatedAt: new Date().toISOString(),
+    cards: {
+      totalMaintenance,
+      penaltiesCollected,
+      penaltiesPending,
+      pendingCustomers: pendingUsers.size,
+    },
+    cars,
+    customers: {
+      rows: rows.slice((page - 1) * pageSize, page * pageSize),
+      page, pageSize, totalRows, totalPages, maxTotal, sort,
+    },
   };
 };
