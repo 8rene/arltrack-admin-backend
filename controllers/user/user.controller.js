@@ -576,8 +576,11 @@ export const verifyUserDocument = async (req, res) => {
 
     // idReviewedBy / idReviewedAt: who made this call and when — shown as "Reviewed By" in the admin
     // panel's New ID view. Additive fields; older approvals simply don't have them.
+    // idStatus: "approved" | "rejected". isVerified alone can't tell a rejected ID from a brand-new one (both false),
+    // so a missing idStatus means the ID has not been reviewed yet (pending).
     await userDocRef.update({
       isVerified,
+      idStatus: isVerified ? "approved" : "rejected",
       idReviewedBy: req.user?.uid || null,
       idReviewedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -589,7 +592,7 @@ export const verifyUserDocument = async (req, res) => {
       userID: req.user?.uid || null,
     }).catch((err) => console.error("[USER] Failed to write audit log:", err));
 
-    return res.status(200).json({ success: true, data: { id: uid, isVerified } });
+    return res.status(200).json({ success: true, data: { id: uid, isVerified, idStatus: isVerified ? "approved" : "rejected" } });
   } catch (error) {
     console.error("[USER] verifyUserDocument error:", error);
     return res.status(500).json({ success: false, message: error.message });

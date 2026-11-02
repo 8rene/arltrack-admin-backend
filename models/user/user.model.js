@@ -2,6 +2,8 @@ export const User = {
   createdAt: null,
   email: "",
   isVerified: false,
+  idStatus: null,          // ID review result, written by the admin app on review: "approved" | "rejected". Not set at signup, so missing/null = pending.
+                           // The customer backend should reset it to "pending" (or delete it) when a rejected user uploads a new ID.
   phone: "",
   profileImage: "",
   roleID: "",
