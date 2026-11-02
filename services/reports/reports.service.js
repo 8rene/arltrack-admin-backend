@@ -790,7 +790,8 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
  * as a return. That is why Revenue is money in minus money returned: a deposit still held is not revenue yet, and a
  * penalty covered by the held deposit stays in the result without being paid twice.
  *
- *   Revenue = Rentals + Penalties - Returned          Net = Revenue - Maintenance (Completed only) - PayMongo fees
+ *   Revenue = Rentals + Penalties - Returned - Deposits held back      Net = Revenue - Maintenance (Completed only) - PayMongo fees
+ *   Deposits held back = security deposits that came in minus those settled in the period: a held deposit is not revenue yet.
  *
  * PAYMENT RECORDS are the payments CREATED in the period, labelled with the Payments page's own derivePaymentStage().
  * Deposits held is a snapshot of right now (every payment whose deposit is still Held), not tied to the period.
@@ -799,7 +800,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
   const { start, end, label } = getRange(period, selection);
   const lower = (v) => String(v ?? "").trim().toLowerCase();
 
-  const [entrySnap, settledSnap, heldSnap, paySnap, refundSnap, maintenance, pendingOutSnap] = await Promise.all([
+  const [entrySnap, settledSnap, heldSnap, paySnap, refundSnap, maintenance, pendingOutSnap, creditSnap] = await Promise.all([
     db.collection(ENTRY_COLLECTION).where("settledAt", ">=", start).where("settledAt", "<=", end).get(),
     db.collection("payments").where("depositSettledAt", ">=", start).where("depositSettledAt", "<=", end).get(),
     db.collection("payments").where("depositStatus", "==", "Held").get(),
@@ -807,6 +808,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     db.collection("refundRequests").where("status", "in", ["Pending", "Approved"]).get(),
     loadMaintenanceExpenses(start, end),
     db.collection(ENTRY_COLLECTION).where("direction", "==", "out").where("status", "==", "pending").get(),
+    db.collection("payments").where("discountCredit", ">", 0).get(),   // discount credit still held for the customer (see discountLedger.js)
   ]);
 
   const entries = entrySnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((e) => lower(e.status) === "success");
@@ -879,6 +881,19 @@ export const generateMoneyReport = async (period, selection = {}) => {
   const entriesByPayment = await getEntriesForPaymentIDs(paymentDocs.map((p) => p.paymentID || p.originalId || p.id));
   const views = buildPaymentViews(paymentDocs, entriesByPayment, bookingMap);
 
+  // Money that COULD still go back (nothing has moved yet): every deposit and every discount credit still held (upcoming,
+  // ongoing or completed bookings), plus the refunds already scheduled / approved. A payment already counted as a scheduled
+  // refund is not counted a second time.
+  const payKeyOf = (p) => p.paymentID || p.originalId || p.id;
+  const refundingPaymentIDs = new Set(approvedRefunds.map((r) => r.paymentID).filter(Boolean));   // already counted as a scheduled refund
+  const heldPayments = heldSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const creditPayments = creditSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((p) => num(p.discountCredit) > 0);
+  Object.assign(bookingMap, await loadBookingsByIDs([...heldPayments, ...creditPayments, ...settledSnap.docs.map((d) => d.data())].map((p) => p.bookingID).filter(Boolean)));
+  const isDue = (p) => !refundingPaymentIDs.has(payKeyOf(p));
+  const heldDue = heldPayments.filter((p) => { const v = getDepositView(p); return v && v.status === "Held" && num(v.amount) > 0 && isDue(p); });
+  const creditDue = creditPayments.filter(isDue);
+  const userOfPay = (p) => p.userID || bookingMap[p.bookingID]?.userID || null;
+
   flows.forEach((f) => {
     const b = bookingMap[f.bookingID];
     f.carID = b?.carID || null;
@@ -887,12 +902,27 @@ export const generateMoneyReport = async (period, selection = {}) => {
 
   const carIDs = uniq([...flows.map((f) => f.carID), ...maintenance.map((m) => m.carID), ...views.map((v) => v.carID)]);
   approvedRefunds.forEach((r) => { r.userID = r.userID || bookingMap[r.bookingID]?.userID || null; });
-  const userIDs = uniq([...flows.map((f) => f.userID), ...views.map((v) => v.userID || v.p.userID), ...approvedRefunds.map((r) => r.userID), ...pendingPayouts.map((e) => e.userID)]);
+  const userIDs = uniq([...flows.map((f) => f.userID), ...views.map((v) => v.userID || v.p.userID), ...approvedRefunds.map((r) => r.userID), ...pendingPayouts.map((e) => e.userID), ...heldDue.map(userOfPay), ...creditDue.map(userOfPay)]);
   const [carNames, userNames] = await Promise.all([resolveVehicleNames(carIDs), resolveUserNames(userIDs)]);
   const customerOf = (id) => (id && userNames[id] && userNames[id] !== "—" ? userNames[id] : "Unknown");
 
   // ── Money in by what it was FOR (rental / service fee / gateway fee / deposit / penalties) ──
   const payByID = await loadPaymentsByIDs(flows.filter((f) => f.kind === "rental").map((f) => f.paymentID));
+  // ── the refundable security deposit is not revenue while it is held ──
+  // Each rental payment carries its deposit part; a deposit only becomes revenue for the part you KEEP (forfeited, or used on a
+  // penalty). So the deposit is left out when it comes in, and added back when it is settled (returned, refunded with a
+  // cancellation, forfeited or used): a returned deposit then nets to zero, a kept one stays. A return still pending at
+  // PayMongo is treated as still held until it is confirmed, the same as Returned does.
+  flows.forEach((f) => { if (f.kind === "rental") f.deposit = splitRentalEntry(f, payByID[f.paymentID] || null).deposit; });
+  const depositSettled = [];
+  settledSnap.docs.forEach((d) => {
+    const p = d.data();
+    const v = getDepositView(p);
+    const date = toDate(p.depositSettledAt);
+    if (!v || v.status === "Held" || !date || !(num(v.amount) > 0)) return;
+    if (pendingDepositPaymentIDs.has(p.paymentID || p.originalId || d.id)) return;
+    depositSettled.push({ date, amount: num(v.amount), carID: bookingMap[p.bookingID]?.carID || null, bookingID: p.bookingID || null, userID: p.userID || null });
+  });
   const PART_NAMES = { rental: "Rental & other fees", service: "Service fee", gateway: "Gateway fee", deposit: "Deposit (refundable)", penalty: "Penalties" };
   const partMap = new Map();
   const addPart = (key, f, amt) => {
@@ -945,9 +975,12 @@ export const generateMoneyReport = async (period, selection = {}) => {
   const rentals = sum("rental"), penalties = sum("penalty");
   const refunds = sum("refund"), depositReturns = sum("deposit_return"), discountReturns = sum("discount_return");
   const returned = refunds + depositReturns + discountReturns;
-  const revenue = rentals + penalties - returned;
+  const depositIn = flows.reduce((sum, f) => sum + (f.kind === "rental" ? (f.deposit || 0) : 0), 0);
+  const depositOut = depositSettled.reduce((sum, x) => sum + x.amount, 0);
+  const depositHeldChange = depositIn - depositOut;   // deposits that came in and are still held (negative: more was settled than came in)
+  const revenue = rentals + penalties - returned - depositHeldChange;
   const maintenanceTotal = maintenance.reduce((s, m) => s + m.amount, 0);
-  const signed = (f) => (f.kind === "rental" || f.kind === "penalty" ? f.amount : -f.amount);
+  const signed = (f) => (f.kind === "rental" ? f.amount - (f.deposit || 0) : f.kind === "penalty" ? f.amount : -f.amount);   // a deposit is not revenue while held
 
   // ── time series: days (week / month / day) or months (year), every bucket listed so the chart has no gaps ──
   const g = period === "yearly" ? "month" : "day";
@@ -957,13 +990,13 @@ export const generateMoneyReport = async (period, selection = {}) => {
     buckets.set(keyOf(s), {
       key: keyOf(s), label: bucketLabel(g, s),
       short: g === "month" ? monthShort(s.getMonth()) : period === "daily" ? `${monthShort(s.getMonth())} ${s.getDate()}` : String(s.getDate()),
-      rentals: 0, penalties: 0, refunds: 0, depositReturns: 0, discountReturns: 0, returned: 0, maintenance: 0, fees: 0,
+      rentals: 0, penalties: 0, refunds: 0, depositReturns: 0, discountReturns: 0, returned: 0, deposits: 0, maintenance: 0, fees: 0,
     });
   }
   flows.forEach((f) => {
     const b = buckets.get(keyOf(f.date));
     if (!b) return;
-    if (f.kind === "rental") b.rentals += f.amount;
+    if (f.kind === "rental") { b.rentals += f.amount; b.deposits += f.deposit || 0; }
     else if (f.kind === "penalty") b.penalties += f.amount;
     else {
       // money that went back: kept apart so the report can show each one, and `returned` stays their total (Net is unchanged)
@@ -973,9 +1006,10 @@ export const generateMoneyReport = async (period, selection = {}) => {
       b.returned += f.amount;
     }
   });
+  depositSettled.forEach((x) => { const b = buckets.get(keyOf(x.date)); if (b) b.deposits -= x.amount; });   // `deposits` = held deposits that came in minus those settled that day
   maintenance.forEach((m) => { const b = buckets.get(keyOf(new Date(m.date))); if (b) b.maintenance += m.amount; });
   feeItems.forEach((x) => { const b = x.date && buckets.get(keyOf(x.date)); if (b) b.fees += x.fee; });   // PayMongo kept this on the online payments received that day
-  const series = [...buckets.values()].map((b) => ({ ...b, revenue: b.rentals + b.penalties - b.returned, expenses: b.maintenance + b.fees, net: b.rentals + b.penalties - b.returned - b.maintenance - b.fees }));
+  const series = [...buckets.values()].map((b) => ({ ...b, revenue: b.rentals + b.penalties - b.returned - b.deposits, expenses: b.maintenance + b.fees, net: b.rentals + b.penalties - b.returned - b.deposits - b.maintenance - b.fees }));
 
   // ── per car: what it brought in (net of what went back) against what maintenance cost ──
   const carMap = new Map();
@@ -990,6 +1024,14 @@ export const generateMoneyReport = async (period, selection = {}) => {
     const bid = f.bookingID || "unknown";
     const cur = row.bookings.get(bid) || { bookingID: f.bookingID, userID: f.userID, net: 0, fees: 0 };
     cur.net += signed(f);
+    row.bookings.set(bid, cur);
+  });
+  depositSettled.forEach((x) => {   // a settled deposit comes back into the car's revenue (a returned one cancels what was left out)
+    const row = carRow(x.carID);
+    row.revenue += x.amount;
+    const bid = x.bookingID || "unknown";
+    const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
+    cur.net += x.amount;
     row.bookings.set(bid, cur);
   });
   feeItems.forEach((x) => {
@@ -1054,13 +1096,48 @@ export const generateMoneyReport = async (period, selection = {}) => {
     needMethod.forEach((f) => { f.method = paidWith(f.paymentID); });
   }
 
+  // ── money that could still go back, by the method it was paid with (online refunds and returns go back to it) ──
+  const pendIDs = uniq([...approvedRefunds.map((r) => r.paymentID), ...pendingPayouts.map((e) => e.paymentID), ...heldDue.map(payKeyOf), ...creditDue.map(payKeyOf)].filter(Boolean));
+  const pendEntries = pendIDs.length ? await getEntriesForPaymentIDs(pendIDs) : new Map();
+  const pendMethod = (paymentID, fallback) => {
+    const hit = (pendEntries.get(paymentID) || []).find((e) => e.direction === "in" && lower(e.status) === "success" && (e.phase === "deposit" || e.phase === "balance") && e.method);
+    const m = methodLabel(hit?.method || fallback);
+    return m === "—" ? "Other" : m;
+  };
+  const fmtDay = (d) => d.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila" });
+  const pending = [
+    ...approvedRefunds.map((r) => {
+      const sendAfter = r.scheduled ? toDate(r.sendAfter) : null;
+      return { kind: "refund", bookingID: r.bookingID || null, userID: r.userID, amount: r.expectedAmount, method: pendMethod(r.paymentID, null),
+        note: sendAfter ? `Refund · scheduled, sends after ${fmtDay(sendAfter)}` : "Refund · approved, being paid out" };
+    }),
+    ...pendingPayouts.map((e) => ({
+      kind: e.phase === "deposit_return" ? "deposit" : "discount", bookingID: e.bookingID || null, userID: e.userID || bookingMap[e.bookingID]?.userID || null, amount: num(e.amount), method: pendMethod(e.paymentID, e.method),
+      note: `${e.phase === "deposit_return" ? "Deposit return" : "Discount return"} · sent to PayMongo, waiting for confirmation`,
+    })),
+    ...heldDue.map((p) => ({ kind: "deposit", bookingID: p.bookingID || null, userID: userOfPay(p), amount: num(getDepositView(p).amount), method: pendMethod(payKeyOf(p), p.paymentMethod),
+      note: `Deposit held · ${bookingMap[p.bookingID]?.status ? `booking ${bookingMap[p.bookingID].status}, ` : ""}not returned yet (up to this amount: a penalty or damage can reduce it)` })),
+    ...creditDue.map((p) => ({ kind: "discount", bookingID: p.bookingID || null, userID: userOfPay(p), amount: num(p.discountCredit), method: pendMethod(payKeyOf(p), p.paymentMethod),
+      note: `Discount held · ${bookingMap[p.bookingID]?.status ? `booking ${bookingMap[p.bookingID].status}, ` : ""}goes back with the deposit` })),
+  ].filter((w) => w.amount > 0).sort((x, y) => y.amount - x.amount);
+  const PEND_KEYS = { refund: "pendRefund", deposit: "pendDeposit", discount: "pendDiscount" };
+  const PEND_NAMES = { refund: "Scheduled return", deposit: "Deposit held", discount: "Discount held" };
+
   const OUT_KEYS = { refund: "refund", deposit_return: "depositReturn", discount_return: "discountReturn" };
   const OUT_NAMES = { refund: "Refund", deposit_return: "Deposit return", discount_return: "Discount return" };
   const outMap = new Map();
   const outRow = (label) => {
-    if (!outMap.has(label)) outMap.set(label, { id: label, name: label, count: 0, refund: 0, depositReturn: 0, discountReturn: 0, online: 0, inPerson: 0, total: 0, expected: 0, children: [] });
+    if (!outMap.has(label)) outMap.set(label, { id: label, name: label, count: 0, refund: 0, depositReturn: 0, discountReturn: 0, pendRefund: 0, pendDeposit: 0, pendDiscount: 0, online: 0, inPerson: 0, total: 0, expected: 0, children: [] });
     return outMap.get(label);
   };
+  pending.forEach((w, i) => {
+    const row = outRow(w.method);
+    row[PEND_KEYS[w.kind]] += w.amount; row.expected += w.amount;
+    row.children.push({
+      id: `${w.method}:pending:${i}`, name: `${w.bookingID || "—"} · ${customerOf(w.userID)}`, date: null, method: w.method, kindLabel: PEND_NAMES[w.kind],
+      [PEND_KEYS[w.kind]]: w.amount, online: 0, inPerson: 0, total: 0, expected: w.amount, barTotal: w.amount, pending: true, note: w.note,
+    });
+  });
   flows.filter((f) => OUT_KEYS[f.kind]).sort((x, y) => y.date - x.date).forEach((f) => {
     const m = methodLabel(f.method);
     const label = m !== "—" ? m : f.source === "in_person" ? "Cash" : "Other";
@@ -1069,29 +1146,18 @@ export const generateMoneyReport = async (period, selection = {}) => {
     if (f.source === "online") row.online += f.amount; else row.inPerson += f.amount;
     row.children.push({
       id: `${label}:${f.kind}:${row.children.length}`, name: `${f.bookingID || "—"} · ${customerOf(f.userID)}`, date: f.date.toISOString(), method: label, kindLabel: OUT_NAMES[f.kind],
-      online: f.source === "online" ? f.amount : 0, inPerson: f.source === "online" ? 0 : f.amount, total: f.amount, expected: 0,
+      [OUT_KEYS[f.kind]]: f.amount, online: f.source === "online" ? f.amount : 0, inPerson: f.source === "online" ? 0 : f.amount, total: f.amount, expected: 0,
     });
   });
-  const outflows = [...outMap.values()].filter((r) => r.total > 0).map((r) => ({ ...r, barTotal: r.total })).sort((a, b) => b.total - a.total);
+  const outflows = [...outMap.values()].filter((r) => r.total > 0 || r.expected > 0).map((r) => ({ ...r, barTotal: r.total + r.expected })).sort((a, b) => b.barTotal - a.barTotal);
 
-  // Awaiting payout, whatever it is for: approved refunds not sent yet, and deposit / discount returns PayMongo has not
-  // confirmed yet. It has no method yet, so it is its own row at the end.
-  const waiting = [
-    ...approvedRefunds.map((r) => {
-      const sendAfter = r.scheduled ? toDate(r.sendAfter) : null;
-      return { bookingID: r.bookingID, userID: r.userID, amount: r.expectedAmount,
-        note: sendAfter ? `Refund · scheduled, sends after ${sendAfter.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila" })}` : "Refund · approved, being paid out" };
-    }),
-    ...pendingPayouts.map((e) => ({ bookingID: e.bookingID || null, userID: e.userID || bookingMap[e.bookingID]?.userID || null, amount: num(e.amount),
-      note: `${e.phase === "deposit_return" ? "Deposit return" : "Discount return"} · sent to PayMongo, waiting for confirmation` })),
-  ].sort((x, y) => y.amount - x.amount);
-  const waitingTotal = waiting.reduce((s, w) => s + w.amount, 0);
-  if (waitingTotal > 0) {
-    outflows.push({
-      id: "awaiting", name: "Awaiting payout", count: waiting.length, refund: 0, depositReturn: 0, discountReturn: 0, online: 0, inPerson: 0, total: 0, expected: waitingTotal, barTotal: waitingTotal,
-      children: waiting.map((w, i) => ({ id: `awaiting:${i}`, name: `${w.bookingID || "—"} · ${customerOf(w.userID)}`, date: null, method: "—", online: 0, inPerson: 0, total: 0, expected: w.amount, barTotal: w.amount, note: w.note })),
-    });
-  }
+  // What could still go back, for the Possible to return list and card. None of it has moved, so it is not in Money out, Revenue or Net.
+  const possibleTotal = pending.reduce((sum, w) => sum + w.amount, 0);
+  const possible = {
+    total: possibleTotal,
+    byKind: { refund: pending.filter((w) => w.kind === "refund").reduce((t, w) => t + w.amount, 0), deposit: pending.filter((w) => w.kind === "deposit").reduce((t, w) => t + w.amount, 0), discount: pending.filter((w) => w.kind === "discount").reduce((t, w) => t + w.amount, 0) },
+    items: pending.map((w, i) => ({ id: `pending:${i}`, kind: w.kind, kindLabel: PEND_NAMES[w.kind], name: `${w.bookingID || "—"} · ${customerOf(w.userID)}`, method: w.method, amount: w.amount, note: w.note })),
+  };
 
   // ── payment records (created in the period) + who still owes ──
   const records = views.map((v) => {
@@ -1147,12 +1213,12 @@ export const generateMoneyReport = async (period, selection = {}) => {
     generatedAt: new Date().toISOString(),
     cards: {
       rentals, penalties, refunds, depositReturns, discountReturns, returned,
-      revenue, maintenance: maintenanceTotal, gatewayFees: fees.total, gatewayFeesUnrecorded: fees.unrecorded, net: revenue - maintenanceTotal - fees.total,
+      revenue, maintenance: maintenanceTotal, gatewayFees: fees.total, gatewayFeesUnrecorded: fees.unrecorded, possibleReturn: possible.total, depositsHeldBack: depositHeldChange, net: revenue - maintenanceTotal - fees.total,
       moneyIn: rentals + penalties,
       unpaid: unpaid.reduce((s, r) => s + r.balance, 0), unpaidCount: unpaid.length,
       depositsHeld, depositsKept: forfeited + depositUsed,
     },
-    series, cars, methods, inParts, fees, outflows, unpaid, payments: records,
+    series, cars, methods, inParts, fees, outflows, possible, unpaid, payments: records,
   };
 };
 
