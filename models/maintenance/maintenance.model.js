@@ -149,6 +149,7 @@ export const SERVICE_CATALOG = [
     group: "GPS & Tracking",
     services: [
       { serviceID: "sim_load",          serviceName: "SIM Load",                 price: 300 },
+      { serviceID: "gps_tampering",     serviceName: "GPS Tampering",            price: 500 },
     ],
   },
   {

@@ -135,7 +135,7 @@ const loadBookingsByIDs = async (ids) => {
     docs.forEach((doc) => {
       if (!doc.exists) return;
       const b = doc.data();
-      out[doc.id] = { carID: b.carID || null, userID: b.userID || null, status: normalizeBookingStatus(b.status), tripStart: toDate(b.startDateTime || b.startDate) };
+      out[doc.id] = { carID: b.carID || null, userID: b.userID || null, status: normalizeBookingStatus(b.status), tripStart: toDate(b.startDateTime || b.startDate), cancelledAt: toDate(b.cancelledAt), updatedAt: toDate(b.updatedAt) };
       if (b.bookingID) out[b.bookingID] = out[doc.id];
     });
   }
@@ -431,6 +431,23 @@ const loadMaintenanceExpenses = async (start, end) => {
     .map((r) => ({ id: r.id, carID: r.carID, date: r.date.toISOString(), carName: names[r.carID] || "Unknown Vehicle", basis: r.basis, services: r.services, amount: r.amount }));
 };
 
+/**
+ * Maintenance that is still Scheduled (not done yet) with its date inside the period, so a car's upcoming cost can be shown next
+ * to what was completed. It is never part of the maintenance expense: only a Completed job is.
+ */
+const loadScheduledMaintenance = async (start, end) => {
+  const snap = await db.collection("maintenance").where("status", "in", ["Scheduled", "scheduled"]).get();
+  const rows = [];
+  snap.docs.forEach((d) => {
+    const m = d.data();
+    const date = toDate(m.maintenanceDate);
+    if (!date || date < start || date > end) return;
+    rows.push({ id: d.id, carID: m.carID || null, date, basis: m.basis || "", services: (m.services || []).map((x) => x.serviceName).filter(Boolean).join(", "), amount: num(m.totalCost) });
+  });
+  const names = await resolveVehicleNames(uniq(rows.map((r) => r.carID)));
+  return rows.map((r) => ({ ...r, carName: names[r.carID] || "Unknown Vehicle" }));
+};
+
 // ── TOTALS PER DAY / WEEK / MONTH / YEAR ────────────────────────────────────
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -647,6 +664,7 @@ export const generateReport = async (period, selection = {}) => {
  * Maintenance & Penalties report for the Summary page.
  *
  *   Maintenance   Completed maintenance in the period (same rule as the expense on the revenue report).
+ *   Scheduled     Maintenance still Scheduled with its date in the period: shown beside the cost (cars[].scheduled), never added to it.
  *   Penalties     Confirmed penalties created in the period. Under review / discarded / voided / waived ones are
  *                 not charges, so they are left out. Paid = paidAmount (capped at the amount); pending = the rest.
  *
@@ -663,8 +681,9 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
   const pageSize = Math.min(Math.max(parseInt(opts.pageSize, 10) || 5, 1), 50);
   const search = String(opts.search || "").trim().toLowerCase();
 
-  const [maintenance, penSnap] = await Promise.all([
+  const [maintenance, scheduledMaintenance, penSnap] = await Promise.all([
     loadMaintenanceExpenses(start, end),
+    loadScheduledMaintenance(start, end),
     db.collection("penalties").where("createdAt", ">=", start).where("createdAt", "<=", end).get(),
   ]);
 
@@ -695,18 +714,26 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
   // ── cars: maintenance per car, split recovered / absorbed ──
   const maintByCar = new Map();
   maintenance.forEach((m) => {
-    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0, jobs: 0 };
+    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0, jobs: 0, scheduled: 0, scheduledJobs: 0 };
     cur.total += m.amount;
     cur.jobs += 1;
+    maintByCar.set(m.carID, cur);
+  });
+  // Scheduled jobs (not done yet) ride along on the same car row, apart from the cost: they are what is expected, not what was spent
+  scheduledMaintenance.forEach((m) => {
+    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0, jobs: 0, scheduled: 0, scheduledJobs: 0 };
+    cur.scheduled += m.amount;
+    cur.scheduledJobs += 1;
     maintByCar.set(m.carID, cur);
   });
   const cars = [...maintByCar.values()]
     .map((c) => {
       const recovered = Math.min(c.total, collectedByCar[c.carID] || 0);
-      return { carID: c.carID, name: c.name, jobs: c.jobs, total: c.total, recovered, absorbed: c.total - recovered };
+      return { carID: c.carID, name: c.name, jobs: c.jobs, total: c.total, recovered, absorbed: c.total - recovered, scheduled: c.scheduled, scheduledJobs: c.scheduledJobs };
     })
-    .sort((a, b) => b.total - a.total);
+    .sort((a, b) => (b.total + b.scheduled) - (a.total + a.scheduled));
   const totalMaintenance = cars.reduce((s, c) => s + c.total, 0);
+  const scheduledTotal = cars.reduce((s, c) => s + c.scheduled, 0);
 
   // ── customers: one row per customer + car ──
   const pairRows = [...pairs.values()];
@@ -757,6 +784,7 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
     generatedAt: new Date().toISOString(),
     cards: {
       totalMaintenance,
+      scheduledMaintenance: scheduledTotal,
       penaltiesCollected,
       penaltiesPending,
       pendingCustomers: pendingUsers.size,
@@ -791,6 +819,8 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
  * penalty covered by the held deposit stays in the result without being paid twice.
  *
  *   Revenue = Rentals + Penalties - Returned - Deposits held back      Net = Revenue - Maintenance (Completed only) - PayMongo fees
+ *   That formula is read two ways: cards / series / cars by the day the money moved (Payments & Transactions), and
+ *   revenueBasis by the day the trip starts (Revenue & Expense): money for a trip that has not started is not revenue yet.
  *   Deposits held back = security deposits that came in minus those settled in the period: a held deposit is not revenue yet.
  *
  * PAYMENT RECORDS are the payments CREATED in the period, labelled with the Payments page's own derivePaymentStage().
@@ -900,9 +930,128 @@ export const generateMoneyReport = async (period, selection = {}) => {
     if (!f.userID) f.userID = b?.userID || null;
   });
 
-  const carIDs = uniq([...flows.map((f) => f.carID), ...maintenance.map((m) => m.carID), ...views.map((v) => v.carID)]);
+  // ── REVENUE BASIS: money counts as revenue on the day the TRIP STARTS, not the day it was paid ──
+  // The Payments & Transactions tab stays by the day the money moved, because that is what matches PayMongo.
+  // Revenue & Expense uses its own list, `revFlows`, built from the same entries with a different date:
+  //   - a booking that has not started yet (and is not cancelled): its money is received but NOT revenue yet (see `upcoming`)
+  //   - a booking that has started: its money counts on the trip start day, or on the day it was paid if that is later
+  //   - a cancelled booking: everything (what came in, what went back) counts on the cancellation day, so only what you
+  //     keep (a forfeited deposit, a gateway fee kept) stays and a refunded amount never becomes revenue
+  //   - penalties stay on the day they were paid
+  // The cancellation day is booking.cancelledAt when it exists, otherwise the booking's last update (what the cancel sets).
+  const nowDate = new Date();
+  const recDateOf = (b, date) => {
+    if (!b) return date;
+    if (b.status === "cancelled") return b.cancelledAt || b.updatedAt || b.tripStart || date;
+    if (!b.tripStart) return date;
+    if (b.tripStart > nowDate) return null;   // upcoming: not revenue yet
+    return b.tripStart > date ? b.tripStart : date;
+  };
+  const keysOfBooking = (doc) => uniq([doc.id, doc.data().bookingID]);
+  const [startingSnap, touchedSnap, upcomingSnap] = await Promise.all([
+    db.collection("bookings").where("startDateTime", ">=", start).where("startDateTime", "<=", end).get(),
+    db.collection("bookings").where("updatedAt", ">=", start).where("updatedAt", "<=", end).get(),   // cancelled bookings are found by their last update
+    db.collection("bookings").where("startDateTime", ">", nowDate).get(),
+  ]);
+  const cancelledInPeriod = touchedSnap.docs.filter((d) => normalizeBookingStatus(d.data().status) === "cancelled");
+  const relKeys = uniq([...startingSnap.docs, ...cancelledInPeriod].flatMap(keysOfBooking));
+  const upcomingDocs = upcomingSnap.docs.filter((d) => normalizeBookingStatus(d.data().status) !== "cancelled");
+  const upcomingKeys = uniq(upcomingDocs.flatMap(keysOfBooking));
+  const byBookingKeys = async (collectionName, keys) => {
+    const out = [];
+    for (const part of chunk(keys, 30)) {
+      const snap = await db.collection(collectionName).where("bookingID", "in", part).get();
+      snap.docs.forEach((d) => out.push({ id: d.id, ...d.data() }));
+    }
+    return out;
+  };
+  const [relEntries, relPayments, upcomingEntries] = await Promise.all([
+    byBookingKeys(ENTRY_COLLECTION, relKeys),
+    byBookingKeys("payments", relKeys),
+    byBookingKeys(ENTRY_COLLECTION, upcomingKeys),
+  ]);
+  const allEntries = new Map();
+  [...entries, ...relEntries].forEach((e) => { if (lower(e.status) === "success") allEntries.set(e.id, e); });
+  Object.assign(bookingMap, await loadBookingsByIDs([
+    ...[...allEntries.values()].map((e) => e.bookingID), ...relPayments.map((p) => p.bookingID),
+    ...startingSnap.docs.map((d) => d.id), ...cancelledInPeriod.map((d) => d.id), ...upcomingDocs.map((d) => d.id),
+  ].filter(Boolean)));
+
+  const revFlows = [];
+  allEntries.forEach((e) => {
+    const settled = toDate(e.settledAt);
+    const amount = num(e.amount);
+    if (!settled || amount <= 0) return;
+    const b = bookingMap[e.bookingID] || null;
+    let kind = null;
+    if (e.direction === "in") {
+      if (e.phase === "penalty") kind = "penalty";
+      else if (e.phase === "deposit" || e.phase === "balance") kind = "rental";
+    } else if (e.direction === "out") {
+      if (e.phase === "deposit_return") return;   // counted once, from the payment below
+      kind = e.phase === "discount" || e.phase === "discount_return" ? "discount_return" : "refund";
+    }
+    if (!kind) return;
+    const date = kind === "penalty" ? settled : recDateOf(b, settled);
+    if (!date || date < start || date > end) return;
+    revFlows.push({ kind, date, paymentID: e.paymentID || null, phase: e.phase || null, bookingID: e.bookingID || null, userID: e.userID || b?.userID || null, carID: b?.carID || null, amount });
+  });
+  const revPayByID = await loadPaymentsByIDs(revFlows.filter((f) => f.kind === "rental").map((f) => f.paymentID));
+  revFlows.forEach((f) => { if (f.kind === "rental") f.deposit = splitRentalEntry(f, revPayByID[f.paymentID] || null).deposit; });
+
+  // deposits settled (kept, returned, used or refunded): the same payments as above, plus the payments of bookings that start or are cancelled in the period
+  const revSettled = [];
+  const settledCandidates = new Map();
+  settledDocs.forEach((p) => settledCandidates.set(p.id, p));
+  relPayments.filter((p) => lower(p.depositStatus) === "settled").forEach((p) => settledCandidates.set(p.id, p));
+  settledCandidates.forEach((p) => {
+    const v = getDepositView(p);
+    const settledAt = toDate(p.depositSettledAt);
+    if (!v || v.status === "Held" || !settledAt) return;
+    const key = p.paymentID || p.originalId || p.id;
+    if (pendingDepositPaymentIDs.has(key)) return;   // still pending at PayMongo = treated as held
+    const b = bookingMap[p.bookingID] || null;
+    const date = recDateOf(b, settledAt);
+    if (!date || date < start || date > end) return;
+    const base = { date, paymentID: key, bookingID: p.bookingID || null, userID: p.userID || b?.userID || null, carID: b?.carID || null };
+    if (num(v.amount) > 0) revSettled.push({ ...base, amount: num(v.amount) });
+    if (num(v.returnedAmount) > 0) revFlows.push({ ...base, kind: "deposit_return", amount: num(v.returnedAmount) });
+  });
+
+  // money received for trips that have not started (a snapshot as of now, whatever period is selected): not revenue yet
+  const upcomingPayByID = await loadPaymentsByIDs(upcomingEntries.filter((e) => lower(e.status) === "success" && e.direction === "in" && (e.phase === "deposit" || e.phase === "balance")).map((e) => e.paymentID));
+  const upcomingByBooking = new Map();
+  upcomingEntries.filter((e) => lower(e.status) === "success" && num(e.amount) > 0).forEach((e) => {
+    let delta = 0;
+    if (e.direction === "in" && (e.phase === "deposit" || e.phase === "balance")) delta = num(e.amount) - splitRentalEntry({ amount: num(e.amount), phase: e.phase }, upcomingPayByID[e.paymentID] || null).deposit;
+    else if (e.direction === "out" && e.phase !== "deposit_return") delta = -num(e.amount);
+    if (delta) upcomingByBooking.set(e.bookingID, (upcomingByBooking.get(e.bookingID) || 0) + delta);
+  });
+  const upcomingItems = [...upcomingByBooking.entries()].map(([id, v]) => ({ bookingID: id, date: bookingMap[id]?.tripStart || null, carID: bookingMap[id]?.carID || null, userID: bookingMap[id]?.userID || null, amount: Math.max(0, v) })).filter((x) => x.amount > 0);
+  const upcoming = { total: upcomingItems.reduce((t, x) => t + x.amount, 0), count: upcomingItems.length };
+  // the part of it whose trip starts inside the selected period: drawn as the hatched "expected" bar on that trip's day (never added to revenue)
+  const expectedList = upcomingItems.filter((x) => x.date && x.date >= start && x.date <= end);
+
+  // EXPECTED EXPENSES (shown apart, never part of Expenses or Net until they happen):
+  //   - the PayMongo fee already charged on money paid for a trip that has not started: it moves into Expenses on that trip's start day
+  //   - maintenance still Scheduled: on its scheduled day
+  const FEE_PHASES = new Set(["deposit", "balance", "penalty"]);
+  const expectedCostList = [];
+  upcomingEntries.forEach((e) => {
+    if (lower(e.status) !== "success" || e.direction !== "in" || !FEE_PHASES.has(e.phase)) return;
+    if (e.source === "in_person" || (!e.source && lower(e.method) === "cash")) return;
+    if (e.transactionFee === null || e.transactionFee === undefined) return;
+    const b = bookingMap[e.bookingID] || null;
+    const date = b?.tripStart || null;
+    if (!date || date < start || date > end) return;
+    expectedCostList.push({ kind: "fee", date, amount: num(e.transactionFee), bookingID: e.bookingID || null, userID: b?.userID || null, carID: b?.carID || null });
+  });
+  const scheduledMaint = await loadScheduledMaintenance(start, end);
+  scheduledMaint.forEach((m) => expectedCostList.push({ kind: "maintenance", date: m.date, amount: m.amount, id: m.id, services: m.services, basis: m.basis, carID: m.carID }));
+
+  const carIDs = uniq([...flows.map((f) => f.carID), ...expectedList.map((x) => x.carID), ...expectedCostList.map((x) => x.carID), ...revFlows.map((f) => f.carID), ...revSettled.map((x) => x.carID), ...maintenance.map((m) => m.carID), ...views.map((v) => v.carID)]);
   approvedRefunds.forEach((r) => { r.userID = r.userID || bookingMap[r.bookingID]?.userID || null; });
-  const userIDs = uniq([...flows.map((f) => f.userID), ...views.map((v) => v.userID || v.p.userID), ...approvedRefunds.map((r) => r.userID), ...pendingPayouts.map((e) => e.userID), ...heldDue.map(userOfPay), ...creditDue.map(userOfPay)]);
+  const userIDs = uniq([...flows.map((f) => f.userID), ...expectedList.map((x) => x.userID), ...expectedCostList.map((x) => x.userID), ...revFlows.map((f) => f.userID), ...revSettled.map((x) => x.userID), ...views.map((v) => v.userID || v.p.userID), ...approvedRefunds.map((r) => r.userID), ...pendingPayouts.map((e) => e.userID), ...heldDue.map(userOfPay), ...creditDue.map(userOfPay)]);
   const [carNames, userNames] = await Promise.all([resolveVehicleNames(carIDs), resolveUserNames(userIDs)]);
   const customerOf = (id) => (id && userNames[id] && userNames[id] !== "—" ? userNames[id] : "Unknown");
 
@@ -969,6 +1118,21 @@ export const generateMoneyReport = async (period, selection = {}) => {
   });
   const feeRows = [...feeMap.values()].map(({ subs, ...row }) => ({ ...row, children: [...subs.values()].sort((a, b) => b.total - a.total) })).sort((a, b) => b.total - a.total);
   const fees = { rows: feeRows, total: feeRows.reduce((s, r) => s + r.total, 0), unrecorded: feeUnrecorded, gatewayReceived, bookingFees: feeOnBookings };
+  // The same online fees, dated like the revenue they belong to (trip start day, or the cancellation day), so Net compares matching things.
+  // A fee on money for a trip that has not started yet is left out until that trip starts.
+  const revFeeItems = [];
+  let revFeeUnrecorded = 0;
+  allEntries.forEach((e) => {
+    if (e.direction !== "in" || !PHASE_NAMES[e.phase]) return;
+    if (e.source === "in_person" || (!e.source && lower(e.method) === "cash")) return;
+    const settled = toDate(e.settledAt);
+    if (!settled) return;
+    const date = e.phase === "penalty" ? settled : recDateOf(bookingMap[e.bookingID] || null, settled);
+    if (!date || date < start || date > end) return;
+    if (e.transactionFee === null || e.transactionFee === undefined) { revFeeUnrecorded += 1; return; }
+    revFeeItems.push({ date, fee: num(e.transactionFee), bookingID: e.bookingID || null, carID: bookingMap[e.bookingID]?.carID || null });
+  });
+  const revFeesTotal = revFeeItems.reduce((t, x) => t + x.fee, 0);
 
   // ── totals ──
   const sum = (kind) => flows.filter((f) => f.kind === kind).reduce((s, f) => s + f.amount, 0);
@@ -984,83 +1148,118 @@ export const generateMoneyReport = async (period, selection = {}) => {
 
   // ── time series: days (week / month / day) or months (year), every bucket listed so the chart has no gaps ──
   const g = period === "yearly" ? "month" : "day";
-  const keyOf = (d) => (g === "month" ? `${d.getFullYear()}-${d.getMonth()}` : `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
-  const buckets = new Map();
-  for (let s = bucketStart(g, start); s <= end; s = g === "month" ? new Date(s.getFullYear(), s.getMonth() + 1, 1) : new Date(s.getFullYear(), s.getMonth(), s.getDate() + 1)) {
-    buckets.set(keyOf(s), {
-      key: keyOf(s), label: bucketLabel(g, s),
-      short: g === "month" ? monthShort(s.getMonth()) : period === "daily" ? `${monthShort(s.getMonth())} ${s.getDate()}` : String(s.getDate()),
-      rentals: 0, penalties: 0, refunds: 0, depositReturns: 0, discountReturns: 0, returned: 0, deposits: 0, maintenance: 0, fees: 0,
-    });
-  }
-  flows.forEach((f) => {
-    const b = buckets.get(keyOf(f.date));
-    if (!b) return;
-    if (f.kind === "rental") { b.rentals += f.amount; b.deposits += f.deposit || 0; }
-    else if (f.kind === "penalty") b.penalties += f.amount;
-    else {
-      // money that went back: kept apart so the report can show each one, and `returned` stays their total (Net is unchanged)
-      if (f.kind === "refund") b.refunds += f.amount;
-      else if (f.kind === "deposit_return") b.depositReturns += f.amount;
-      else if (f.kind === "discount_return") b.discountReturns += f.amount;
-      b.returned += f.amount;
+  const buildSeries = (flowList, settledList, feeList, expectedList = [], expectedCostList = []) => {
+    const keyOf = (d) => (g === "month" ? `${d.getFullYear()}-${d.getMonth()}` : `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+    const buckets = new Map();
+    for (let s = bucketStart(g, start); s <= end; s = g === "month" ? new Date(s.getFullYear(), s.getMonth() + 1, 1) : new Date(s.getFullYear(), s.getMonth(), s.getDate() + 1)) {
+      buckets.set(keyOf(s), {
+        key: keyOf(s), label: bucketLabel(g, s),
+        short: g === "month" ? monthShort(s.getMonth()) : period === "daily" ? `${monthShort(s.getMonth())} ${s.getDate()}` : String(s.getDate()),
+        rentals: 0, penalties: 0, refunds: 0, depositReturns: 0, discountReturns: 0, returned: 0, deposits: 0, maintenance: 0, fees: 0, expected: 0, expectedFees: 0, expectedMaintenance: 0, expectedExpenses: 0,
+      });
     }
-  });
-  depositSettled.forEach((x) => { const b = buckets.get(keyOf(x.date)); if (b) b.deposits -= x.amount; });   // `deposits` = held deposits that came in minus those settled that day
-  maintenance.forEach((m) => { const b = buckets.get(keyOf(new Date(m.date))); if (b) b.maintenance += m.amount; });
-  feeItems.forEach((x) => { const b = x.date && buckets.get(keyOf(x.date)); if (b) b.fees += x.fee; });   // PayMongo kept this on the online payments received that day
-  const series = [...buckets.values()].map((b) => ({ ...b, revenue: b.rentals + b.penalties - b.returned - b.deposits, expenses: b.maintenance + b.fees, net: b.rentals + b.penalties - b.returned - b.deposits - b.maintenance - b.fees }));
+    flowList.forEach((f) => {
+      const b = buckets.get(keyOf(f.date));
+      if (!b) return;
+      if (f.kind === "rental") { b.rentals += f.amount; b.deposits += f.deposit || 0; }
+      else if (f.kind === "penalty") b.penalties += f.amount;
+      else {
+        // money that went back: kept apart so the report can show each one, and `returned` stays their total (Net is unchanged)
+        if (f.kind === "refund") b.refunds += f.amount;
+        else if (f.kind === "deposit_return") b.depositReturns += f.amount;
+        else if (f.kind === "discount_return") b.discountReturns += f.amount;
+        b.returned += f.amount;
+      }
+    });
+    settledList.forEach((x) => { const b = buckets.get(keyOf(x.date)); if (b) b.deposits -= x.amount; });   // `deposits` = held deposits that came in minus those settled that day
+    maintenance.forEach((m) => { const b = buckets.get(keyOf(new Date(m.date))); if (b) b.maintenance += m.amount; });
+    expectedList.forEach((x) => { const b = buckets.get(keyOf(x.date)); if (b) b.expected += x.amount; });   // paid for trips that start this day: not revenue yet
+    expectedCostList.forEach((x) => {   // fees / scheduled maintenance that have not happened yet: apart from Expenses
+      const b = buckets.get(keyOf(x.date));
+      if (!b) return;
+      if (x.kind === "fee") b.expectedFees += x.amount; else b.expectedMaintenance += x.amount;
+      b.expectedExpenses += x.amount;
+    });
+    feeList.forEach((x) => { const b = x.date && buckets.get(keyOf(x.date)); if (b) b.fees += x.fee; });   // PayMongo kept this on the online payments received that day
+    return [...buckets.values()].map((b) => ({ ...b, revenue: b.rentals + b.penalties - b.returned - b.deposits, expenses: b.maintenance + b.fees, net: b.rentals + b.penalties - b.returned - b.deposits - b.maintenance - b.fees }));
+  };
+  const series = buildSeries(flows, depositSettled, feeItems);
+  const revSeries = buildSeries(revFlows, revSettled, revFeeItems, expectedList, expectedCostList);
 
   // ── per car: what it brought in (net of what went back) against what maintenance cost ──
-  const carMap = new Map();
-  const carRow = (carID) => {
-    const id = carID || "unknown";
-    if (!carMap.has(id)) carMap.set(id, { id, carID: carID || null, revenue: 0, maintenance: 0, fees: 0, bookings: new Map(), jobs: [] });
-    return carMap.get(id);
-  };
-  flows.forEach((f) => {
-    const row = carRow(f.carID);
-    row.revenue += signed(f);
-    const bid = f.bookingID || "unknown";
-    const cur = row.bookings.get(bid) || { bookingID: f.bookingID, userID: f.userID, net: 0, fees: 0 };
-    cur.net += signed(f);
-    row.bookings.set(bid, cur);
-  });
-  depositSettled.forEach((x) => {   // a settled deposit comes back into the car's revenue (a returned one cancels what was left out)
-    const row = carRow(x.carID);
-    row.revenue += x.amount;
-    const bid = x.bookingID || "unknown";
-    const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
-    cur.net += x.amount;
-    row.bookings.set(bid, cur);
-  });
-  feeItems.forEach((x) => {
-    const row = carRow(x.carID);
-    row.fees += x.fee;
-    const bid = x.bookingID || "unknown";
-    const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: null, net: 0, fees: 0 };
-    cur.fees += x.fee;
-    row.bookings.set(bid, cur);
-  });
-  maintenance.forEach((m) => {
-    const row = carRow(m.carID);
-    row.maintenance += m.amount;
-    row.jobs.push(m);
-  });
-  const cars = [...carMap.values()].map((r) => {
-    const children = [
-      ...[...r.bookings.values()].sort((a, b) => b.net - a.net).map((b) => ({
-        id: `b:${b.bookingID}`, name: `${b.bookingID || "Booking"} · ${customerOf(b.userID)}`, revenue: b.net, maintenance: 0, fees: b.fees || 0, net: b.net - (b.fees || 0),
-      })),
-      ...r.jobs.sort((a, b) => b.amount - a.amount).map((m) => ({
-        id: `m:${m.id}`, name: `Maintenance · ${m.services || m.basis || "Service"}`, revenue: 0, maintenance: m.amount, fees: 0, net: -m.amount,
-      })),
-    ];
-    return {
-      id: r.id, name: r.carID ? (carNames[r.carID] || "Unknown Vehicle") : "Unknown Vehicle",
-      revenue: r.revenue, maintenance: r.maintenance, fees: r.fees, net: r.revenue - r.maintenance - r.fees, bookings: r.bookings.size, children,
+  const buildCars = (flowList, settledList, feeList, expectedList = [], expectedCostList = []) => {
+    const carMap = new Map();
+    const carRow = (carID) => {
+      const id = carID || "unknown";
+      if (!carMap.has(id)) carMap.set(id, { id, carID: carID || null, revenue: 0, maintenance: 0, fees: 0, expected: 0, expectedExpenses: 0, bookings: new Map(), jobs: [], scheduledJobs: [] });
+      return carMap.get(id);
     };
-  });
+    flowList.forEach((f) => {
+      const row = carRow(f.carID);
+      row.revenue += signed(f);
+      const bid = f.bookingID || "unknown";
+      const cur = row.bookings.get(bid) || { bookingID: f.bookingID, userID: f.userID, net: 0, fees: 0 };
+      cur.net += signed(f);
+      row.bookings.set(bid, cur);
+    });
+    settledList.forEach((x) => {   // a settled deposit comes back into the car's revenue (a returned one cancels what was left out)
+      const row = carRow(x.carID);
+      row.revenue += x.amount;
+      const bid = x.bookingID || "unknown";
+      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
+      cur.net += x.amount;
+      row.bookings.set(bid, cur);
+    });
+    feeList.forEach((x) => {
+      const row = carRow(x.carID);
+      row.fees += x.fee;
+      const bid = x.bookingID || "unknown";
+      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: null, net: 0, fees: 0 };
+      cur.fees += x.fee;
+      row.bookings.set(bid, cur);
+    });
+    expectedList.forEach((x) => {   // paid for a trip that starts in the period but has not started yet: shown apart, never part of revenue
+      const row = carRow(x.carID);
+      row.expected += x.amount;
+      const bid = x.bookingID || "unknown";
+      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
+      cur.expected = (cur.expected || 0) + x.amount;
+      row.bookings.set(bid, cur);
+    });
+    expectedCostList.forEach((x) => {   // expected PayMongo fee on an upcoming booking, or a Scheduled maintenance job
+      const row = carRow(x.carID);
+      row.expectedExpenses += x.amount;
+      if (x.kind === "maintenance") { row.scheduledJobs.push(x); return; }
+      const bid = x.bookingID || "unknown";
+      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
+      cur.expectedExpenses = (cur.expectedExpenses || 0) + x.amount;
+      row.bookings.set(bid, cur);
+    });
+    maintenance.forEach((m) => {
+      const row = carRow(m.carID);
+      row.maintenance += m.amount;
+      row.jobs.push(m);
+    });
+    return [...carMap.values()].map((r) => {
+      const children = [
+        ...[...r.bookings.values()].sort((a, b) => b.net - a.net).map((b) => ({
+          id: `b:${b.bookingID}`, name: `${b.bookingID || "Booking"} · ${customerOf(b.userID)}`, revenue: b.net, maintenance: 0, fees: b.fees || 0, expected: b.expected || 0, expectedExpenses: b.expectedExpenses || 0, net: b.net - (b.fees || 0),
+        })),
+        ...r.scheduledJobs.sort((a, b) => b.amount - a.amount).map((m) => ({
+          id: `s:${m.id}`, name: `Scheduled maintenance · ${m.services || m.basis || "Service"}`, revenue: 0, maintenance: 0, fees: 0, expected: 0, expectedExpenses: m.amount, net: 0,
+        })),
+        ...r.jobs.sort((a, b) => b.amount - a.amount).map((m) => ({
+          id: `m:${m.id}`, name: `Maintenance · ${m.services || m.basis || "Service"}`, revenue: 0, maintenance: m.amount, fees: 0, net: -m.amount,
+        })),
+      ];
+      return {
+        id: r.id, name: r.carID ? (carNames[r.carID] || "Unknown Vehicle") : "Unknown Vehicle",
+        revenue: r.revenue, maintenance: r.maintenance, fees: r.fees, expected: r.expected, expectedExpenses: r.expectedExpenses, net: r.revenue - r.maintenance - r.fees, bookings: r.bookings.size, children,
+      };
+    });
+  };
+  const cars = buildCars(flows, depositSettled, feeItems);
+  const revCars = buildCars(revFlows, revSettled, revFeeItems, expectedList, expectedCostList);
 
   // ── money in by method (opens into online / in person), money out by type ──
   const methodMap = new Map();
@@ -1208,9 +1407,32 @@ export const generateMoneyReport = async (period, selection = {}) => {
     .map((m) => ({ ...m, barTotal: m.total + m.unpaid, children: m.children.map((c) => ({ ...c, unpaid: c.unpaid || 0, barTotal: c.barTotal ?? c.total })) }))
     .sort((a, b) => b.total - a.total || b.unpaid - a.unpaid);
 
+  // ── Revenue & Expense on the trip-start basis (see REVENUE BASIS above) ──
+  const rsum = (kind) => revFlows.filter((f) => f.kind === kind).reduce((t, f) => t + f.amount, 0);
+  const rRentals = rsum("rental"), rPenalties = rsum("penalty");
+  const rRefunds = rsum("refund"), rDepositReturns = rsum("deposit_return"), rDiscountReturns = rsum("discount_return");
+  const rReturned = rRefunds + rDepositReturns + rDiscountReturns;
+  const rDepositHeld = revFlows.reduce((t, f) => t + (f.kind === "rental" ? (f.deposit || 0) : 0), 0) - revSettled.reduce((t, x) => t + x.amount, 0);
+  const rRevenue = rRentals + rPenalties - rReturned - rDepositHeld;
+  const revenueBasis = {
+    cards: {
+      rentals: rRentals, penalties: rPenalties, refunds: rRefunds, depositReturns: rDepositReturns, discountReturns: rDiscountReturns, returned: rReturned,
+      depositsHeldBack: rDepositHeld, revenue: rRevenue, moneyIn: rRentals + rPenalties,
+      maintenance: maintenanceTotal, gatewayFees: revFeesTotal, gatewayFeesUnrecorded: revFeeUnrecorded,
+      net: rRevenue - maintenanceTotal - revFeesTotal,
+      upcomingReceived: upcoming.total, upcomingCount: upcoming.count,
+      expectedInPeriod: expectedList.reduce((t, x) => t + x.amount, 0),
+      expectedFeesInPeriod: expectedCostList.filter((x) => x.kind === "fee").reduce((t, x) => t + x.amount, 0),
+      expectedMaintenanceInPeriod: expectedCostList.filter((x) => x.kind === "maintenance").reduce((t, x) => t + x.amount, 0),
+    },
+    series: revSeries,
+    cars: revCars,
+  };
+
   return {
     period, label,
     generatedAt: new Date().toISOString(),
+    revenueBasis,
     cards: {
       rentals, penalties, refunds, depositReturns, discountReturns, returned,
       revenue, maintenance: maintenanceTotal, gatewayFees: fees.total, gatewayFeesUnrecorded: fees.unrecorded, possibleReturn: possible.total, depositsHeldBack: depositHeldChange, net: revenue - maintenanceTotal - fees.total,
