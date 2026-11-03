@@ -1,0 +1,934 @@
+#include <HardwareSerial.h>
+#include <LittleFS.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <ArduinoJson.h>
+
+// ===================================================
+//   SIM7600G-H — CELLULAR + BUILT-IN GNSS
+//   Replaces: NEO6M/TinyGPS++ (GPS) and WiFi (networking)
+//
+//   Pin mapping (matches latest_sim_test.ino, no conflict with LCD I2C 21/22):
+//     TXD    -> ESP32 GPIO 26 (RX)
+//     RXD    -> ESP32 GPIO 27 (TX)
+//     PWRKEY -> ESP32 GPIO 4
+//     GND    -> common ground
+//     VIN    -> MP1584 buck output (~4V)
+//
+//   NOTE: GNSS antenna is SEPARATE from the cellular antenna — both
+//   need to be connected or location will never get a fix.
+// ===================================================
+HardwareSerial simSerial(1);
+#define SIM_RX     26
+#define SIM_TX     27
+#define SIM_PWRKEY 4
+#define SIM_BAUD   115200
+
+bool DEBUG_RAW_BYTES = false;  // set true if you need the raw byte dump like in the test sketch
+
+// ===== LCD (status display) =====
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+bool lcdOn = true;
+
+const char* GPS_DEVICE_ID = 
+const char* serverBaseURL = 
+const char* APN = "internet.globe.com.ph";  // change to your carrier APN
+
+// ===== OFFLINE STORAGE =====
+const String OFFLINE_FILE = "/gps_offline.txt";
+const float STORAGE_LIMIT = 90.0f;
+
+// ===== TIMING =====
+const unsigned long SEND_INTERVAL_NORMAL = 10000;
+const unsigned long SEND_INTERVAL_OFFLINE = 30000;
+const unsigned long SIM_RETRY_INTERVAL = 15000;
+const unsigned long FLUSH_WINDOW = 15000;
+const unsigned long FLUSH_PAUSE = 10000;
+const unsigned long HEARTBEAT_INTERVAL = 10000;
+const unsigned long GNSS_POLL_INTERVAL = 5000;
+const int SIM_FAIL_THRESHOLD = 3;
+
+// FTM "sats seen" sampling — only runs while there's no fix yet.
+const unsigned long FTM_SAMPLE_INTERVAL = 15000;  // how often to sample
+const unsigned long FTM_SAMPLE_DURATION = 2500;   // how long to listen to the NMEA stream per sample
+
+// ===== STATE =====
+bool littleFSok = false;
+bool simReady = false;
+bool gpsFixAnnounced = false;
+bool isFlushing = false;
+
+unsigned long lastSend = 0;
+unsigned long lastSimRetry = 0;
+unsigned long lastHeartbeat = 0;
+unsigned long lastGNSSPoll = 0;
+unsigned long flushWindowStart = 0;
+unsigned long flushPauseStart = 0;
+bool inFlushPause = false;
+
+unsigned long sendInterval = SEND_INTERVAL_NORMAL;
+
+// ===== GNSS STATE (replaces TinyGPS++ / gps.* calls) =====
+bool gnssFixValid = false;
+double gnssLat = 0.0, gnssLng = 0.0;
+float gnssSpeedKmph = 0.0;
+int gnssYear = 0, gnssMonth = 0, gnssDay = 0;
+int gnssHour = 0, gnssMin = 0, gnssSec = 0;
+int gnssSatsUsed = -1, gnssSatsView = -1;
+unsigned long lastGNSSByte = 0;
+
+// Satellites currently visible, sampled via a short AT+CGPSFTM burst.
+// -1 = no sample taken yet.
+int gnssSatsSeen = -1;
+unsigned long lastFTMSample = 0;
+
+int simFailCount = 0;
+bool simFailedShown = false;
+bool offlineAnnounced = false;
+
+unsigned long transientUntil = 0;
+bool pendingLcdOff = false;
+
+enum DeviceState { DEV_NONE = -1, DEV_SIM_CONNECTING, DEV_READY, DEV_OFFLINE };
+DeviceState lastDeviceState = DEV_NONE;
+
+bool transientActive() {
+  return millis() < transientUntil;
+}
+
+// showGPSStatusScreen() only redraws when a tracked value changes, to avoid
+// flicker. But a transient message (e.g. "SIM Connected!") physically
+// overwrites the screen without changing those tracked values — so once it
+// expires, nothing would trigger a redraw and the transient text would be
+// stuck on screen forever. This flag forces exactly one redraw right after
+// any transient ends.
+bool forceGPSScreenRedraw = true;
+
+void lcdTransient(const char* line1, const char* line2, unsigned long durationMs);
+
+// ===================================================
+//   LCD HELPERS
+// ===================================================
+void lcdPrint(const char* line1, const char* line2 = "") {
+  if (!lcdOn) {
+    lcd.backlight();
+    lcdOn = true;
+  }
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1);
+  lcd.setCursor(0, 1);
+  lcd.print(line2);
+}
+
+void lcdOff() {
+  lcd.noBacklight();
+  lcdOn = false;
+}
+
+void lcdTransient(const char* line1, const char* line2, unsigned long durationMs) {
+  lcdPrint(line1, line2);
+  transientUntil = millis() + durationMs;
+  forceGPSScreenRedraw = true;  // make sure the idle screen redraws once this expires
+}
+
+// ===================================================
+//   NO-OP STUB — no separate continuous GPS UART anymore.
+//   GNSS is polled via AT+CGPSINFO on the same UART as cellular AT commands.
+// ===================================================
+void drainGPS() {
+  // intentionally empty — kept so nothing needs renaming
+}
+
+bool hasGPSFix() { return gnssFixValid; }
+int satellitesUsed() { return gnssSatsUsed; }
+int satellitesScanned() { return gnssSatsView; }
+
+// ===================================================
+//   SIM — SEND AT COMMAND (with optional raw debug, from tested sketch)
+// ===================================================
+String sendAT(String cmd, unsigned long timeout = 3000) {
+  while (simSerial.available()) simSerial.read();  // flush stale bytes
+
+  unsigned long sendTime = millis();
+  simSerial.println(cmd);
+
+  String response = "";
+  unsigned long start = millis();
+  while (millis() - start < timeout) {
+    while (simSerial.available()) {
+      char c = simSerial.read();
+      response += c;
+    }
+    if (response.indexOf("OK") != -1 || response.indexOf("ERROR") != -1) break;
+  }
+
+  if (DEBUG_RAW_BYTES) {
+    unsigned long elapsed = millis() - sendTime;
+    Serial.print("[SIM AT] "); Serial.print(cmd);
+    Serial.print(" ("); Serial.print(elapsed); Serial.print("ms) -> ");
+    Serial.println(response);
+  }
+
+  return response;
+}
+
+// ===================================================
+//   WAIT FOR BOOT URC — listens for "RDY" / "+CPIN: READY"
+//   instead of guessing a fixed delay
+// ===================================================
+bool waitForBootURC(unsigned long timeoutMs) {
+  String buf = "";
+  unsigned long start = millis();
+  bool sawRDY = false;
+  bool sawCPINReady = false;
+
+  Serial.println("[BOOT] Listening for boot URC...");
+
+  while (millis() - start < timeoutMs) {
+    while (simSerial.available()) {
+      char c = simSerial.read();
+      buf += c;
+
+      if (!sawRDY && buf.indexOf("RDY") != -1) {
+        sawRDY = true;
+        Serial.println("[BOOT] Got RDY.");
+      }
+      if (!sawCPINReady && buf.indexOf("+CPIN: READY") != -1) {
+        sawCPINReady = true;
+        Serial.println("[BOOT] Got +CPIN: READY.");
+      }
+      if (buf.length() > 500) buf.remove(0, 250);
+    }
+
+    if (sawRDY && sawCPINReady) {
+      Serial.print("[BOOT] Module boot confirmed after ");
+      Serial.print(millis() - start);
+      Serial.println("ms.");
+      delay(300);
+      return true;
+    }
+  }
+
+  Serial.println("[BOOT][WARN] Timed out waiting for boot URC.");
+  if (sawRDY || sawCPINReady) {
+    Serial.println("[BOOT][WARN] Partial boot signal seen — continuing anyway.");
+    return true;
+  }
+  Serial.println("[BOOT][WARN] No boot URC at all. Module may be browned-out or miswired.");
+  return false;
+}
+
+// ===================================================
+//   POWER ON SEQUENCE — PWRKEY LOW ~1.2s, then wait for real boot signal
+// ===================================================
+void powerOnSIM() {
+  Serial.println("[PWRKEY] Powering on SIM7600G-H...");
+  pinMode(SIM_PWRKEY, OUTPUT);
+  digitalWrite(SIM_PWRKEY, HIGH);
+  delay(100);
+  digitalWrite(SIM_PWRKEY, LOW);
+  delay(1200);
+  digitalWrite(SIM_PWRKEY, HIGH);
+  waitForBootURC(20000);
+}
+
+bool moduleAlive() {
+  String r = sendAT("AT", 2000);
+  return (r.indexOf("OK") != -1);
+}
+
+// ===================================================
+//   ENABLE GNSS — independent of cellular network status.
+//   GPS and cellular are separate subsystems on this module; GNSS must be
+//   started on its own, not gated behind network registration succeeding.
+//   Called once at boot, and again any time the module is power-cycled
+//   (PWRKEY reset via recoverModule() wipes this state too).
+// ===================================================
+void enableGNSS() {
+  Serial.println("[GNSS] Enabling GPS engine (AT+CGPS=1)...");
+  sendAT("AT+CGPS=1", 2000);
+}
+
+// ===================================================
+//   RECOVER MODULE IF IT WENT SILENT/UNRESPONSIVE
+// ===================================================
+bool recoverModule() {
+  Serial.println("[RECOVERY] Module unresponsive. Checking with plain AT...");
+
+  if (moduleAlive()) {
+    Serial.println("[RECOVERY] Module still alive — just slow to answer.");
+    return true;
+  }
+
+  Serial.println("[RECOVERY] No response. Re-running PWRKEY boot sequence...");
+  powerOnSIM();
+
+  if (!moduleAlive()) {
+    Serial.println("[RECOVERY] Still no response after PWRKEY cycle. Power/wiring issue likely.");
+    return false;
+  }
+
+  Serial.println("[RECOVERY] Module responding again. Re-applying config...");
+  sendAT("ATE0");
+  enableGNSS();  // module was just power-cycled — GNSS state is reset, must re-enable
+  return true;
+}
+
+// ===================================================
+//   SIM — INITIALIZE (real AT-command version, replaces WiFi placeholder)
+// ===================================================
+bool initSIM() {
+  Serial.println("[SIM] Checking module...");
+
+  if (!moduleAlive()) {
+    bool recovered = recoverModule();
+    if (!recovered) return false;
+  }
+
+  sendAT("ATE0");
+  sendAT("AT+CMEE=2");
+
+  String r = sendAT("AT+CPIN?", 5000);
+  if (r.indexOf("READY") == -1) {
+    Serial.println("[SIM] SIM card not ready");
+    return false;
+  }
+
+  // Network registration — same tolerant loop as the test sketch,
+  // but bounded to fit the 15s retry cadence used in production.
+  bool registered = false;
+  int consecutiveEmpty = 0;
+  for (int i = 0; i < 5; i++) {
+    r = sendAT("AT+CREG?", 3000);
+    if (r.length() == 0) {
+      consecutiveEmpty++;
+      if (consecutiveEmpty >= 2) {
+        if (!recoverModule()) return false;
+        consecutiveEmpty = 0;
+      }
+    } else {
+      consecutiveEmpty = 0;
+      if (r.indexOf(",1") != -1 || r.indexOf(",5") != -1) {
+        registered = true;
+        break;
+      }
+    }
+    delay(1000);
+  }
+
+  if (!registered) {
+    Serial.println("[SIM] Not registered on network yet");
+    return false;
+  }
+
+  sendAT("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"");
+  r = sendAT("AT+CGACT=1,1", 10000);
+  if (r.indexOf("OK") == -1) {
+    Serial.println("[SIM] PDP context activation failed");
+    return false;
+  }
+
+  Serial.println("[SIM] Ready!");
+  return true;
+}
+
+// ===================================================
+//   GNSS — POLL AT+CGPSINFO AND PARSE
+//   (This firmware doesn't support AT+CGNSINF — AT+CGPSINFO is the
+//   confirmed-working command, format differs: lat/lng in ddmm.mmmmmm +
+//   N/S/E/W letters, date is ddmmyy. No satellite count is provided by
+//   this command, so satellitesUsed()/Scanned() will read -1 while using it.)
+//
+//   Response: +CGPSINFO: <lat>,<N/S>,<lon>,<E/W>,<ddmmyy>,<hhmmss.s>,<alt>,<speed>,<course>
+//   No fix yet: +CGPSINFO: ,,,,,,,,
+// ===================================================
+bool updateGNSS() {
+  String r = sendAT("AT+CGPSINFO", 2000);
+  int idx = r.indexOf("+CGPSINFO:");
+  if (idx == -1) return gnssFixValid;
+
+  String data = r.substring(idx + 10);
+  data.trim();
+
+  String fields[9];
+  int fieldCount = 0;
+  int start = 0;
+  for (int i = 0; i < (int)data.length() && fieldCount < 8; i++) {
+    if (data[i] == ',') {
+      fields[fieldCount++] = data.substring(start, i);
+      start = i + 1;
+    }
+  }
+  fields[fieldCount++] = data.substring(start);
+
+  lastGNSSByte = millis();  // we got a response either way — module is alive and polling
+
+  // No fix yet: latitude field is empty
+  if (fieldCount < 4 || fields[0].length() == 0) {
+    gnssFixValid = false;
+    return false;
+  }
+
+  gnssFixValid = true;
+
+  // Latitude: ddmm.mmmmmm -> decimal degrees
+  double rawLat = fields[0].toFloat();
+  int latDeg = (int)(rawLat / 100);
+  double latMin = rawLat - (latDeg * 100);
+  double lat = latDeg + (latMin / 60.0);
+  if (fields[1] == "S") lat = -lat;
+
+  // Longitude: dddmm.mmmmmm -> decimal degrees
+  double rawLon = fields[2].toFloat();
+  int lonDeg = (int)(rawLon / 100);
+  double lonMin = rawLon - (lonDeg * 100);
+  double lon = lonDeg + (lonMin / 60.0);
+  if (fields[3] == "W") lon = -lon;
+
+  gnssLat = lat;
+  gnssLng = lon;
+
+  // Date: ddmmyy
+  if (fieldCount > 4 && fields[4].length() >= 6) {
+    gnssDay   = fields[4].substring(0, 2).toInt();
+    gnssMonth = fields[4].substring(2, 4).toInt();
+    gnssYear  = 2000 + fields[4].substring(4, 6).toInt();
+  }
+
+  // Time: hhmmss.s
+  if (fieldCount > 5 && fields[5].length() >= 6) {
+    gnssHour = fields[5].substring(0, 2).toInt();
+    gnssMin  = fields[5].substring(2, 4).toInt();
+    gnssSec  = fields[5].substring(4, 6).toInt();
+  }
+
+  if (fieldCount > 7) gnssSpeedKmph = fields[7].toFloat();
+
+  // This command doesn't report satellite counts — leave at -1 (unavailable)
+  gnssSatsUsed = -1;
+  gnssSatsView = -1;
+
+  return true;
+}
+
+// ===================================================
+//   FTM SATELLITE SAMPLING — AT+CGPSFTM=1 streams raw NMEA
+//   ($GPGSV/$GLGSV/$BDGSV etc.) directly on the same UART.
+//   We only run it in short bursts, only while there's no fix yet, and
+//   fully turn it back off before returning — so it can never collide
+//   with the request/response AT commands used for cellular or CGPSINFO.
+//
+//   Each GSV sentence lists satellites as PRN,SNR pairs after the
+//   sentence header, so satellite count = (number of comma-separated
+//   fields after the header) / 2.
+// ===================================================
+int countSatsInGSVLine(String line) {
+  int star = line.indexOf('*');
+  if (star != -1) line = line.substring(0, star);
+
+  int commaCount = 0;
+  for (int i = 0; i < (int)line.length(); i++) {
+    if (line[i] == ',') commaCount++;
+  }
+  if (commaCount <= 0) return 0;
+  return commaCount / 2;  // commaCount includes the header comma before the first pair
+}
+
+void sampleSatellitesFTM() {
+  Serial.println("[FTM] Sampling satellites in view...");
+  while (simSerial.available()) simSerial.read();  // flush stale bytes
+  simSerial.println("AT+CGPSFTM=1");
+
+  int gpsSats = 0, glSats = 0, bdSats = 0;
+  String line = "";
+  unsigned long start = millis();
+
+  while (millis() - start < FTM_SAMPLE_DURATION) {
+    while (simSerial.available()) {
+      char c = simSerial.read();
+      if (c == '\n') {
+        line.trim();
+        if (line.startsWith("$GPGSV")) gpsSats = max(gpsSats, countSatsInGSVLine(line));
+        else if (line.startsWith("$GLGSV")) glSats = max(glSats, countSatsInGSVLine(line));
+        else if (line.startsWith("$BDGSV")) bdSats = max(bdSats, countSatsInGSVLine(line));
+        line = "";
+      } else if (c != '\r') {
+        line += c;
+      }
+    }
+  }
+
+  // Turn FTM back off and swallow the OK/echo so it doesn't bleed into
+  // the next sendAT() call.
+  simSerial.println("AT+CGPSFTM=0");
+  unsigned long stopStart = millis();
+  while (millis() - stopStart < 500) {
+    while (simSerial.available()) simSerial.read();
+  }
+
+  gnssSatsSeen = gpsSats + glSats + bdSats;
+  Serial.printf("[FTM] Sats seen — GPS:%d GLONASS:%d BeiDou:%d Total:%d\n",
+                gpsSats, glSats, bdSats, gnssSatsSeen);
+}
+
+// ===================================================
+//   BUILD PAYLOAD
+// ===================================================
+String buildPayload(bool isOffline) {
+  StaticJsonDocument<256> doc;
+  doc["device_id"] = GPS_DEVICE_ID;
+  doc["lat"] = serialized(String(gnssLat, 6));
+  doc["lng"] = serialized(String(gnssLng, 6));
+
+  float speed = gnssSpeedKmph;
+  if (speed < 3.0) speed = 0.0;
+  doc["speed"] = speed;
+
+  char dateBuf[12], timeBuf[10];
+  snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", gnssYear, gnssMonth, gnssDay);
+  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", gnssHour, gnssMin, gnssSec);
+
+  doc["date"] = dateBuf;
+  doc["time"] = timeBuf;
+  doc["offline"] = isOffline;
+
+  String output;
+  serializeJson(doc, output);
+  return output;
+}
+
+// ===================================================
+//   SIM — HTTP POST (real AT-command version, using tested CSSLCFG SSL setup)
+// ===================================================
+bool sendToServer(String payload) {
+  String fullUrl = String(serverBaseURL);
+  String r;
+
+  sendAT("AT+HTTPTERM", 2000);
+  delay(300);
+
+  r = sendAT("AT+HTTPINIT", 5000);
+  if (r.indexOf("OK") == -1) return false;
+
+  sendAT("AT+HTTPPARA=\"CID\",1");
+
+  bool isHTTPS = fullUrl.startsWith("https://");
+  if (isHTTPS) {
+    sendAT("AT+CSSLCFG=\"sslversion\",0,4");
+    sendAT("AT+CSSLCFG=\"enableSNI\",0,1");
+  }
+
+  r = sendAT("AT+HTTPPARA=\"URL\",\"" + fullUrl + "\"");
+  if (r.indexOf("OK") == -1) {
+    sendAT("AT+HTTPTERM");
+    return false;
+  }
+
+  sendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+
+  String dataCmd = "AT+HTTPDATA=" + String(payload.length()) + ",10000";
+  r = sendAT(dataCmd, 5000);
+  if (r.indexOf("DOWNLOAD") == -1) {
+    sendAT("AT+HTTPTERM");
+    return false;
+  }
+
+  simSerial.print(payload);
+  delay(1000);
+  while (simSerial.available()) simSerial.read();  // flush echo
+
+  simSerial.println("AT+HTTPACTION=1");
+  String actionResp = "";
+  unsigned long actionStart = millis();
+  while (millis() - actionStart < 20000) {
+    while (simSerial.available()) actionResp += (char)simSerial.read();
+    if (actionResp.indexOf("+HTTPACTION:") != -1) break;
+  }
+
+  sendAT("AT+HTTPTERM");
+
+  int statusCode = -1;
+  int idx = actionResp.indexOf("+HTTPACTION:");
+  if (idx != -1) {
+    int c1 = actionResp.indexOf(',', idx);
+    int c2 = actionResp.indexOf(',', c1 + 1);
+    if (c1 != -1 && c2 != -1) statusCode = actionResp.substring(c1 + 1, c2).toInt();
+  }
+
+  Serial.printf("[HTTP] Status code: %d\n", statusCode);
+  return (statusCode == 200 || statusCode == 201);
+}
+
+// ===================================================
+//   SAVE OFFLINE
+// ===================================================
+void saveOffline(String payload) {
+  if (!littleFSok) {
+    Serial.println("[FS] LittleFS not available!");
+    return;
+  }
+
+  float pct = (float)LittleFS.usedBytes() / LittleFS.totalBytes() * 100.0f;
+  if (pct >= STORAGE_LIMIT) {
+    Serial.printf("[FS] Storage full (%.1f%%) - keeping existing data, discarding new\n", pct);
+    return;
+  }
+
+  File f = LittleFS.open(OFFLINE_FILE, "a");
+  if (!f) {
+    Serial.println("[FS] Cannot open offline file!");
+    return;
+  }
+  f.println(payload);
+  f.close();
+
+  pct = (float)LittleFS.usedBytes() / LittleFS.totalBytes() * 100.0f;
+  Serial.printf("[FS] Saved offline - %.1f%% used\n", pct);
+}
+
+// ===================================================
+//   FLUSH OFFLINE - called in loop, time-windowed
+// ===================================================
+bool flushOfflineData() {
+  if (!littleFSok) return true;
+  if (!LittleFS.exists(OFFLINE_FILE)) return true;
+
+  if (inFlushPause) {
+    if (millis() - flushPauseStart >= FLUSH_PAUSE) {
+      inFlushPause = false;
+      flushWindowStart = millis();
+      Serial.println("[FS] Resuming flush window...");
+    }
+    return false;
+  }
+
+  if (flushWindowStart == 0) {
+    flushWindowStart = millis();
+    Serial.println("[FS] Starting flush window (15s)...");
+  }
+
+  if (millis() - flushWindowStart >= FLUSH_WINDOW) {
+    Serial.println("[FS] Flush window done - pausing for live data...");
+    inFlushPause = true;
+    flushPauseStart = millis();
+    flushWindowStart = 0;
+    return false;
+  }
+
+  File f = LittleFS.open(OFFLINE_FILE, "r");
+  if (!f) return true;
+
+  String remaining = "";
+  bool sentOne = false;
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+
+    if (!sentOne) {
+      bool ok = sendToServer(line);
+      if (ok) {
+        sentOne = true;
+        Serial.println("[FS] Flushed 1 record");
+      } else {
+        remaining += line + "\n";
+        Serial.println("[FS] Flush send failed - connection lost, will retry next window");
+        while (f.available()) {
+          String rest = f.readStringUntil('\n');
+          rest.trim();
+          if (rest.length() > 0) remaining += rest + "\n";
+        }
+        simReady = false;
+        simFailCount = 0;
+        simFailedShown = false;
+        offlineAnnounced = false;
+        lastDeviceState = DEV_NONE;
+        lastSimRetry = millis();
+        break;
+      }
+    } else {
+      remaining += line + "\n";
+    }
+  }
+  f.close();
+
+  if (remaining.length() == 0) {
+    LittleFS.remove(OFFLINE_FILE);
+    Serial.println("[FS] All offline records flushed!");
+    flushWindowStart = 0;
+    inFlushPause = false;
+    return true;
+  } else {
+    File fw = LittleFS.open(OFFLINE_FILE, "w");
+    if (fw) {
+      fw.print(remaining);
+      fw.close();
+    }
+  }
+
+  return false;
+}
+
+// ===================================================
+//   HEARTBEAT
+// ===================================================
+void printHeartbeat() {
+  Serial.println("-------- HEARTBEAT --------");
+  Serial.printf("  SIM      : %s (fails: %d)\n", simReady ? "Ready" : "Not ready", simFailCount);
+  Serial.printf("  GPS fix  : %s\n", hasGPSFix() ? "YES" : "NO");
+  Serial.printf("  Interval : %lus\n", sendInterval / 1000);
+  Serial.printf("  Storage  : %d bytes used\n", littleFSok ? (int)LittleFS.usedBytes() : -1);
+  Serial.println("---------------------------");
+}
+
+// ===================================================
+//   DISPLAY - idle screen while no GPS fix yet
+// ===================================================
+void showGPSStatusScreen() {
+  bool gotData = (millis() - lastGNSSByte) < (GNSS_POLL_INTERVAL * 2);
+
+  static bool lastGotData = true;
+  static int lastShownSats = -2;  // force first draw
+
+  if (gotData != lastGotData || gnssSatsSeen != lastShownSats || forceGPSScreenRedraw) {
+    lastGotData = gotData;
+    lastShownSats = gnssSatsSeen;
+    forceGPSScreenRedraw = false;
+
+    // AT+CGPSINFO (used for the actual fix) doesn't report satellite counts,
+    // so "sats seen" comes from periodic short AT+CGPSFTM bursts instead
+    // (see sampleSatellitesFTM()).
+    if (!gotData) {
+      lcdPrint("GPS: NO DATA", "Check module");
+    } else if (gnssSatsSeen >= 0) {
+      char line2[17];
+      snprintf(line2, sizeof(line2), "Sats seen: %d", gnssSatsSeen);
+      lcdPrint("GPS: Searching", line2);
+    } else {
+      lcdPrint("GPS: Searching", "No fix yet");
+    }
+  }
+}
+
+// ===================================================
+//   DISPLAY - screen once GPS has a fix
+// ===================================================
+void updatePostFixScreen() {
+  if (!gpsFixAnnounced) {
+    gpsFixAnnounced = true;
+    gnssSatsSeen = -1;  // stop showing stale FTM sample once we have a real fix
+    Serial.println("[GPS] Fix acquired!");
+    lastDeviceState = DEV_NONE;
+    lcdTransient("GPS Fix", "Acquired!", 1500);
+    return;
+  }
+
+  if (transientActive()) return;
+
+  DeviceState ds;
+  if (simReady) ds = DEV_READY;
+  else if (simFailCount >= SIM_FAIL_THRESHOLD) ds = DEV_OFFLINE;
+  else ds = DEV_SIM_CONNECTING;
+
+  if (ds == lastDeviceState) return;
+  lastDeviceState = ds;
+
+  switch (ds) {
+    case DEV_READY:
+      lcdTransient("Device Ready!", "", 2000);
+      pendingLcdOff = true;
+      break;
+    case DEV_OFFLINE:
+      lcdTransient("Device Offline", "SIM retry in BG", 2000);
+      pendingLcdOff = true;
+      break;
+    case DEV_SIM_CONNECTING:
+    default:
+      lcdPrint("GPS Fixed", "SIM Connecting");
+      pendingLcdOff = false;
+      break;
+  }
+}
+
+// ===================================================
+//   SETUP
+// ===================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("=================================");
+  Serial.println("   GPS Tracker (SIM7600G-H GNSS) ");
+  Serial.println("=================================");
+
+  Serial.printf("[CONFIG] Device ID: %s\n", GPS_DEVICE_ID);
+  Serial.printf("[CONFIG] Server URL: %s\n", serverBaseURL);
+
+  Wire.begin(21, 22);
+  lcd.init();
+  lcd.backlight();
+  lcdPrint("GPS Tracker", "Starting...");
+  delay(1000);
+
+  littleFSok = LittleFS.begin(false);
+  if (!littleFSok) {
+    Serial.println("[FS] Trying format...");
+    littleFSok = LittleFS.begin(true);
+  }
+  if (littleFSok) {
+    Serial.printf("[FS] Mounted - %d / %d bytes used\n",
+                  LittleFS.usedBytes(), LittleFS.totalBytes());
+    if (LittleFS.exists(OFFLINE_FILE)) {
+      File f = LittleFS.open(OFFLINE_FILE, "r");
+      int count = 0;
+      while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() > 0) count++;
+      }
+      f.close();
+      Serial.printf("[FS] %d offline records pending\n", count);
+    }
+  } else {
+    Serial.println("[FS] LittleFS failed! Offline saving disabled.");
+  }
+
+  simSerial.begin(SIM_BAUD, SERIAL_8N1, SIM_RX, SIM_TX);
+  Serial.println("[SIM] UART1 started on RX=26 TX=27 @115200");
+
+  lcdPrint("Initializing...", "SIM + GNSS");
+
+  powerOnSIM();
+  enableGNSS();  // start GPS regardless of whether cellular registers — separate subsystems
+  simReady = initSIM();
+  if (simReady) {
+    Serial.println("[SIM] Connected!");
+    isFlushing = LittleFS.exists(OFFLINE_FILE);
+    flushWindowStart = 0;
+    inFlushPause = false;
+  } else {
+    Serial.println("[SIM] Failed - will retry in loop");
+    simFailCount = 1;
+  }
+
+  Serial.println("=================================\n");
+}
+
+// ===================================================
+//   LOOP
+// ===================================================
+void loop() {
+  unsigned long now = millis();
+
+  // -- PRIORITY 1: Poll GNSS periodically --
+  if (now - lastGNSSPoll >= GNSS_POLL_INTERVAL) {
+    lastGNSSPoll = now;
+    updateGNSS();
+  }
+
+  // -- PRIORITY 1b: Sample "sats seen" via short FTM burst, only while
+  //    there's no fix yet. This blocks for ~3s, same as updateGNSS()
+  //    blocking briefly above — fine since it only runs every 15s.
+  if (!hasGPSFix() && now - lastFTMSample >= FTM_SAMPLE_INTERVAL) {
+    lastFTMSample = now;
+    sampleSatellitesFTM();
+    forceGPSScreenRedraw = true;
+  }
+
+  // -- DISPLAY STATE MACHINE --
+  if (!hasGPSFix()) {
+    if (gpsFixAnnounced) {
+      gpsFixAnnounced = false;
+      lastDeviceState = DEV_NONE;
+      pendingLcdOff = false;
+    }
+    if (!transientActive()) showGPSStatusScreen();
+  } else {
+    updatePostFixScreen();
+  }
+
+  if (pendingLcdOff && !transientActive()) {
+    lcdOff();
+    pendingLcdOff = false;
+  }
+
+  // -- PRIORITY 2: SIM retry every 15s --
+  if (!simReady && now - lastSimRetry >= SIM_RETRY_INTERVAL) {
+    lastSimRetry = now;
+    Serial.println("[SIM] Retrying...");
+    bool ok = initSIM();
+    if (ok) {
+      Serial.println("[SIM] Reconnected!");
+      simReady = true;
+      simFailCount = 0;
+      simFailedShown = false;
+      offlineAnnounced = false;
+      lastDeviceState = DEV_NONE;
+      sendInterval = SEND_INTERVAL_NORMAL;
+      lcdTransient("SIM Connected!", "", 1500);
+      isFlushing = LittleFS.exists(OFFLINE_FILE);
+      flushWindowStart = 0;
+      inFlushPause = false;
+    } else {
+      simFailCount++;
+      Serial.printf("[SIM] Failed (attempt %d)\n", simFailCount);
+      if (simFailCount >= SIM_FAIL_THRESHOLD && !simFailedShown) {
+        simFailedShown = true;
+        lcdTransient("SIM Failed", "Retrying in BG", 2000);
+      }
+    }
+  }
+
+  // -- PRIORITY 3: Flush offline records (windowed) --
+  if (simReady && isFlushing) {
+    bool done = flushOfflineData();
+    if (done) {
+      isFlushing = false;
+      Serial.println("[FS] Flush complete!");
+    }
+    return;
+  }
+
+  // -- PRIORITY 4: Live GPS send --
+  if (hasGPSFix() && now - lastSend >= sendInterval) {
+    lastSend = now;
+
+    Serial.printf("[GPS] %.6f, %.6f | Speed: %.1f km/h\n",
+                  gnssLat, gnssLng, gnssSpeedKmph);
+
+    String payload = buildPayload(!simReady);
+
+    if (!simReady) {
+      saveOffline(payload);
+      sendInterval = SEND_INTERVAL_OFFLINE;
+      if (!offlineAnnounced) {
+        offlineAnnounced = true;
+        lcdTransient("Saving Offline", "SIM unreachable", 1500);
+      }
+    } else {
+      bool ok = sendToServer(payload);
+      if (ok) {
+        Serial.println("[HTTP] Sent successfully!");
+        sendInterval = SEND_INTERVAL_NORMAL;
+      } else {
+        Serial.println("[HTTP] Send failed - saving offline");
+        saveOffline(buildPayload(true));
+        sendInterval = SEND_INTERVAL_OFFLINE;
+        simReady = false;
+        simFailCount = 0;
+        simFailedShown = false;
+        offlineAnnounced = false;
+        lastDeviceState = DEV_NONE;
+        lastSimRetry = now;
+      }
+    }
+  }
+
+  // -- Heartbeat --
+  if (now - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+    lastHeartbeat = now;
+    printHeartbeat();
+  }
+}

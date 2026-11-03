@@ -31,7 +31,7 @@ const toIso = (v) => {
 
 /** POST /api/gps  — GPS device pushes a live location */
 export const receiveLocation = async (req, res) => {
-  const { device_id, lat, lng, speed, offline, recorded_at } = req.body;
+  const { device_id, lat, lng, speed, offline, recorded_at, date, time } = req.body;
   if (!device_id || lat == null || lng == null) {
     return res.status(400).json({ status: "error", message: "device_id, lat, lng required." });
   }
@@ -65,15 +65,30 @@ export const receiveLocation = async (req, res) => {
   // Prefer the tracker's own GNSS timestamp over receive time — critical for
   // offline-buffered pings, which otherwise all land bunched together at
   // whatever moment the backlog happened to flush instead of when each point
-  // actually occurred. Falls back to receive time if missing/unparseable so a
-  // malformed or older-firmware payload never crashes the ping.
-  let recordedAt = new Date();
+  // actually occurred.
+  // Source order: `recorded_at` (ISO), else the tracker's `date` ("YYYY-MM-DD") + `time` ("HH:MM:SS"),
+  // which the SIM7600 firmware sends on every payload (live AND buffered) in UTC (GNSS time).
+  // Falls back to receive time if missing/unparseable/implausible so a malformed or
+  // older-firmware payload never crashes the ping.
+  const receiveTime = new Date();
+  let recordedAt = receiveTime;
+  let recordedAtSource = null;
   if (recorded_at) {
-    const parsed = new Date(recorded_at);
-    if (!isNaN(parsed.getTime())) {
-      recordedAt = parsed;
+    recordedAtSource = recorded_at;
+  } else if (typeof date === "string" && typeof time === "string"
+      && /^\d{4}-\d{2}-\d{2}$/.test(date) && /^\d{2}:\d{2}:\d{2}$/.test(time)) {
+    recordedAtSource = `${date}T${time}Z`;
+  }
+  if (recordedAtSource) {
+    const parsed = new Date(recordedAtSource);
+    const FUTURE_SLACK_MS = 5 * 60 * 1000;
+    const MIN_VALID_YEAR = 2020; // a GNSS chip with no date yet reports 2000-01-01 / zeros
+    if (isNaN(parsed.getTime()) || parsed.getUTCFullYear() < MIN_VALID_YEAR) {
+      console.warn(`[GPS] ⚠️ ${device_id} sent unusable timestamp ("${recordedAtSource}") — using receive time instead`);
+    } else if (parsed.getTime() > receiveTime.getTime() + FUTURE_SLACK_MS) {
+      console.warn(`[GPS] ⚠️ ${device_id} timestamp is in the future ("${recordedAtSource}") — using receive time instead`);
     } else {
-      console.warn(`[GPS] ⚠️ ${device_id} sent unparseable recorded_at ("${recorded_at}") — using receive time instead`);
+      recordedAt = parsed;
     }
   }
 
