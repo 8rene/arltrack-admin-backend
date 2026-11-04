@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { runMidnightFlush } from "../../jobs/midinghtFlush.job.js";
 import { runExpireSessions } from "../../jobs/expireSessions.job.js";
 import { runScheduledRefundsJob } from "../../jobs/scheduledRefunds.job.js";
+import { runPruneSheetTabs } from "../../jobs/pruneSheetTabs.job.js";
 
 // Vercel Cron hits this over HTTP on schedule (see vercel.json) — it can't
 // call runMidnightFlush() directly, since jobs/ files aren't routes.
@@ -52,6 +53,17 @@ export const registerCronRoutes = (app) => {
       return res.status(200).json({ success: true, result });
     } catch (err) {
       console.error("[CRON] scheduled-refunds route error:", err.message);
+      return res.status(200).json({ success: false, message: err.message });
+    }
+  });
+
+  // Deletes Sheets date tabs past the 3-day window. Add ?dryRun=1 to only list what would be deleted.
+  app.get("/api/cron/prune-sheet-tabs", verifyCronRequest, async (req, res) => {
+    try {
+      const result = await runPruneSheetTabs({ dryRun: req.query.dryRun === "1" });
+      return res.status(200).json({ success: true, result });
+    } catch (err) {
+      console.error("[CRON] prune-sheet-tabs route error:", err.message);
       return res.status(200).json({ success: false, message: err.message });
     }
   });

@@ -239,3 +239,39 @@ export const fetchSessionRows = async (carId, sessionId, dateStrings) => {
   }
   return all;
 };
+
+// ── Tab retention ────────────────────────────────────────────────────────
+// Date tabs are "YYYY-MM-DD". Google can also rename a tab that two requests
+// created at the same moment to "YYYY-MM-DD_conflict<digits>" — both shapes
+// count as date tabs here. Anything else in the spreadsheet is never listed,
+// so it can never be deleted by the cleanup job.
+const DATE_TAB_RE = /^(\d{4}-\d{2}-\d{2})(_conflict\d+)?$/;
+
+/** Every date tab in the spreadsheet: [{ sheetId, title, date }], plus the total tab count. */
+export const listDateTabs = async () => {
+  if (!SPREADSHEET_ID) throw new Error("TRACEBACK_SHEET_ID is not set.");
+  const sheets = await getSheetsClient();
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: "sheets.properties(sheetId,title)",
+  });
+  const all = meta.data.sheets || [];
+  const tabs = [];
+  for (const s of all) {
+    const m = DATE_TAB_RE.exec(s.properties.title);
+    if (m) tabs.push({ sheetId: s.properties.sheetId, title: s.properties.title, date: m[1] });
+  }
+  return { tabs, totalSheets: all.length };
+};
+
+/** Delete the given tabs (as returned by listDateTabs) in one request and drop their cached rows. */
+export const deleteTabs = async (tabs) => {
+  if (!tabs.length) return 0;
+  const sheets = await getSheetsClient();
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: { requests: tabs.map((t) => ({ deleteSheet: { sheetId: t.sheetId } })) },
+  });
+  for (const t of tabs) tabRowsCache.delete(t.date);
+  return tabs.length;
+};
