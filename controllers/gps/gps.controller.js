@@ -8,7 +8,7 @@ import {
 } from "../../services/gps/gpsLookupCache.js";
 import { processLivePing } from "../../services/gps/livePing.service.js";
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { getBookingCompletedAt } from "../../services/booking/booking.service.js";
+import { getBookingCompletedAt, flushBookingHistory } from "../../services/booking/booking.service.js";
 import { getHolidaysBetween } from "../../services/gps/coding.service.js";
 import { getSessionsByCar, getActiveSessionByCar, getSessionById, getRecentSessionsByCarUpTo, getArchivePointCount } from "../../services/booking/bookingSession.service.js";
 import { getSessionArchivesByCar, getRecentSessionArchivesByCarUpTo } from "../../services/archives/bookingSessionArchives.service.js";
@@ -714,6 +714,37 @@ export const getCarTraceback = async (req, res) => {
   } catch (err) {
     console.error("[GPS] getCarTraceback error:", err.message);
     return res.status(500).json({ status: "error", message: "Failed to fetch traceback." });
+  }
+};
+
+/**
+ * POST /api/gps/sessions/:bookingSessionID/flush
+ * Manual "flush now": saves a trip's GPS trail to its archive file right away, the same save the midnight job
+ * makes, so History / Review can show the latest points without waiting for the nightly run. Safe to repeat --
+ * the file is simply rewritten from the Sheets rows.
+ */
+const flushingNow = new Set(); // trips being saved right now, so a double-click can't start two saves at once
+export const flushSessionNow = async (req, res) => {
+  const { bookingSessionID } = req.params;
+  if (flushingNow.has(bookingSessionID)) {
+    return res.status(409).json({ status: "error", message: "This trip is already being saved." });
+  }
+  flushingNow.add(bookingSessionID);
+  try {
+    const session = await getSessionById(bookingSessionID);
+    if (!session) return res.status(404).json({ status: "error", message: "Trip not found." });
+
+    await flushBookingHistory(bookingSessionID);
+
+    // flushBookingHistory clears the saved point count, so this recounts from the file it just wrote.
+    const fresh = await getSessionById(bookingSessionID);
+    const pointCount = fresh ? await getArchivePointCount(fresh) : null;
+    return res.json({ status: "ok", data: { bookingSessionID, archiveUrl: fresh?.data?.archiveUrl || null, pointCount } });
+  } catch (err) {
+    console.error("[GPS] flushSessionNow error:", err.message);
+    return res.status(500).json({ status: "error", message: "Couldn't save this trip's data right now." });
+  } finally {
+    flushingNow.delete(bookingSessionID);
   }
 };
 

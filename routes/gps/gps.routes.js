@@ -12,6 +12,7 @@ import {
   updateCarGeofence,
   getCarTraceback,
   getCarHistory,
+  flushSessionNow,
 } from "../../controllers/gps/gps.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
@@ -40,6 +41,8 @@ export const registerGpsRoutes = (app) => {
   app.patch("/api/gps/:carId/geofence",verifyToken, requireRole(allowed), updateCarGeofence);
   app.get("/api/gps/:carId/traceback", verifyToken, requireRole(allowed), getCarTraceback);
   app.get("/api/gps/:carId/history",   verifyToken, requireRole(allowed), getCarHistory);
+  // Manual "flush now" for one trip (History tab) -- writes its archive file immediately instead of at midnight.
+  app.post("/api/gps/sessions/:bookingSessionID/flush", verifyToken, requireRole(allowed), flushSessionNow);
 
   // Frontend reads locations — MUST be after /devices routes
   app.get("/api/gps",     verifyToken, requireRole(allowed), getAllDeviceLocations);
