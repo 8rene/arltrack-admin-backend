@@ -2,8 +2,10 @@
 // Payment breakdown + refund plan — SINGLE SOURCE OF TRUTH (admin backend).
 //
 // KEEP IN SYNC with arltrack-customer-backend/utils/payments/paymentBreakdown.util.js
-// (an identical copy — the two apps deploy separately, so it can't be a shared
-// import). If you change one, change the other.
+// (the two apps deploy separately, so it can't be a shared import). If you change one, change the other.
+// The refund policy and gateway-fee functions below must stay the same in both. The only real differences are the export
+// line (ESM here, CommonJS there) and the same-day send schedule, which is computeRefundSchedule() in
+// services/refundRequest/refundRequest.service.js here and getRefundSchedule() over there -- those two must also stay identical.
 //
 // Pure functions only (no Firestore) so they're trivially testable.
 //
@@ -212,11 +214,11 @@ const heldCreditOf = (p) =>
 // Gateway fee on a refund.
 //
 // The online payment (gateway) fee is charged on top of the booking (payment.gatewayFee). Policy:
-//   customer asked for the refund (any time: 48h+ before pickup, inside the 2-hour grace, late, or after pickup)
-//                                                                                            -> the gateway fee is KEPT
-//                                                                                               (when the deposit is kept too, both are kept)
-//   staff-initiated refunds / cancellations, and a waived forfeit                            -> the gateway fee is REFUNDED
-//                                                                                               (staff "Normal" and "after cancel" refunds choose to keep it)
+//   customer asks for a refund, any time (48h+, inside the 2-hour grace, under 48h, after pickup)  -> the gateway fee is KEPT,
+//                                                  whether the deposit goes back or is kept too (the deposit is the only thing that varies)
+//   staff "Normal refund" / "No Deposit Refund"                                                    -> the gateway fee is KEPT
+//   staff "Full refund" (our issue)                                                                -> the gateway fee is REFUNDED
+//   a payment that arrived after the booking was already cancelled (opened automatically)          -> refunded in full, fee included
 // Only the part of the fee the customer has actually paid is ever kept: a Partial booking that has only paid its first
 // half has paid only that share of the fee (fee x amountPaid / amount). round2 keeps it to centavos.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,7 +373,7 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
   // Can't judge the timing without both timestamps → fail OPEN (full refund)
   // and say so, so staff can see why and decide.
   if (!pickup || !requested) {
-    return { tier: "full", hoursBeforePickup: null, depositAmount, forfeit: 0, gatewayFeeKept: 0, waived: false, unknownTiming: true, windowHours: REFUND_FULL_WINDOW_HOURS };
+    return { tier: "full", hoursBeforePickup: null, depositAmount, forfeit: 0, gatewayFeeKept: getGatewayFeeShare(payment), waived: false, unknownTiming: true, windowHours: REFUND_FULL_WINDOW_HOURS };
   }
 
   const hoursBeforePickup = (pickup.getTime() - requested.getTime()) / HOUR_MS;
@@ -383,17 +385,24 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
   // made) and the pickup hasn't passed. Unknown bookedAt means no grace.
   const booked = toDate(bookedAt);
   const hoursSinceBooked = booked ? (requested.getTime() - booked.getTime()) / HOUR_MS : null;
-  const graceApplied = tier === "late" && hoursSinceBooked !== null && hoursSinceBooked >= 0 && hoursSinceBooked < REFUND_GRACE_HOURS;
+  // inGraceWindow: asked within REFUND_GRACE_HOURS of paying, pickup not passed. Such a request is AUTO-APPROVED by the
+  // customer backend (no staff review). graceApplied is the narrower case that also rescues the deposit (under 48h).
+  const inGraceWindow = tier !== "no_show" && hoursSinceBooked !== null && hoursSinceBooked >= 0 && hoursSinceBooked < REFUND_GRACE_HOURS;
+  const graceApplied = tier === "late" && inGraceWindow;
 
   const wouldForfeit = (tier === "full" || graceApplied) ? 0 : Math.min(depositAmount, amountPaid);
   const forfeit = waiveForfeit ? 0 : wouldForfeit;
 
-  // The customer asked, so the gateway fee is kept whether the deposit goes back or is kept too. A staff waiver keeps neither.
-  const gatewayFeeKept = waiveForfeit ? 0 : getGatewayFeeShare(payment);
+  // The customer asked for the refund, so the gateway fee is KEPT whatever happens to the deposit (it goes back in the full
+  // tier and the 2-hour grace, and is kept when late / no-show). Waiving the forfeit only returns the deposit, never the fee:
+  // PayMongo keeps its own fee on the original charge, so a refunded fee would be a loss for the business every time.
+  const gatewayFeeKept = getGatewayFeeShare(payment);
 
   return {
     graceApplied,
+    inGraceWindow,
     gatewayFeeKept,
+    gatewayFeeWaivedByGrace: 0,   // kept for old readers: the grace window never waives the fee
     graceHours: REFUND_GRACE_HOURS,
     tier,
     hoursBeforePickup: Math.round(hoursBeforePickup * 100) / 100,
@@ -420,10 +429,11 @@ const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false,
     tier: keep ? "late" : "full",
     hoursBeforePickup: null,
     depositAmount,
-    // The request stores the gateway fee that was kept when it was made (0 on requests made before this rule existed),
-    // so approving later never changes the amount the customer was shown. A request that keeps the deposit but stored no
-    // fee (made before the fee was kept with the deposit) falls back to the fee share the customer has paid.
-    gatewayFeeKept: waiveForfeit ? 0 : (Math.max(0, num(gatewayFeeKept)) || (keep ? getGatewayFeeShare(payment) : 0)),
+    // The request stores the gateway fee that was kept when it was made, so approving later never changes the amount the customer
+    // was shown. A late / no-show request keeps the fee too: one made before that rule (it stored 0) falls back to the fee share the
+    // customer has paid. A request with no returnDeposit (opened automatically for a payment that arrived after the cancellation)
+    // keeps only what it stored, which is 0: that one is refunded in full.
+    gatewayFeeKept: keep ? (Math.max(0, num(gatewayFeeKept)) || getGatewayFeeShare(payment)) : Math.max(0, num(gatewayFeeKept)),
     forfeit: waiveForfeit ? 0 : wouldForfeit,
     waived: !!waiveForfeit && wouldForfeit > 0,
     waivedAmount: waiveForfeit ? wouldForfeit : 0,

@@ -127,9 +127,9 @@ const fmtManilaDate = (d) => toDateSafe(d)
   : "the next day";
 
 // The three ways staff can refund a booking:
-//   full     our fault (or any staff cancellation) -> deposit returned, gateway fee refunded      (the default)
+//   full     our fault (or any staff cancellation) -> deposit returned, gateway fee refunded      (the default; the ONLY refund that returns the fee)
 //   normal   an ordinary refund                    -> deposit returned, gateway fee KEPT
-//   no_show  "No Deposit Refund" (any time)         -> deposit KEPT, gateway fee refunded   (key kept for the API; shown as "No deposit refund")
+//   no_show  "No Deposit Refund" (any time)         -> deposit KEPT, gateway fee KEPT too       (key kept for the API; shown as "No deposit refund")
 // The type is NOT stored: it only picks the figures below. What was kept is saved on the request as depositForfeited / gatewayFeeKept,
 // and a retry reuses those saved amounts.
 export const REFUND_TYPES = ["full", "normal", "no_show"];
@@ -147,10 +147,11 @@ const resolveRefundType = (opts = {}) => {
 // What the refund type means in money: how much deposit is forfeited and how much gateway fee is kept.
 const refundTypeFigures = (refundType, payment, booking) => {
   if (refundType === "no_show") {
-    // "No Deposit Refund": the deposit is always kept (capped at what was paid), before or after the pickup time. It is NOT read
-    // from getRefundPolicy, which returns a 0 forfeit when the booking is 48+ hours before pickup.
+    // "No Deposit Refund": the deposit is always kept (capped at what was paid), before or after the pickup time, and so is the
+    // gateway fee (computeRefundPlan caps both at what was actually paid). It is NOT read from getRefundPolicy, which returns a
+    // 0 forfeit when the booking is 48+ hours before pickup.
     const gross = computeRefundPlan(payment).grossPaid;
-    return { forfeit: Math.min(getDepositAmount(payment), gross), gatewayFeeKept: 0 };
+    return { forfeit: Math.min(getDepositAmount(payment), gross), gatewayFeeKept: getGatewayFeeShare(payment) };
   }
   if (refundType === "normal") return { forfeit: 0, gatewayFeeKept: getGatewayFeeShare(payment) };
   return { forfeit: 0, gatewayFeeKept: 0 };
@@ -185,6 +186,8 @@ const resolveCustomerName = async (userID) => {
 };
 
 const fail = (message, status) => { const err = new Error(message); err.status = status; return err; };
+// Same, with extra fields the controller sends back (a `code` the web app reacts to, and the figures involved).
+const failWith = (message, status, extra = {}) => Object.assign(fail(message, status), extra);
 
 // Field names on a refundRequests document: toRefundAmount (was amount), bookingPaid (was grossPaid) and
 // returnDeposit (was policyTier). Documents written before the rename, and by the customer backend until it is
@@ -436,7 +439,9 @@ export const getAllRefundRequests = async (status) => {
               bookingPaid: plan.grossPaid,
               grossPaid: plan.grossPaid,                   // old name, same value, until the web apps read bookingPaid
               forfeit: plan.forfeit,                       // deposit kept under the 48-hour policy
-              gatewayFeeKept: plan.gatewayFeeKept,         // gateway fee kept when the deposit goes back
+              gatewayFeeKept: plan.gatewayFeeKept,         // gateway fee kept (whether the deposit goes back or is kept too)
+              // What the refund becomes if staff tick "Return the deposit": no deposit kept, the gateway fee still kept.
+              totalIfDepositReturned: computeRefundPlan(payment, { forfeit: 0, gatewayFeeKept: policy ? policy.gatewayFeeKept : 0 }).total,
               tier: policy ? policy.tier : null,           // "full" | "late" | "no_show" | null (no policy snapshot)
               hoursBeforePickup: policy ? policy.hoursBeforePickup : null,
               parts: plan.parts.map((p) => ({ kind: p.kind, amount: p.amount })),
@@ -673,7 +678,13 @@ export const resolveCustomerContact = async (userID) => {
 // PayMongo part has settled (customer backend's refund webhook) AND any manual
 // portion is marked issued.
 // ─────────────────────────────────────────────────────────────────────────────
-export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason, skipDriverNotify = false, waiveForfeit = false, waiveReason = "", reason = "" } = {}) => {
+// Recheck before any money moves (see "Recheck" below):
+//   expectedAmount     the refund the staff member was LOOKING AT when they pressed Approve. If the figure has changed since
+//                      (a payment came in, a discount was added...), nothing is approved and they are told to refresh.
+//   confirmQuoteChange true when staff saw that the amount differs from what the customer was quoted and chose to go on
+//                      anyway; a reason is then required and goes in the audit log.
+// waiveForfeit = "Return the deposit": the deposit goes back even though the request was late. The gateway fee is still kept.
+export const approveRefundRequest = async (refundRequestID, adminUserID, { cancelReason, skipDriverNotify = false, waiveForfeit = false, waiveReason = "", reason = "", expectedAmount = undefined, confirmQuoteChange = false } = {}) => {
   const reqRef = db.collection("refundRequests").doc(refundRequestID);
   // The staff's reason for approving: an optional note, or the waive reason when the forfeit is waived.
   const decisionReason = String(reason || waiveReason || "").trim();
@@ -748,6 +759,29 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       );
     }
 
+    // ── Recheck: the figure about to be paid vs what staff saw, and vs what the customer was quoted ──
+    // Both run BEFORE anything is sent to PayMongo or written, and a throw here releases the lock (see the catch below).
+    // Returning the deposit on purpose changes the amount, so it is exempt from both checks.
+    const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
+    const currentAmount = cents(plan.total);
+    const quotedAmount  = cents(amountOf(claimed));   // toRefundAmount as the customer was shown it, before this approval overwrites it
+    if (!waiveForfeit && expectedAmount !== undefined && expectedAmount !== null && expectedAmount !== "" && Math.abs(currentAmount - cents(expectedAmount)) > 0.01) {
+      throw failWith(
+        `The refund figures changed while this screen was open: it showed ${peso(cents(expectedAmount))} but the amount is now ${peso(currentAmount)}. Nothing was approved. The list has been refreshed: check it and approve again.`,
+        409, { code: "FIGURES_CHANGED", expectedAmount: cents(expectedAmount), currentAmount }
+      );
+    }
+    const quoteChanged = !waiveForfeit && quotedAmount > 0 && Math.abs(currentAmount - quotedAmount) > 0.01;
+    if (quoteChanged) {
+      if (!confirmQuoteChange) {
+        throw failWith(
+          `The customer was quoted ${peso(quotedAmount)} but approving now would refund ${peso(currentAmount)}. Nothing was approved. Confirm the difference to go on.`,
+          409, { code: "QUOTE_CHANGED", quotedAmount, currentAmount }
+        );
+      }
+      if (!decisionReason) throw fail("A reason is required to approve a refund that differs from the amount the customer was quoted.", 400);
+    }
+
     // ── 3. PayMongo refunds, one per online charge ──
     // Same-day rule: a partial refund of a charge paid today can't go out until tomorrow, so the parts are only RECORDED
     // here (pending, no PayMongo id yet) and the cron sends them after sendAfter.
@@ -813,6 +847,8 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
       depositForfeited: forfeit,
       gatewayFeeKept: plan.gatewayFeeKept,
       forfeitWaived: !!(policy && policy.waived),
+      // What the customer was shown, kept next to the amount that was really approved (toRefundAmount above).
+      ...(quotedAmount > 0 ? { quotedAmount } : {}),
       // Scheduled send (same-day rule). Only the send time and the attempt counter live on the request. What the cron has to
       // send -- the PayMongo payment id and the amount of each part (they can't be recomputed later, the held discount credit
       // is closed by this approval) -- is stored on each part's "out" row in paymentEntries (paymongoPaymentID, amount).
@@ -875,7 +911,7 @@ export const approveRefundRequest = async (refundRequestID, adminUserID, { cance
 
     auditSafe({
       action: "update",
-      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)}${creditReturned > 0 ? ` (includes ${peso(creditReturned)} held discount credit)` : ""} (${peso(onlineAmount)} ${schedule.deferred ? `SCHEDULED for PayMongo after ${fmtManilaDate(schedule.sendAfter)} (same-day payment)` : "via PayMongo"} in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""}${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit forfeit WAIVED by staff: ${String(waiveReason).trim()}` : "nothing kept"}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
+      description: `Refund ${refundRequestID} APPROVED for ${peso(plan.total)}${creditReturned > 0 ? ` (includes ${peso(creditReturned)} held discount credit)` : ""} (${peso(onlineAmount)} ${schedule.deferred ? `SCHEDULED for PayMongo after ${fmtManilaDate(schedule.sendAfter)} (same-day payment)` : "via PayMongo"} in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""}${policy ? ` — 48-hour policy: ${policy.tier}${policy.hoursBeforePickup !== null ? ` (requested ${policy.hoursBeforePickup}h before pickup)` : ""}, ${forfeit > 0 ? `${peso(forfeit)} deposit kept` : policy.waived ? `${peso(policy.waivedAmount)} deposit RETURNED by staff (forfeit waived): ${String(waiveReason).trim()}` : plan.gatewayFeeKept > 0 ? "" : "nothing kept"}${plan.gatewayFeeKept > 0 ? `${forfeit > 0 || policy.waived ? "; " : ""}${peso(plan.gatewayFeeKept)} online payment fee kept` : ""}` : ""}${quoteChanged ? ` — customer was quoted ${peso(quotedAmount)}, approved at ${peso(currentAmount)} after staff confirmed the difference: ${decisionReason}` : ""}. Booking ${refundRequest.bookingID}: ${cancel.cancelled ? "cancelled" : `left as ${cancel.status || "unchanged"}`}.`,
       userID: adminUserID,
       bookingID: refundRequest.bookingID,
       paymentID: refundRequest.paymentID,
@@ -1401,8 +1437,8 @@ export const staffRefundBooking = async (bookingID, reason, staffUserID, opts = 
   }
 
   const userID = payment.userID || booking.userID || null;
-  // full: nothing kept. no_show ("No Deposit Refund"): the deposit is kept (capped at what was paid), whatever the pickup time.
-  // normal: the deposit goes back and the gateway fee the customer paid is kept.
+  // full: nothing kept. no_show ("No Deposit Refund"): the deposit AND the gateway fee are kept (capped at what was paid), whatever
+  // the pickup time. normal: the deposit goes back and the gateway fee the customer paid is kept.
   const { forfeit, gatewayFeeKept } = refundTypeFigures(refundType, payment, booking);
   const plan = computeRefundPlan(payment, { forfeit, gatewayFeeKept });
   // A crashed first attempt already saved what it keeps; a retry must not choose different amounts than the ones it started with.
@@ -2084,7 +2120,7 @@ const notifyAdminCancellation = async ({ docID, bookingID, driverID, customerUse
 // Requests page (markManualRefundIssued), exactly like any other hand-back. Four options, all worked out from what the customer paid:
 //   full      nothing kept                                    (our issue)
 //   normal    the deposit goes back, the gateway fee is kept  (the customer's loss: the fee)
-//   no_show   the deposit is kept, the gateway fee goes back  (no-show or a late cancellation; the loss: the deposit)
+//   no_show   the deposit and the gateway fee are both kept  (no-show or a late cancellation; the loss: the deposit and the fee)
 //   manual    staff type the amount, up to what was paid      (the rest is kept)
 // ─────────────────────────────────────────────────────────────────────────────
 export const AFTER_CANCEL_OPTIONS = ["full", "normal", "no_show", "manual"];
@@ -2120,8 +2156,9 @@ const afterCancelFigures = (payment, option, typedAmount) => {
     refund = round2(gross - gatewayFeeKept);
   } else if (option === "no_show") {
     forfeit = round2(Math.min(getDepositAmount(payment), gross));
-    refund = round2(gross - forfeit);
-    if (!(forfeit > 0) || !(refund > 0)) throw fail("The deposit is all that was paid (or there is no deposit), so this option would return nothing.", 400);
+    gatewayFeeKept = round2(Math.min(getGatewayFeeShare(payment), Math.max(0, gross - forfeit)));
+    refund = round2(gross - forfeit - gatewayFeeKept);
+    if (!(forfeit > 0) || !(refund > 0)) throw fail("The deposit and the online payment fee are all that was paid (or there is no deposit), so this option would return nothing.", 400);
   } else if (option === "manual") {
     const typed = round2(typedAmount);
     if (!Number.isFinite(typed) || !(typed > 0)) throw fail("Type the amount to refund.", 400);
@@ -2144,7 +2181,7 @@ export const getRefundAfterCancelPreview = async (docID) => {
     options: {
       full:    { total: full.refund },
       normal:  { available: !!normal, gatewayFeeKept: normal ? normal.gatewayFeeKept : 0, total: normal ? normal.refund : 0 },
-      no_show: { available: !!noShow, forfeit: noShow ? noShow.forfeit : 0, total: noShow ? noShow.refund : 0 },
+      no_show: { available: !!noShow, forfeit: noShow ? noShow.forfeit : 0, gatewayFeeKept: noShow ? noShow.gatewayFeeKept : 0, total: noShow ? noShow.refund : 0 },
       manual:  { max: full.gross },
     },
   };
@@ -2233,7 +2270,7 @@ export const getBookingRefundOptions = async (booking, bookingID) => {
   const status = lower(booking.status);
   const preview = await getBookingRefundPreview(bookingID);
 
-  // What marking this booking as a NO-SHOW would do (deposit kept, rest refunded), and what a NORMAL refund would do
+  // What marking this booking as a NO-SHOW would do (deposit and gateway fee kept, rest refunded), and what a NORMAL refund would do
   // (deposit returned, gateway fee kept). The top-level figures from getBookingRefundPreview are the FULL refund.
   // pickupPassed is still reported (Manila-correct) for information, but it no longer gates the No Deposit Refund option.
   // `scheduled` / `sendAfter`: a partial refund of a payment made today can't be sent to PayMongo until after midnight
@@ -2248,9 +2285,9 @@ export const getBookingRefundOptions = async (booking, bookingID) => {
     if (payment && lower(payment.status) !== "refunded") {
       const gross   = computeRefundPlan(payment).grossPaid;
       const forfeit = Math.min(getDepositAmount(payment), gross);
-      const plan    = computeRefundPlan(payment, { forfeit });
+      const plan    = computeRefundPlan(payment, { forfeit, gatewayFeeKept: getGatewayFeeShare(payment) });
       const sched   = computeRefundSchedule(payment, plan, new Date());
-      noShow = { pickupPassed, pickupAt, bookingPaid: gross, grossPaid: gross, forfeit, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount, scheduled: sched.deferred, sendAfter: sched.sendAfter };
+      noShow = { pickupPassed, pickupAt, bookingPaid: gross, grossPaid: gross, forfeit, gatewayFeeKept: plan.gatewayFeeKept, total: plan.total, onlineAmount: plan.total - plan.manualAmount, manualAmount: plan.manualAmount, unrefundableAmount: plan.unrefundableAmount, scheduled: sched.deferred, sendAfter: sched.sendAfter };
 
       // Normal refund: the deposit goes back, the gateway fee the customer has paid is kept. Same as Full when there was no fee.
       const gatewayFeeKept = getGatewayFeeShare(payment);
@@ -2258,7 +2295,7 @@ export const getBookingRefundOptions = async (booking, bookingID) => {
       const nSched = computeRefundSchedule(payment, nPlan, new Date());
       normal = { available: gatewayFeeKept > 0 && nPlan.total > 0, bookingPaid: gross, grossPaid: gross, gatewayFeeKept: nPlan.gatewayFeeKept, total: nPlan.total, onlineAmount: nPlan.total - nPlan.manualAmount, manualAmount: nPlan.manualAmount, unrefundableAmount: nPlan.unrefundableAmount, scheduled: nSched.deferred, sendAfter: nSched.sendAfter };
     } else {
-      noShow = { pickupPassed, pickupAt, bookingPaid: 0, grossPaid: 0, forfeit: 0, total: 0, onlineAmount: 0, manualAmount: 0, scheduled: false, sendAfter: null };
+      noShow = { pickupPassed, pickupAt, bookingPaid: 0, grossPaid: 0, forfeit: 0, gatewayFeeKept: 0, total: 0, onlineAmount: 0, manualAmount: 0, scheduled: false, sendAfter: null };
       normal = { available: false, bookingPaid: 0, grossPaid: 0, gatewayFeeKept: 0, total: 0, onlineAmount: 0, manualAmount: 0, scheduled: false, sendAfter: null };
     }
   }
@@ -2266,7 +2303,7 @@ export const getBookingRefundOptions = async (booking, bookingID) => {
 };
 
 // refundType (only used when refund is true): "full" (default: deposit and gateway fee both come back) | "normal" (deposit comes
-// back, the gateway fee is kept). No Deposit Refund has its own action, markBookingNoShow.
+// back, the gateway fee is kept). No Deposit Refund (deposit and fee both kept) has its own action, markBookingNoShow.
 export const adminCancelBooking = async (docID, { refund = true, reason, refundType } = {}, adminUserID = null) => {
   const cleanReason = String(reason || "").trim();
   if (!cleanReason) throw fail("A reason is required.", 400);
@@ -2383,7 +2420,7 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
 
   const result = await staffRefundBooking(bookingID, cleanReason, adminUserID, {
     contextLabel: "no deposit refund",
-    notes: "Admin-initiated: No Deposit Refund — deposit kept, everything else refunded.",
+    notes: "Admin-initiated: No Deposit Refund — deposit and online payment fee kept, everything else refunded.",
     skipDriverNotify: true, // notified once, below, together with the rest of the team
     forfeitDeposit: true,
     refundType: "no_show",
@@ -2403,7 +2440,7 @@ export const markBookingNoShow = async (docID, { reason } = {}, adminUserID = nu
 // FLEET: resolve one upcoming booking when its car goes to Maintenance / Inactive. Staff pick, per booking, HOW it is settled:
 //   full     our issue: deposit and gateway fee returned                    (staffRefundBooking, the old behaviour and the default)
 //   normal   deposit returned, gateway fee kept                             (staffRefundBooking, refundType normal)
-//   no_show  No Deposit Refund: deposit kept, rest returned                (markBookingNoShow)
+//   no_show  No Deposit Refund: deposit and gateway fee kept, rest returned  (markBookingNoShow)
 //   cancel   cancel only: the customer's money is kept                      (adminCancelBooking, refund: false)
 // ─────────────────────────────────────────────────────────────────────────────
 export const FLEET_REFUND_CHOICES = ["full", "normal", "no_show", "cancel"];

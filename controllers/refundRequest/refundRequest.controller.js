@@ -50,8 +50,12 @@ export const approveRefund = async (req, res) => {
     // Optional staff override of the 48-hour deposit forfeit (goodwill, duplicate charge…).
     // A reason is mandatory — it is stored on the request and in the audit log.
     // `reason` is the staff's reason for the decision (optional note on approve; waiveReason is the old name for it).
-    const { waiveForfeit, waiveReason, reason } = req.body || {};
-    const data = await approveRefundRequest(id, adminUserID, { waiveForfeit: waiveForfeit === true, waiveReason, reason });
+    // expectedAmount / confirmQuoteChange: the recheck inputs, see approveRefundRequest().
+    const { waiveForfeit, waiveReason, reason, expectedAmount, confirmQuoteChange } = req.body || {};
+    const data = await approveRefundRequest(id, adminUserID, {
+      waiveForfeit: waiveForfeit === true, waiveReason, reason,
+      expectedAmount, confirmQuoteChange: confirmQuoteChange === true,
+    });
     return res.status(200).json({
       success: true,
       message: data.manualAmount > 0
@@ -65,7 +69,14 @@ export const approveRefund = async (req, res) => {
     });
   } catch (error) {
     console.error("[REFUND] approve error:", error);
-    return res.status(error.status || 500).json({ success: false, message: error.message });
+    // `code` and the figures are only present on the recheck refusals (FIGURES_CHANGED / QUOTE_CHANGED).
+    return res.status(error.status || 500).json({
+      success: false, message: error.message,
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.quotedAmount !== undefined ? { quotedAmount: error.quotedAmount } : {}),
+      ...(error.currentAmount !== undefined ? { currentAmount: error.currentAmount } : {}),
+      ...(error.expectedAmount !== undefined ? { expectedAmount: error.expectedAmount } : {}),
+    });
   }
 };
 
