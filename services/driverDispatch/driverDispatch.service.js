@@ -518,16 +518,37 @@ export const unassignDriver = async (bookingDocID, editedBy = null) => {
 // in the UI.
 // ─────────────────────────────────────────────
 
+// Why a driver can no longer act on a trip that WAS theirs. Once a booking ends (completed / cancelled / stolen) the
+// driver's assignment row flips to "completed", so he is no longer the booking's current driver -- but telling him
+// "not assigned to you" is wrong and confusing: it IS his trip, it is just over. Say what actually happened.
+const closedTripMessage = (status) => {
+  switch ((status || "").toLowerCase()) {
+    case "cancelled": return "This booking was cancelled.";
+    case "stolen":    return "This booking was closed because the vehicle was reported stolen.";
+    default:          return "This booking is already completed.";
+  }
+};
+
 const assertOwnsBooking = async (bookingDocID, driverID) => {
   const doc = await db.collection("bookings").doc(bookingDocID).get();
   if (!doc.exists) throw new Error("Booking not found.");
-  const currentDriverID = await resolveCurrentDriverID(doc.data(), doc.id);
+  const data = doc.data();
+  const currentDriverID = await resolveCurrentDriverID(data, doc.id);
   if (currentDriverID !== driverID) {
+    // Not the live driver. If this driver has a finished ("completed") assignment on it, the trip is his and simply
+    // over (his screen was stale) -> report that, not "not assigned to you". Only a trip that never was his, or that he
+    // was taken off, gets the 403 below.
+    const finished = await getCompletedAssignment(bookingKeyOf(doc.id, data), driverID);
+    if (finished) {
+      const err = new Error(closedTripMessage(data.status));
+      err.status = 409;   // conflict with the booking's current state, not a permission problem
+      throw err;
+    }
     const err = new Error("This booking is not assigned to you.");
     err.status = 403;
     throw err;
   }
-  return doc.data();
+  return data;
 };
 
 // Read-only variant: also lets a driver open a trip he already FINISHED (his assignment row is "completed", so he is no
