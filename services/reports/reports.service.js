@@ -18,8 +18,14 @@ import { resolveRoleID } from "../../utils/roles/role.util.js";
 //              paymentEntries rows. Refunds are the settled "out" rows of paymentEntries.
 //   PAYMENTS   dated by when they were made (createdAt).
 //   RENTALS    dated by when the trip STARTS (startDateTime). Only Upcoming / Ongoing / Completed / Cancelled
-//              bookings count ("to pay" and anything unrecognised never do).
-//   EXPENSE    Completed maintenance, dated by its maintenanceDate.
+//              bookings count ("to pay" and anything unrecognised never do). (Rentals & Customers tab only.)
+//   REVENUE    (Revenue & Expense tab) counted ONLY for bookings that are FINALIZED, on the day they are finalized:
+//                completed  -> the day the booking is completed AND its security deposit is no longer held
+//                              (the later of the two: completedAt / depositSettledAt)
+//                cancelled  -> the cancellation day
+//                stolen     -> the day it was flagged stolen
+//              Upcoming, ongoing, to-pay and a completed booking whose deposit is still held are NOT counted yet.
+//   EXPENSE    Completed maintenance, dated by its maintenanceDate; PayMongo fees follow their booking's finalization day.
 //   CUSTOMERS  users whose role is Customer, dated by their sign-up (createdAt).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -135,11 +141,63 @@ const loadBookingsByIDs = async (ids) => {
     docs.forEach((doc) => {
       if (!doc.exists) return;
       const b = doc.data();
-      out[doc.id] = { carID: b.carID || null, userID: b.userID || null, status: normalizeBookingStatus(b.status), tripStart: toDate(b.startDateTime || b.startDate), cancelledAt: toDate(b.cancelledAt), updatedAt: toDate(b.updatedAt) };
+      out[doc.id] = {
+        keys: uniq([doc.id, b.bookingID]),
+        carID: b.carID || null, userID: b.userID || null, status: normalizeBookingStatus(b.status),
+        tripStart: toDate(b.startDateTime || b.startDate), cancelledAt: toDate(b.cancelledAt), updatedAt: toDate(b.updatedAt),
+        completedAt: toDate(b.completedAt), stolenAt: toDate(b.stolenAt),
+      };
       if (b.bookingID) out[b.bookingID] = out[doc.id];
     });
   }
   return out;
+};
+
+// ── BOOKING FINALIZATION (what decides WHEN a booking's money becomes revenue) ──
+
+/** Payments of the given bookings (by document id or bookingID field). */
+const loadPaymentsByBookingKeys = async (keys) => {
+  const out = [];
+  for (const part of chunk(uniq(keys), 30)) {
+    const snap = await db.collection("payments").where("bookingID", "in", part).get();
+    snap.docs.forEach((d) => out.push({ id: d.id, ...d.data() }));
+  }
+  return out;
+};
+
+/**
+ * Stamps `finalizedAt` on every booking in the map: the moment its money is final, or null while it is not.
+ *   completed  the later of completedAt and the day its security deposit was settled (returned / used / forfeited / waived).
+ *              A deposit still held, or a return still pending at PayMongo, means it is NOT final yet -> null.
+ *   cancelled  the cancellation day (cancelledAt, else the booking's last update, which is what the cancel sets).
+ *   stolen     the day it was flagged (stolenAt, else the last update; a stolen booking can no longer be edited).
+ *   anything else (to pay / upcoming / ongoing / unknown)  null: never revenue.
+ * `payments` / `coveredKeys` are payments already loaded for some bookings; the rest are fetched here.
+ */
+const finalizeBookings = async (bookingMap, payments, coveredKeys, pendingDepositKeys) => {
+  const list = [...new Set(Object.values(bookingMap))];
+  const need = list.filter((b) => b.status === "completed" && !(b.keys || []).some((k) => coveredKeys.has(k)));
+  const extra = need.length ? await loadPaymentsByBookingKeys(need.flatMap((b) => b.keys || [])) : [];
+  const byBooking = new Map();
+  [...payments, ...extra].forEach((p) => { if (!p.bookingID) return; const a = byBooking.get(p.bookingID) || []; a.push(p); byBooking.set(p.bookingID, a); });
+  list.forEach((b) => {
+    if (b.status === "cancelled") { b.finalizedAt = b.cancelledAt || b.updatedAt || b.tripStart || null; return; }
+    if (b.status === "stolen") { b.finalizedAt = b.stolenAt || b.updatedAt || null; return; }
+    if (b.status !== "completed") { b.finalizedAt = null; return; }
+    let held = false, settledAt = null;
+    const seen = new Set();
+    (b.keys || []).flatMap((k) => byBooking.get(k) || []).forEach((p) => {
+      if (seen.has(p.id)) return;
+      seen.add(p.id);
+      const v = getDepositView(p);
+      if (!v || !(num(v.amount) > 0)) return;
+      if (v.status === "Held" || pendingDepositKeys.has(p.paymentID || p.originalId || p.id)) { held = true; return; }
+      const t = toDate(p.depositSettledAt);
+      if (t && (!settledAt || t > settledAt)) settledAt = t;
+    });
+    const completed = b.completedAt || b.updatedAt || b.tripStart || null;
+    b.finalizedAt = held || !completed ? null : (settledAt && settledAt > completed ? settledAt : completed);
+  });
 };
 
 // ── PAYMENTS ────────────────────────────────────────────────────────────────
@@ -820,7 +878,8 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
  *
  *   Revenue = Rentals + Penalties - Returned - Deposits held back      Net = Revenue - Maintenance (Completed only) - PayMongo fees
  *   That formula is read two ways: cards / series / cars by the day the money moved (Payments & Transactions), and
- *   revenueBasis by the day the trip starts (Revenue & Expense): money for a trip that has not started is not revenue yet.
+ *   revenueBasis by the day the booking is FINALIZED (Revenue & Expense): only completed (deposit settled), cancelled and stolen
+ *   bookings count; money for an upcoming / ongoing booking is not revenue yet and is not shown anywhere as "expected".
  *   Deposits held back = security deposits that came in minus those settled in the period: a held deposit is not revenue yet.
  *
  * PAYMENT RECORDS are the payments CREATED in the period, labelled with the Payments page's own derivePaymentStage().
@@ -930,33 +989,29 @@ export const generateMoneyReport = async (period, selection = {}) => {
     if (!f.userID) f.userID = b?.userID || null;
   });
 
-  // ── REVENUE BASIS: money counts as revenue on the day the TRIP STARTS, not the day it was paid ──
+  // ── REVENUE BASIS: money counts as revenue on the day the BOOKING IS FINALIZED ──
   // The Payments & Transactions tab stays by the day the money moved, because that is what matches PayMongo.
-  // Revenue & Expense uses its own list, `revFlows`, built from the same entries with a different date:
-  //   - a booking that has not started yet (and is not cancelled): its money is received but NOT revenue yet (see `upcoming`)
-  //   - a booking that has started: its money counts on the trip start day, or on the day it was paid if that is later
-  //   - a cancelled booking: everything (what came in, what went back) counts on the cancellation day, so only what you
-  //     keep (a forfeited deposit, a gateway fee kept) stays and a refunded amount never becomes revenue
-  //   - penalties stay on the day they were paid
-  // The cancellation day is booking.cancelledAt when it exists, otherwise the booking's last update (what the cancel sets).
-  const nowDate = new Date();
+  // Revenue & Expense uses its own list, `revFlows`, built from the same entries with a different date. Only bookings that
+  // are over count (see finalizeBookings): completed (deposit settled), cancelled or stolen. Everything else (to pay, upcoming,
+  // ongoing, or completed with the deposit still held) is simply not read: there is no "expected" revenue or expense.
+  //   - completed / stolen: all of a booking's money lands on its finalization day, or on the day it was paid if that is later
+  //     (a penalty paid after the booking was finalized counts on the day it was paid)
+  //   - cancelled: everything (what came in, what went back) counts on the cancellation day, so only what you keep
+  //     (a forfeited deposit, a gateway fee kept) stays and a refunded amount never becomes revenue
+  // Example: paid Nov 3, deposit returned and booking completed Nov 5  ->  the revenue is recorded on Nov 5.
   const recDateOf = (b, date) => {
-    if (!b) return date;
-    if (b.status === "cancelled") return b.cancelledAt || b.updatedAt || b.tripStart || date;
-    if (!b.tripStart) return date;
-    if (b.tripStart > nowDate) return null;   // upcoming: not revenue yet
-    return b.tripStart > date ? b.tripStart : date;
+    if (!b || !b.finalizedAt) return null;   // no booking / not finalized yet: not revenue
+    if (b.status === "cancelled") return b.finalizedAt;
+    return b.finalizedAt > date ? b.finalizedAt : date;
   };
   const keysOfBooking = (doc) => uniq([doc.id, doc.data().bookingID]);
-  const [startingSnap, touchedSnap, upcomingSnap] = await Promise.all([
-    db.collection("bookings").where("startDateTime", ">=", start).where("startDateTime", "<=", end).get(),
-    db.collection("bookings").where("updatedAt", ">=", start).where("updatedAt", "<=", end).get(),   // cancelled bookings are found by their last update
-    db.collection("bookings").where("startDateTime", ">", nowDate).get(),
+  const [completedSnap, touchedSnap] = await Promise.all([
+    db.collection("bookings").where("completedAt", ">=", start).where("completedAt", "<=", end).get(),
+    db.collection("bookings").where("updatedAt", ">=", start).where("updatedAt", "<=", end).get(),   // cancelled / stolen bookings are found by their last update
   ]);
-  const cancelledInPeriod = touchedSnap.docs.filter((d) => normalizeBookingStatus(d.data().status) === "cancelled");
-  const relKeys = uniq([...startingSnap.docs, ...cancelledInPeriod].flatMap(keysOfBooking));
-  const upcomingDocs = upcomingSnap.docs.filter((d) => normalizeBookingStatus(d.data().status) !== "cancelled");
-  const upcomingKeys = uniq(upcomingDocs.flatMap(keysOfBooking));
+  const endedInPeriod = touchedSnap.docs.filter((d) => ["cancelled", "stolen"].includes(normalizeBookingStatus(d.data().status)));
+  // candidates: bookings completed / cancelled / stolen in the period, plus those whose deposit was settled in the period
+  const relKeys = uniq([...completedSnap.docs, ...endedInPeriod].flatMap(keysOfBooking).concat(settledDocs.map((p) => p.bookingID).filter(Boolean)));
   const byBookingKeys = async (collectionName, keys) => {
     const out = [];
     for (const part of chunk(keys, 30)) {
@@ -965,17 +1020,17 @@ export const generateMoneyReport = async (period, selection = {}) => {
     }
     return out;
   };
-  const [relEntries, relPayments, upcomingEntries] = await Promise.all([
+  const [relEntries, relPayments] = await Promise.all([
     byBookingKeys(ENTRY_COLLECTION, relKeys),
-    byBookingKeys("payments", relKeys),
-    byBookingKeys(ENTRY_COLLECTION, upcomingKeys),
+    loadPaymentsByBookingKeys(relKeys),
   ]);
   const allEntries = new Map();
   [...entries, ...relEntries].forEach((e) => { if (lower(e.status) === "success") allEntries.set(e.id, e); });
   Object.assign(bookingMap, await loadBookingsByIDs([
     ...[...allEntries.values()].map((e) => e.bookingID), ...relPayments.map((p) => p.bookingID),
-    ...startingSnap.docs.map((d) => d.id), ...cancelledInPeriod.map((d) => d.id), ...upcomingDocs.map((d) => d.id),
+    ...completedSnap.docs.map((d) => d.id), ...endedInPeriod.map((d) => d.id),
   ].filter(Boolean)));
+  await finalizeBookings(bookingMap, relPayments, new Set(relKeys), pendingDepositPaymentIDs);
 
   const revFlows = [];
   allEntries.forEach((e) => {
@@ -992,14 +1047,14 @@ export const generateMoneyReport = async (period, selection = {}) => {
       kind = e.phase === "discount" || e.phase === "discount_return" ? "discount_return" : "refund";
     }
     if (!kind) return;
-    const date = kind === "penalty" ? settled : recDateOf(b, settled);
+    const date = recDateOf(b, settled);
     if (!date || date < start || date > end) return;
     revFlows.push({ kind, date, paymentID: e.paymentID || null, phase: e.phase || null, bookingID: e.bookingID || null, userID: e.userID || b?.userID || null, carID: b?.carID || null, amount });
   });
   const revPayByID = await loadPaymentsByIDs(revFlows.filter((f) => f.kind === "rental").map((f) => f.paymentID));
   revFlows.forEach((f) => { if (f.kind === "rental") f.deposit = splitRentalEntry(f, revPayByID[f.paymentID] || null).deposit; });
 
-  // deposits settled (kept, returned, used or refunded): the same payments as above, plus the payments of bookings that start or are cancelled in the period
+  // deposits settled (kept, returned, used or refunded): the same payments as above, plus the payments of bookings finalized in the period
   const revSettled = [];
   const settledCandidates = new Map();
   settledDocs.forEach((p) => settledCandidates.set(p.id, p));
@@ -1018,40 +1073,9 @@ export const generateMoneyReport = async (period, selection = {}) => {
     if (num(v.returnedAmount) > 0) revFlows.push({ ...base, kind: "deposit_return", amount: num(v.returnedAmount) });
   });
 
-  // money received for trips that have not started (a snapshot as of now, whatever period is selected): not revenue yet
-  const upcomingPayByID = await loadPaymentsByIDs(upcomingEntries.filter((e) => lower(e.status) === "success" && e.direction === "in" && (e.phase === "deposit" || e.phase === "balance")).map((e) => e.paymentID));
-  const upcomingByBooking = new Map();
-  upcomingEntries.filter((e) => lower(e.status) === "success" && num(e.amount) > 0).forEach((e) => {
-    let delta = 0;
-    if (e.direction === "in" && (e.phase === "deposit" || e.phase === "balance")) delta = num(e.amount) - splitRentalEntry({ amount: num(e.amount), phase: e.phase }, upcomingPayByID[e.paymentID] || null).deposit;
-    else if (e.direction === "out" && e.phase !== "deposit_return") delta = -num(e.amount);
-    if (delta) upcomingByBooking.set(e.bookingID, (upcomingByBooking.get(e.bookingID) || 0) + delta);
-  });
-  const upcomingItems = [...upcomingByBooking.entries()].map(([id, v]) => ({ bookingID: id, date: bookingMap[id]?.tripStart || null, carID: bookingMap[id]?.carID || null, userID: bookingMap[id]?.userID || null, amount: Math.max(0, v) })).filter((x) => x.amount > 0);
-  const upcoming = { total: upcomingItems.reduce((t, x) => t + x.amount, 0), count: upcomingItems.length };
-  // the part of it whose trip starts inside the selected period: drawn as the hatched "expected" bar on that trip's day (never added to revenue)
-  const expectedList = upcomingItems.filter((x) => x.date && x.date >= start && x.date <= end);
-
-  // EXPECTED EXPENSES (shown apart, never part of Expenses or Net until they happen):
-  //   - the PayMongo fee already charged on money paid for a trip that has not started: it moves into Expenses on that trip's start day
-  //   - maintenance still Scheduled: on its scheduled day
-  const FEE_PHASES = new Set(["deposit", "balance", "penalty"]);
-  const expectedCostList = [];
-  upcomingEntries.forEach((e) => {
-    if (lower(e.status) !== "success" || e.direction !== "in" || !FEE_PHASES.has(e.phase)) return;
-    if (e.source === "in_person" || (!e.source && lower(e.method) === "cash")) return;
-    if (e.transactionFee === null || e.transactionFee === undefined) return;
-    const b = bookingMap[e.bookingID] || null;
-    const date = b?.tripStart || null;
-    if (!date || date < start || date > end) return;
-    expectedCostList.push({ kind: "fee", date, amount: num(e.transactionFee), bookingID: e.bookingID || null, userID: b?.userID || null, carID: b?.carID || null });
-  });
-  const scheduledMaint = await loadScheduledMaintenance(start, end);
-  scheduledMaint.forEach((m) => expectedCostList.push({ kind: "maintenance", date: m.date, amount: m.amount, id: m.id, services: m.services, basis: m.basis, carID: m.carID }));
-
-  const carIDs = uniq([...flows.map((f) => f.carID), ...expectedList.map((x) => x.carID), ...expectedCostList.map((x) => x.carID), ...revFlows.map((f) => f.carID), ...revSettled.map((x) => x.carID), ...maintenance.map((m) => m.carID), ...views.map((v) => v.carID)]);
+  const carIDs = uniq([...flows.map((f) => f.carID), ...revFlows.map((f) => f.carID), ...revSettled.map((x) => x.carID), ...maintenance.map((m) => m.carID), ...views.map((v) => v.carID)]);
   approvedRefunds.forEach((r) => { r.userID = r.userID || bookingMap[r.bookingID]?.userID || null; });
-  const userIDs = uniq([...flows.map((f) => f.userID), ...expectedList.map((x) => x.userID), ...expectedCostList.map((x) => x.userID), ...revFlows.map((f) => f.userID), ...revSettled.map((x) => x.userID), ...views.map((v) => v.userID || v.p.userID), ...approvedRefunds.map((r) => r.userID), ...pendingPayouts.map((e) => e.userID), ...heldDue.map(userOfPay), ...creditDue.map(userOfPay)]);
+  const userIDs = uniq([...flows.map((f) => f.userID), ...revFlows.map((f) => f.userID), ...revSettled.map((x) => x.userID), ...views.map((v) => v.userID || v.p.userID), ...approvedRefunds.map((r) => r.userID), ...pendingPayouts.map((e) => e.userID), ...heldDue.map(userOfPay), ...creditDue.map(userOfPay)]);
   const [carNames, userNames] = await Promise.all([resolveVehicleNames(carIDs), resolveUserNames(userIDs)]);
   const customerOf = (id) => (id && userNames[id] && userNames[id] !== "—" ? userNames[id] : "Unknown");
 
@@ -1118,8 +1142,8 @@ export const generateMoneyReport = async (period, selection = {}) => {
   });
   const feeRows = [...feeMap.values()].map(({ subs, ...row }) => ({ ...row, children: [...subs.values()].sort((a, b) => b.total - a.total) })).sort((a, b) => b.total - a.total);
   const fees = { rows: feeRows, total: feeRows.reduce((s, r) => s + r.total, 0), unrecorded: feeUnrecorded, gatewayReceived, bookingFees: feeOnBookings };
-  // The same online fees, dated like the revenue they belong to (trip start day, or the cancellation day), so Net compares matching things.
-  // A fee on money for a trip that has not started yet is left out until that trip starts.
+  // The same online fees, dated like the revenue they belong to (the booking's finalization day), so Net compares matching things.
+  // A fee on a booking that is not finalized yet is left out until it is.
   const revFeeItems = [];
   let revFeeUnrecorded = 0;
   allEntries.forEach((e) => {
@@ -1127,7 +1151,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     if (e.source === "in_person" || (!e.source && lower(e.method) === "cash")) return;
     const settled = toDate(e.settledAt);
     if (!settled) return;
-    const date = e.phase === "penalty" ? settled : recDateOf(bookingMap[e.bookingID] || null, settled);
+    const date = recDateOf(bookingMap[e.bookingID] || null, settled);
     if (!date || date < start || date > end) return;
     if (e.transactionFee === null || e.transactionFee === undefined) { revFeeUnrecorded += 1; return; }
     revFeeItems.push({ date, fee: num(e.transactionFee), bookingID: e.bookingID || null, carID: bookingMap[e.bookingID]?.carID || null });
@@ -1148,14 +1172,14 @@ export const generateMoneyReport = async (period, selection = {}) => {
 
   // ── time series: days (week / month / day) or months (year), every bucket listed so the chart has no gaps ──
   const g = period === "yearly" ? "month" : "day";
-  const buildSeries = (flowList, settledList, feeList, expectedList = [], expectedCostList = []) => {
+  const buildSeries = (flowList, settledList, feeList) => {
     const keyOf = (d) => (g === "month" ? `${d.getFullYear()}-${d.getMonth()}` : `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
     const buckets = new Map();
     for (let s = bucketStart(g, start); s <= end; s = g === "month" ? new Date(s.getFullYear(), s.getMonth() + 1, 1) : new Date(s.getFullYear(), s.getMonth(), s.getDate() + 1)) {
       buckets.set(keyOf(s), {
         key: keyOf(s), label: bucketLabel(g, s),
         short: g === "month" ? monthShort(s.getMonth()) : period === "daily" ? `${monthShort(s.getMonth())} ${s.getDate()}` : String(s.getDate()),
-        rentals: 0, penalties: 0, refunds: 0, depositReturns: 0, discountReturns: 0, returned: 0, deposits: 0, maintenance: 0, fees: 0, expected: 0, expectedFees: 0, expectedMaintenance: 0, expectedExpenses: 0,
+        rentals: 0, penalties: 0, refunds: 0, depositReturns: 0, discountReturns: 0, returned: 0, deposits: 0, maintenance: 0, fees: 0,
       });
     }
     flowList.forEach((f) => {
@@ -1173,25 +1197,18 @@ export const generateMoneyReport = async (period, selection = {}) => {
     });
     settledList.forEach((x) => { const b = buckets.get(keyOf(x.date)); if (b) b.deposits -= x.amount; });   // `deposits` = held deposits that came in minus those settled that day
     maintenance.forEach((m) => { const b = buckets.get(keyOf(new Date(m.date))); if (b) b.maintenance += m.amount; });
-    expectedList.forEach((x) => { const b = buckets.get(keyOf(x.date)); if (b) b.expected += x.amount; });   // paid for trips that start this day: not revenue yet
-    expectedCostList.forEach((x) => {   // fees / scheduled maintenance that have not happened yet: apart from Expenses
-      const b = buckets.get(keyOf(x.date));
-      if (!b) return;
-      if (x.kind === "fee") b.expectedFees += x.amount; else b.expectedMaintenance += x.amount;
-      b.expectedExpenses += x.amount;
-    });
     feeList.forEach((x) => { const b = x.date && buckets.get(keyOf(x.date)); if (b) b.fees += x.fee; });   // PayMongo kept this on the online payments received that day
     return [...buckets.values()].map((b) => ({ ...b, revenue: b.rentals + b.penalties - b.returned - b.deposits, expenses: b.maintenance + b.fees, net: b.rentals + b.penalties - b.returned - b.deposits - b.maintenance - b.fees }));
   };
   const series = buildSeries(flows, depositSettled, feeItems);
-  const revSeries = buildSeries(revFlows, revSettled, revFeeItems, expectedList, expectedCostList);
+  const revSeries = buildSeries(revFlows, revSettled, revFeeItems);
 
   // ── per car: what it brought in (net of what went back) against what maintenance cost ──
-  const buildCars = (flowList, settledList, feeList, expectedList = [], expectedCostList = []) => {
+  const buildCars = (flowList, settledList, feeList) => {
     const carMap = new Map();
     const carRow = (carID) => {
       const id = carID || "unknown";
-      if (!carMap.has(id)) carMap.set(id, { id, carID: carID || null, revenue: 0, maintenance: 0, fees: 0, expected: 0, expectedExpenses: 0, bookings: new Map(), jobs: [], scheduledJobs: [] });
+      if (!carMap.has(id)) carMap.set(id, { id, carID: carID || null, revenue: 0, maintenance: 0, fees: 0, bookings: new Map(), jobs: [] });
       return carMap.get(id);
     };
     flowList.forEach((f) => {
@@ -1218,23 +1235,6 @@ export const generateMoneyReport = async (period, selection = {}) => {
       cur.fees += x.fee;
       row.bookings.set(bid, cur);
     });
-    expectedList.forEach((x) => {   // paid for a trip that starts in the period but has not started yet: shown apart, never part of revenue
-      const row = carRow(x.carID);
-      row.expected += x.amount;
-      const bid = x.bookingID || "unknown";
-      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
-      cur.expected = (cur.expected || 0) + x.amount;
-      row.bookings.set(bid, cur);
-    });
-    expectedCostList.forEach((x) => {   // expected PayMongo fee on an upcoming booking, or a Scheduled maintenance job
-      const row = carRow(x.carID);
-      row.expectedExpenses += x.amount;
-      if (x.kind === "maintenance") { row.scheduledJobs.push(x); return; }
-      const bid = x.bookingID || "unknown";
-      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
-      cur.expectedExpenses = (cur.expectedExpenses || 0) + x.amount;
-      row.bookings.set(bid, cur);
-    });
     maintenance.forEach((m) => {
       const row = carRow(m.carID);
       row.maintenance += m.amount;
@@ -1243,10 +1243,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     return [...carMap.values()].map((r) => {
       const children = [
         ...[...r.bookings.values()].sort((a, b) => b.net - a.net).map((b) => ({
-          id: `b:${b.bookingID}`, name: `${b.bookingID || "Booking"} · ${customerOf(b.userID)}`, revenue: b.net, maintenance: 0, fees: b.fees || 0, expected: b.expected || 0, expectedExpenses: b.expectedExpenses || 0, net: b.net - (b.fees || 0),
-        })),
-        ...r.scheduledJobs.sort((a, b) => b.amount - a.amount).map((m) => ({
-          id: `s:${m.id}`, name: `Scheduled maintenance · ${m.services || m.basis || "Service"}`, revenue: 0, maintenance: 0, fees: 0, expected: 0, expectedExpenses: m.amount, net: 0,
+          id: `b:${b.bookingID}`, name: `${b.bookingID || "Booking"} · ${customerOf(b.userID)}`, revenue: b.net, maintenance: 0, fees: b.fees || 0, net: b.net - (b.fees || 0),
         })),
         ...r.jobs.sort((a, b) => b.amount - a.amount).map((m) => ({
           id: `m:${m.id}`, name: `Maintenance · ${m.services || m.basis || "Service"}`, revenue: 0, maintenance: m.amount, fees: 0, net: -m.amount,
@@ -1254,12 +1251,12 @@ export const generateMoneyReport = async (period, selection = {}) => {
       ];
       return {
         id: r.id, name: r.carID ? (carNames[r.carID] || "Unknown Vehicle") : "Unknown Vehicle",
-        revenue: r.revenue, maintenance: r.maintenance, fees: r.fees, expected: r.expected, expectedExpenses: r.expectedExpenses, net: r.revenue - r.maintenance - r.fees, bookings: r.bookings.size, children,
+        revenue: r.revenue, maintenance: r.maintenance, fees: r.fees, net: r.revenue - r.maintenance - r.fees, bookings: r.bookings.size, children,
       };
     });
   };
   const cars = buildCars(flows, depositSettled, feeItems);
-  const revCars = buildCars(revFlows, revSettled, revFeeItems, expectedList, expectedCostList);
+  const revCars = buildCars(revFlows, revSettled, revFeeItems);
 
   // ── money in by method (opens into online / in person), money out by type ──
   const methodMap = new Map();
@@ -1407,7 +1404,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     .map((m) => ({ ...m, barTotal: m.total + m.unpaid, children: m.children.map((c) => ({ ...c, unpaid: c.unpaid || 0, barTotal: c.barTotal ?? c.total })) }))
     .sort((a, b) => b.total - a.total || b.unpaid - a.unpaid);
 
-  // ── Revenue & Expense on the trip-start basis (see REVENUE BASIS above) ──
+  // ── Revenue & Expense on the finalization basis (see REVENUE BASIS above) ──
   const rsum = (kind) => revFlows.filter((f) => f.kind === kind).reduce((t, f) => t + f.amount, 0);
   const rRentals = rsum("rental"), rPenalties = rsum("penalty");
   const rRefunds = rsum("refund"), rDepositReturns = rsum("deposit_return"), rDiscountReturns = rsum("discount_return");
@@ -1420,10 +1417,6 @@ export const generateMoneyReport = async (period, selection = {}) => {
       depositsHeldBack: rDepositHeld, revenue: rRevenue, moneyIn: rRentals + rPenalties,
       maintenance: maintenanceTotal, gatewayFees: revFeesTotal, gatewayFeesUnrecorded: revFeeUnrecorded,
       net: rRevenue - maintenanceTotal - revFeesTotal,
-      upcomingReceived: upcoming.total, upcomingCount: upcoming.count,
-      expectedInPeriod: expectedList.reduce((t, x) => t + x.amount, 0),
-      expectedFeesInPeriod: expectedCostList.filter((x) => x.kind === "fee").reduce((t, x) => t + x.amount, 0),
-      expectedMaintenanceInPeriod: expectedCostList.filter((x) => x.kind === "maintenance").reduce((t, x) => t + x.amount, 0),
     },
     series: revSeries,
     cars: revCars,
