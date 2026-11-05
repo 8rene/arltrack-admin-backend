@@ -825,7 +825,7 @@ export const waiveDeposit = async ({ paymentID, reason, by }) => {
 // onlineReturn: true -> the money is going back through PayMongo. The deposit is settled and the return row is saved as
 // "pending" (no reference yet) in this same transaction: that is the claim. The caller then makes the PayMongo refund
 // for exactly `net` and attaches its id to the row (see settleDeposit), so a retry can never refund twice.
-export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnReferenceNumber = "", onlineReturn = false }) => {
+export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnReferenceNumber = "", onlineReturn = false, sendAfter = null, paymongoPaymentID = null }) => {
   const booking = await getBookingDoc(bookingID);
   if (!booking) return { error: "Booking not found." };
   const payment = await getPaymentByBookingID(bookingID);
@@ -939,6 +939,9 @@ export const settleBooking = async ({ bookingID, actorUid, returnMethod, returnR
         method: onlineReturn ? null : (ENTRY_METHODS.includes(methodKey) ? methodKey : null),
         amount,
         status: onlineReturn ? "pending" : "success",   // online: PayMongo confirms afterwards (webhook)
+        // Same-day payment: sendAfter = next Manila midnight. The row waits (no PayMongo call) until the midnight cron sends it.
+        sendAfter: onlineReturn && sendAfter ? sendAfter : null,
+        paymongoPaymentID: onlineReturn ? (paymongoPaymentID || null) : null,
         referenceNumber: onlineReturn ? null : (String(returnReferenceNumber || "").trim() || null),
         sessionID: null,
         transactionFee: null,

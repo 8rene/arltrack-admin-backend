@@ -98,7 +98,7 @@ const isLocked = (r) => {
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
 const MANILA_DAY_MS = 24 * 60 * 60 * 1000;
 const manilaDayStart = (d) => new Date(Math.floor((d.getTime() + MANILA_OFFSET_MS) / MANILA_DAY_MS) * MANILA_DAY_MS - MANILA_OFFSET_MS);
-const nextManilaMidnight = (d) => new Date(manilaDayStart(d).getTime() + MANILA_DAY_MS);
+export const nextManilaMidnight = (d) => new Date(manilaDayStart(d).getTime() + MANILA_DAY_MS);
 const toDateSafe = (v) => {
   if (!v) return null;
   const d = typeof v.toDate === "function" ? v.toDate() : v._seconds !== undefined ? new Date(v._seconds * 1000) : new Date(v);

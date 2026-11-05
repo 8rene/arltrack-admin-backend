@@ -33,6 +33,10 @@ export const registerVehicleDocsRoutes = (app) => {
 
   // Optional videos (max 3) and additional photos (max 20) — staff only, same as the rest of the inspection.
   app.post("/api/vehicle-docs/:phase/videos",                 verifyToken, requireRole(allowed), videoHandlers.add);
+  // The client (InspectionMedia.jsx removeMedia) calls DELETE .../videos?bookingID=&url= with NO :mediaID, which none of the
+  // routes below matched (404, so nothing could be deleted). Entries are identified by their url, so these are the real ones.
+  app.delete("/api/vehicle-docs/:phase/videos",                verifyToken, requireRole(allowed), videoHandlers.remove);
+  app.delete("/api/vehicle-docs/:phase/extra-photos",          verifyToken, requireRole(allowed), extraPhotoHandlers.remove);
   app.delete("/api/vehicle-docs/:phase/videos/:mediaID",       verifyToken, requireRole(allowed), videoHandlers.remove);
   app.post("/api/vehicle-docs/:phase/extra-photos",           verifyToken, requireRole(allowed), extraPhotoHandlers.add);
   app.delete("/api/vehicle-docs/:phase/extra-photos/:mediaID", verifyToken, requireRole(allowed), extraPhotoHandlers.remove);

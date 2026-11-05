@@ -728,6 +728,9 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
     bookingID: bID, actorUid: performedBy,
     returnMethod: goOnline ? null : (method || null), returnReferenceNumber: referenceNumber,
     onlineReturn: goOnline,
+    // Same-day first payment: the return is saved as scheduled (sendAfter) and the midnight cron sends it.
+    sendAfter: onlinePlan?.deferred ? onlinePlan.sendAfter : null,
+    paymongoPaymentID: onlinePlan?.paymongoPaymentID || null,
   });
   if (res?.error) throw new Error(res.error);
 
@@ -741,6 +744,7 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
       deposit: res.returnEntryID ? { entryID: res.returnEntryID, amount: res.depositReturn } : null,
       credit: res.creditEntryID ? { entryID: res.creditEntryID, amount: res.creditReturn } : null,
       paymongoPaymentID: onlinePlan.paymongoPaymentID, performedBy, customerUserID: customerUserID || res.userID || null,
+      deferred: !!onlinePlan.deferred, sendAfter: onlinePlan.sendAfter || null,
     });
   }
 
@@ -752,7 +756,7 @@ export const settleDeposit = async (docID, { method, referenceNumber = "", onlin
   createAuditLog({
     action: "update", userID: performedBy, bookingID: bID,
     description: res.net > 0
-      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} ${res.creditReturn > 0 ? `(₱${res.depositReturn} deposit + ₱${res.creditReturn} discount credit, as separate returns) ` : ""}${goOnline ? `being returned online through PayMongo (${onlineResult?.state === "failed" ? "PayMongo refused it — needs follow-up" : onlineResult?.state === "partial" ? "one of the two was refused — needs follow-up" : "waiting for PayMongo"})` : `returned via ${method}`}.`
+      ? `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ₱${res.net} ${res.creditReturn > 0 ? `(₱${res.depositReturn} deposit + ₱${res.creditReturn} discount credit, as separate returns) ` : ""}${goOnline ? `being returned online through PayMongo (${onlineResult?.state === "scheduled" ? "scheduled: the first payment was made today, so the scheduled job sends it after midnight" : onlineResult?.state === "failed" ? "PayMongo refused it — needs follow-up" : onlineResult?.state === "partial" ? "one of the two was refused — needs follow-up" : "waiting for PayMongo"})` : `returned via ${method}`}.`
       : `Settled deposit on booking ${bID}: penalties ₱${res.confirmedPenaltyTotal}, ${res.outstandingAfterDeposit > 0 ? `₱${res.outstandingAfterDeposit} still owed by the customer` : "nothing to return"}.`,
   }).catch((err) => console.error("[AuditLog] Deposit settle log failed:", err.message));
 
@@ -1305,7 +1309,7 @@ export const getReturnChecklist = async (docID) => {
     canCompleteAndSettle: isOngoing && holdsDeposit && underReviewCount === 0,
     bookingStatus: booking.status || null,
     underReviewCount,
-    onlineReturn: onlineOption,   // { available, channel? , reason? }
+    onlineReturn: onlineOption,   // { available, channel?, scheduled?, sendAfter?, reason? }  (scheduled = same-day payment: sent by the midnight cron)
     items,
     driverID: await resolveCurrentDriverID(booking, docID),
     depositStatus: pos.depositStatus,

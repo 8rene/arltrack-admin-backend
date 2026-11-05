@@ -1,5 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { createPaymongoRefund, wasPaidTodayManila, paidWithOf } from "../refundRequest/refundRequest.service.js";
+import { createPaymongoRefund, wasPaidTodayManila, paidWithOf, nextManilaMidnight } from "../refundRequest/refundRequest.service.js";
 import { hydratePaymentData, ENTRY_COLLECTION } from "../paymentEntries/paymentEntries.service.js";
 import { resolvePaymongoIDs, getPaymentBreakdown } from "../payments/paymentBreakdown.js";
 import { notifyStaff, resolveNotification, createNotification } from "../notification/notification.service.js";
@@ -24,6 +24,10 @@ import { auditSafe } from "../auditLogs/auditLogs.service.js";
 //   2. Only then is PayMongo called (never inside a transaction), for exactly the amount that was saved.
 //   3a. PayMongo accepted  -> the refund id is written onto the row; the webhook settles it later.
 //   3b. PayMongo refused   -> the row is marked "failed" and staff are told to retry or hand it back in store.
+//
+// SAME-DAY PAYMENTS: PayMongo can't PARTIALLY refund a payment on the day it was made. Instead of refusing, the return is
+// saved as "pending" with `sendAfter` (the next Manila midnight) and NO PayMongo call. The midnight cron
+// (runScheduledDepositReturns, called from jobs/scheduledRefunds.job.js) sends it. Same idea as scheduled cancellation refunds.
 // ─────────────────────────────────────────────
 
 const lower = (v) => String(v == null ? "" : v).trim().toLowerCase();
@@ -58,18 +62,19 @@ export const planOnlineDepositReturn = (payment, amount) => {
   if (!ids.deposit) {
     return { ok: false, reason: "This payment's PayMongo record is incomplete (no payment id for the deposit), so it can only be handed back in store." };
   }
-  // Same-day rule (see computeRefundSchedule in refundRequest.service.js): PayMongo can't PARTIALLY refund a payment on the day
-  // it was made, and a deposit / discount return is always smaller than the first payment. Refusing here, before anything is
-  // saved, means no failed row, no staff alert and no "return delayed" message to the customer. From the next Manila day on
-  // the same call is accepted (this also covers a retry).
-  if (wasPaidTodayManila(payment && payment.paidAt)) {
-    return { ok: false, reason: "The first payment was made today, and PayMongo can't partially refund a payment on the day it was made. Hand it back in store, or return it online from tomorrow." };
-  }
   const collected = getPaymentBreakdown(payment).depositCollected;
   if (amount > collected) {
     return { ok: false, reason: `The amount to return (${peso(amount)}) is more than the first payment PayMongo received (${peso(collected)}).` };
   }
-  return { ok: true, paymongoPaymentID: ids.deposit, channel: channel === "maya" ? "paymaya" : channel };
+  // Same-day rule (see computeRefundSchedule in refundRequest.service.js): PayMongo can't PARTIALLY refund a payment on the day
+  // it was made. A deposit / discount return is smaller than the first payment, so when that payment was made today (Manila)
+  // the return is NOT refused: it is saved now and SENT by the midnight cron (`deferred`, `sendAfter`). A full refund of the
+  // charge is never deferred.
+  const deferred = wasPaidTodayManila(payment && payment.paidAt) && amount < collected - 0.005;
+  return {
+    ok: true, paymongoPaymentID: ids.deposit, channel: channel === "maya" ? "paymaya" : channel,
+    deferred, sendAfter: deferred ? nextManilaMidnight(new Date()) : null,
+  };
 };
 
 /** Same check from a booking's payment document id / bookingID, for the checklist (read-only, never throws). */
@@ -79,7 +84,7 @@ export const onlineDepositReturnOption = async (bookingID, amount) => {
     if (snap.empty) return { available: false, reason: "No payment record." };
     const payment = await hydratePaymentData(snap.docs[0].data(), snap.docs[0].id);
     const plan = planOnlineDepositReturn(payment, Math.max(0, num(amount)));
-    return plan.ok ? { available: true, channel: plan.channel } : { available: false, reason: plan.reason };
+    return plan.ok ? { available: true, channel: plan.channel, scheduled: !!plan.deferred, sendAfter: plan.sendAfter ? plan.sendAfter.toISOString() : null } : { available: false, reason: plan.reason };
   } catch {
     return { available: false, reason: "Couldn't check how the deposit was paid." };
   }
@@ -90,7 +95,7 @@ export const onlineDepositReturnOption = async (bookingID, amount) => {
 const attachRefundID = async (entryRef, refundID) => {
   let lastErr = null;
   for (let i = 0; i < 3; i++) {
-    try { await entryRef.update({ referenceNumber: refundID, updatedAt: new Date() }); return true; }
+    try { await entryRef.update({ referenceNumber: refundID, sendAfter: null, updatedAt: new Date() }); return true; }
     catch (e) { lastErr = e; await new Promise((r) => setTimeout(r, 300 * (i + 1))); }
   }
   console.error(`[DEPOSIT RETURN] could not save PayMongo refund id ${refundID} on row ${entryRef.id}:`, lastErr && lastErr.message);
@@ -98,7 +103,7 @@ const attachRefundID = async (entryRef, refundID) => {
 };
 
 const failRow = async (entryRef, note) => {
-  await entryRef.update({ status: "failed", settledAt: null, transactionErrorNote: String(note || "PayMongo refused the refund.").slice(0, 300), updatedAt: new Date() });
+  await entryRef.update({ status: "failed", sendAfter: null, settledAt: null, transactionErrorNote: String(note || "PayMongo refused the refund.").slice(0, 300), updatedAt: new Date() });
 };
 
 const what = (phase) => (phase === CREDIT ? "discount" : "deposit");
@@ -170,6 +175,21 @@ const notifyCustomerProcessing = (customerUserID, bookingID, parts) => {
   }).catch((e) => console.error("[DEPOSIT RETURN] customer notify failed:", e.message));
 };
 
+// A same-day return that PayMongo can't send until tomorrow: the customer is told when to expect it.
+const fmtManila = (d) => (d ? new Date(d).toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" }) : "the next day");
+const notifyCustomerScheduled = (customerUserID, bookingID, parts, sendAfter) => {
+  if (!customerUserID || !parts.length) return;
+  const dep = parts.find((p) => p.phase === DEPOSIT);
+  const cr = parts.find((p) => p.phase === CREDIT);
+  const text = dep && cr ? `Your security deposit of ${peso(dep.amount)} and your ${peso(cr.amount)} discount`
+    : dep ? `Your security deposit of ${peso(dep.amount)}` : `Your ${peso(cr.amount)} discount`;
+  createNotification({
+    type: "deposit_return_processing", refID: bookingID, refCollection: "bookings", userID: customerUserID,
+    title: dep ? "Deposit return scheduled" : "Discount return scheduled",
+    message: `${text} will be sent back to your original payment method on ${fmtManila(sendAfter)}. Your payment was made today, and refunds of part of a same-day payment can only be sent from the next day.`,
+  }).catch((e) => console.error("[DEPOSIT RETURN] customer notify (scheduled) failed:", e.message));
+};
+
 // The online return could not be sent: the customer is told it is delayed (staff retry it or hand it back in store).
 const notifyCustomerDelayed = (customerUserID, bookingID, failed) => {
   if (!customerUserID || !failed.length) return;
@@ -210,7 +230,18 @@ export const notifyCustomerReturnedInStore = (customerUserID, bookingID, { depos
  *   deposit / credit: { entryID, amount } | null
  * Returns { state: "processing" | "failed" | "partial", deposit, credit } (each { state, refundID?, error? } or null).
  */
-export const sendOnlineReturns = async ({ bookingID, paymentID, deposit = null, credit = null, paymongoPaymentID, performedBy, customerUserID, notifyFailure = true }) => {
+export const sendOnlineReturns = async ({ bookingID, paymentID, deposit = null, credit = null, paymongoPaymentID, performedBy, customerUserID, notifyFailure = true, deferred = false, sendAfter = null }) => {
+  // Same-day payment: nothing goes to PayMongo now. The rows were saved as pending WITH sendAfter by settleBooking; the midnight
+  // cron sends them. state "scheduled" tells the caller (and the screen) that.
+  if (deferred) {
+    const parts = [];
+    if (deposit) parts.push({ phase: DEPOSIT, amount: deposit.amount });
+    if (credit) parts.push({ phase: CREDIT, amount: credit.amount });
+    notifyCustomerScheduled(customerUserID, bookingID, parts, sendAfter);
+    auditSafe({ action: "update", userID: performedBy || null, bookingID, paymentID,
+      description: `Return of ${parts.map((p) => `${peso(p.amount)} ${what(p.phase)}`).join(" + ")} for booking ${bookingID} scheduled: the first payment was made today and PayMongo can't partially refund it yet. It will be sent through PayMongo from ${fmtManila(sendAfter)} by the scheduled job.` });
+    return { state: "scheduled", sendAfter, deposit: deposit ? { state: "scheduled" } : null, credit: credit ? { state: "scheduled" } : null };
+  }
   let out = { deposit: null, credit: null };
   if (deposit && credit) {
     // Both payouts at once: a single PayMongo refund for the total, two ledger rows.
@@ -242,6 +273,8 @@ export const sendOnlineReturns = async ({ bookingID, paymentID, deposit = null, 
 // page's History, never under Under Process. Newest row per payment wins, so a retry or a hand-back supersedes the
 // failed row.
 // ─────────────────────────────────────────────
+// A return saved for the midnight cron: still pending, no PayMongo refund id yet, and it carries a sendAfter.
+const isScheduledRow = (row) => lower(row.status) === "pending" && !row.referenceNumber && !!row.sendAfter;
 const stateOfRow = (row) => {
   const st = lower(row.status);
   if (st === "success") return "refunded";
@@ -302,6 +335,7 @@ export const getDepositReturns = async () => {
         method: latest.method || null,
         referenceNumber: latest.referenceNumber || null,
         errorNote: latest.transactionErrorNote || null,
+        sendAfter: isScheduledRow(latest) ? isoOf(latest.sendAfter) : null,   // set = waiting for the midnight cron
         at: isoOf(at),
       },
     });
@@ -329,6 +363,7 @@ export const getDepositReturnForBooking = async (bookingID) => {
       method: r.method || null,
       referenceNumber: r.referenceNumber || null,
       errorNote: r.transactionErrorNote || null,
+      sendAfter: isScheduledRow(r) ? isoOf(r.sendAfter) : null,
       at: isoOf(r.settledAt || r.processedAt || r.createdAt),
     };
   } catch {
@@ -358,18 +393,19 @@ const latestReturnRow = async (paymentID, phase = DEPOSIT) => {
 // and why there may be nothing to act on. Throws the same plain-language errors the single-payout version always did.
 const failedPayouts = async (paymentID, action) => {
   const targets = [];
-  let pending = false, done = false, any = false;
+  let pending = false, done = false, any = false, scheduledFor = null;
   for (const phase of PAYOUT_PHASES) {
     const latest = await latestReturnRow(paymentID, phase);
     if (!latest) continue;
     any = true;
     const st = lower(latest.status);
     if (st === "failed") targets.push({ phase, amount: num(latest.amount), latest });
-    else if (st === "pending") pending = true;
+    else if (st === "pending") { pending = true; if (isScheduledRow(latest)) scheduledFor = latest.sendAfter; }
     else done = true;
   }
   if (!any) throw new Error("There is no deposit return on this booking.");
   if (!targets.length) {
+    if (pending && scheduledFor) throw new Error(`This return is scheduled: PayMongo can't partially refund a same-day payment, so it is sent automatically from ${fmtManila(toMillis(scheduledFor))}. If the send fails it moves to Failed, and then it can be retried or handed back in store.`);
     if (pending) throw new Error(action === "handback"
       ? "PayMongo is still processing this return. Wait for it to finish, or for it to fail, before handing it back in store."
       : "This return is still processing at PayMongo — wait for it to finish.");
@@ -503,8 +539,85 @@ export const getPayoutsNeedingAttention = async () => {
         state,
         amount: num(row.amount),
         errorNote: row.transactionErrorNote || null,
+        sendAfter: isScheduledRow(row) ? isoOf(row.sendAfter) : null,
         at: isoOf(row.createdAt || row.processedAt),
       });
+    }
+  }
+  return out;
+};
+
+// ─────────────────────────────────────────────
+// CRON: send the same-day returns whose sendAfter has passed (called by jobs/scheduledRefunds.job.js, 00:10 Manila).
+//
+//   * every pending deposit_return / discount_return row WITHOUT a PayMongo refund id and with a sendAfter in the past
+//   * grouped per payment, so a deposit + discount credit still go out as ONE PayMongo refund (see refundCombined)
+//   * each group is CLAIMED first (sendClaimedAt, in a transaction): two overlapping cron runs can't both send it
+//   * the actual send is sendOnlineReturns(): the same code as an immediate return. PayMongo accepts -> refund id saved on the
+//     row (sendAfter cleared), the webhook / refund sync confirms it. PayMongo refuses -> the row is marked failed, staff and the
+//     customer are told, and it shows up for the existing Retry / Hand back in store buttons. NO automatic retry.
+//   * a group already claimed but with no refund id (the job died between PayMongo and the save) is NOT sent again: it could
+//     already have been refunded. It is reported so someone can check PayMongo by hand.
+// ─────────────────────────────────────────────
+export const runScheduledDepositReturns = async () => {
+  const out = { sent: 0, failed: 0, skipped: 0, errors: [] };
+  const snap = await db.collection(ENTRY_COLLECTION).where("direction", "==", "out").where("status", "==", "pending").get();
+  const now = Date.now();
+  const groups = new Map();
+  snap.docs.forEach((d) => {
+    const r = d.data();
+    if (!PAYOUT_PHASES.includes(r.phase) || r.source !== "online" || !isScheduledRow(r)) return;
+    if (toMillis(r.sendAfter) > now) return;   // not due yet
+    const key = r.paymentID;
+    if (!key) return;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d);
+  });
+
+  for (const [paymentID, docs] of groups) {
+    const bookingID = docs[0].data().bookingID || null;
+    try {
+      if (docs.some((d) => d.data().sendClaimedAt)) {
+        out.skipped += 1;
+        out.errors.push(`${paymentID}: a send was started but never confirmed. Check PayMongo for this booking before sending again.`);
+        continue;
+      }
+      // Claim: only if every row is still the scheduled, unclaimed one.
+      const claimed = await db.runTransaction(async (tx) => {
+        const fresh = await Promise.all(docs.map((d) => tx.get(d.ref)));
+        if (!fresh.every((f) => f.exists && isScheduledRow(f.data()) && !f.data().sendClaimedAt)) return false;
+        const at = new Date();
+        fresh.forEach((f) => tx.update(f.ref, { sendClaimedAt: at }));
+        return true;
+      });
+      if (!claimed) { out.skipped += 1; continue; }
+
+      const rowOf = (phase) => docs.find((d) => d.data().phase === phase);
+      const dep = rowOf(DEPOSIT), cr = rowOf(CREDIT);
+      const first = docs[0].data();
+      const paymongoPaymentID = first.paymongoPaymentID || null;
+      if (!paymongoPaymentID) {
+        // Can't be sent without the charge id: mark them failed so staff hand them back in store.
+        for (const d of docs) await failRow(d.ref, "The scheduled return has no PayMongo payment id.").catch(() => {});
+        await notifyFailure(bookingID, first.amount, "no PayMongo payment id", first.phase);
+        out.failed += docs.length;
+        out.errors.push(`${paymentID}: no PayMongo payment id on the scheduled row.`);
+        continue;
+      }
+      const res = await sendOnlineReturns({
+        bookingID, paymentID,
+        deposit: dep ? { entryID: dep.id, amount: num(dep.data().amount) } : null,
+        credit: cr ? { entryID: cr.id, amount: num(cr.data().amount) } : null,
+        paymongoPaymentID, performedBy: "system", customerUserID: first.userID || null,
+      });
+      for (const r of [res.deposit, res.credit]) {
+        if (!r) continue;
+        if (r.state === "processing") out.sent += 1;
+        else { out.failed += 1; out.errors.push(`${paymentID}: ${r.error || "PayMongo refused it"}`); }
+      }
+    } catch (e) {
+      out.failed += 1;
+      out.errors.push(`${paymentID}: ${e.message}`);
     }
   }
   return out;

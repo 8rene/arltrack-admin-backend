@@ -100,6 +100,8 @@ export const PaymentEntry = {
   sessionID:   null,        // PayMongo checkout session (online "in" rows) -- webhook lookup key
   paymongoPaymentID: null,  // online "out" rows only: the PayMongo charge (pay_...) this refund part is taken from. A scheduled
                             // (same-day) refund is sent from it later, so it is stored here instead of on the refund request.
+  sendAfter:   null,        // online deposit_return / discount_return rows of a SAME-DAY payment: the next Manila midnight. While set (and
+                            // no re_... id yet) the row is "scheduled": the midnight cron sends it, then clears this.
   transactionFee: null,     // PayMongo's actual fee for this charge (NOT payments.gatewayFee, which is
                             // what the customer was charged from system settings)
   processedBy: null,        // staff uid who confirmed / handed back (in person). null for online + webhooks
