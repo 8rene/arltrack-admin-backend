@@ -145,6 +145,16 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
         gross, discount, discountReason: discount > 0 ? payment.discountReason || null : null,
         total: round2(gross - discount),
         securityDeposit: num(payment.securityDeposit),
+        // What the booking is made of (the same figures as the Booking Fee card on the Bookings page). driversFee is the
+        // TOTAL for the trip, so the per-day rate is driversFee / days. Added on top of the existing fields, nothing else changes.
+        fees: {
+          rental: num(payment.rentalFee),
+          service: num(payment.serviceFee),
+          gateway: num(payment.gatewayFee),
+          extra: num(payment.extraFee),
+          driver: num(payment.driversFee),
+          days: Math.max(1, num(booking?.totalDays) || 1),
+        },
       };
     }
     const bookingPaid = sum(bookingPayments);
