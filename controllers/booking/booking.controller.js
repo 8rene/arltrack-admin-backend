@@ -17,7 +17,7 @@ export const listBookings = async (req, res) => {
 export const editBooking = async (req, res) => {
   try {
     const { id } = req.params;
-    await updateBooking(id, req.body, req.user?.email || req.user?.uid || null);
+    await updateBooking(id, req.body, req.user?.uid || req.user?.userID || req.user?.email || null);
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("[BOOKINGS] edit error:", error);
@@ -53,7 +53,7 @@ export const rejectCancellation = async (req, res) => {
 export const markDroppedOff = async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await markBookingDroppedOff(id, req.user?.email || req.user?.uid || null);
+    const result = await markBookingDroppedOff(id, req.user?.uid || req.user?.userID || req.user?.email || null);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] markDroppedOff error:", error);
@@ -66,7 +66,7 @@ export const settleDepositHandler = async (req, res) => {
   try {
     const { id } = req.params;
     const { method, referenceNumber, online, completeBooking } = req.body || {};
-    const result = await settleDeposit(id, { method, referenceNumber, online, completeBooking: completeBooking === true }, req.user?.email || req.user?.uid || null);
+    const result = await settleDeposit(id, { method, referenceNumber, online, completeBooking: completeBooking === true }, req.user?.uid || req.user?.userID || req.user?.email || null);
     return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("[BOOKINGS] settleDeposit error:", error);
@@ -77,7 +77,7 @@ export const settleDepositHandler = async (req, res) => {
 // ── Online deposit return that PayMongo refused: retry it, or record that it was handed back in store ──
 export const retryDepositReturnHandler = async (req, res) => {
   try {
-    const data = await retryDepositReturn(req.params.id, req.user?.email || req.user?.uid || null);
+    const data = await retryDepositReturn(req.params.id, req.user?.uid || req.user?.userID || req.user?.email || null);
     return res.status(200).json({ success: true, message: "Deposit return sent to PayMongo again.", data });
   } catch (error) {
     console.error("[BOOKINGS] retryDepositReturn error:", error);
@@ -87,7 +87,7 @@ export const retryDepositReturnHandler = async (req, res) => {
 export const handBackDepositReturnHandler = async (req, res) => {
   try {
     const { method, referenceNumber } = req.body || {};
-    const data = await handBackDepositReturn(req.params.id, { method, referenceNumber }, req.user?.email || req.user?.uid || null);
+    const data = await handBackDepositReturn(req.params.id, { method, referenceNumber }, req.user?.uid || req.user?.userID || req.user?.email || null);
     return res.status(200).json({ success: true, message: "Deposit hand-back recorded.", data });
   } catch (error) {
     console.error("[BOOKINGS] handBackDepositReturn error:", error);

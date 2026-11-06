@@ -774,7 +774,17 @@ export const updateBooking = async (docID, updates, performedBy = null, { skipRe
 
   const nonEditable = ["completed", "cancelled", "stolen"]; // once flagged stolen, no further edits through this endpoint
   if (nonEditable.includes(oldStatus?.toLowerCase())) {
-    throw new Error(`Cannot edit a booking with status: ${oldStatus}`);
+    // The one thing still allowed on a finished booking is the admin note ("Add Note"): nothing else may be sent with it.
+    const sent = Object.keys(updates || {}).filter((k) => updates[k] !== undefined);
+    const notesOnly = sent.length > 0 && sent.every((k) => k === "notesAdmin");
+    if (!notesOnly) throw new Error(`Cannot edit a booking with status: ${oldStatus}`);
+
+    await db.collection("bookings").doc(docID).update({ notesAdmin: String(updates.notesAdmin ?? "") });
+    createAuditLog({
+      action: "update", userID: performedBy, bookingID: bookingID || docID,
+      description: `Updated admin note on ${String(oldStatus).toLowerCase()} booking ${bookingID || docID}`,
+    }).catch((err) => console.error("[AuditLog] Note update log failed:", err.message));
+    return { success: true };
   }
 
   // "location" (free text) is deliberately not editable: the name always comes from a map pick (stopEdits below),

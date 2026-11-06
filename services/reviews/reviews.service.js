@@ -52,6 +52,10 @@ export const getReviewsForCar = async (carID) => {
   const userMap = Object.fromEntries(
     userDocs.filter((d) => d.exists).map((d) => [d.id, d.data().username || d.data().email || d.id])
   );
+  // Is the reviewer's account flagged right now? (read from the live user record, so it is never stale)
+  const flagMap = Object.fromEntries(
+    userDocs.filter((d) => d.exists).map((d) => [d.id, d.data().isFlagged === true])
+  );
 
   const reviews = reviewsSnap.docs.map((doc) => {
     const r = doc.data();
@@ -59,6 +63,8 @@ export const getReviewsForCar = async (carID) => {
       reviewID: r.reviewID || doc.id,
       userID: r.userID || "",
       reviewerName: userMap[r.userID] || "Unknown user",
+      reviewerFound: r.userID in userMap,   // false when the account no longer exists (nothing to flag)
+      isFlagged: flagMap[r.userID] === true,
       bookingID: r.bookingID || "",
       rating: Number(r.rating) || 0,
       comment: r.comment || "",
@@ -107,6 +113,7 @@ export const getAllReviewsGroupedByCar = async () => {
   const userMap = Object.fromEntries(
     usersSnap.docs.map((d) => [d.id, d.data().username || d.data().email || d.id])
   );
+  const flagMap = Object.fromEntries(usersSnap.docs.map((d) => [d.id, d.data().isFlagged === true]));
 
   const byCar = {};
   reviewsSnap.docs.forEach((doc) => {
@@ -124,6 +131,8 @@ export const getAllReviewsGroupedByCar = async () => {
       reviewID: r.reviewID || doc.id,
       userID: r.userID || "",
       reviewerName: userMap[r.userID] || "Unknown user",
+      reviewerFound: r.userID in userMap,
+      isFlagged: flagMap[r.userID] === true,
       bookingID: r.bookingID || "",
       rating: Number(r.rating) || 0,
       comment: r.comment || "",

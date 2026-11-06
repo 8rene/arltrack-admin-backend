@@ -438,6 +438,14 @@ export const getUserByUid = async (req, res) => {
     const { uid } = req.params;
     if (!uid) return res.status(400).json({ success: false, message: "UID required." });
 
+    // Older logs stored the staff member's EMAIL instead of a UID, so accept an email here too.
+    if (uid.includes("@")) {
+      const snap = await db.collection("user").where("email", "==", uid).limit(1).get();
+      if (snap.empty) return res.status(404).json({ success: false, message: "User not found." });
+      const [found] = await attachReferralInfo([{ id: snap.docs[0].id, uid: snap.docs[0].id, ...snap.docs[0].data() }]);
+      return res.status(200).json({ success: true, data: { ...found, role: roleNameOf(found.roleID) } });
+    }
+
     const userDoc = await db.collection("user").doc(uid).get();
     if (!userDoc.exists) {
       // Try querying by uid field
