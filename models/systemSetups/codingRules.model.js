@@ -9,7 +9,7 @@
 //
 // A city is NOT its own document — it exists only through the rules that carry
 // its name. So: a new city is created with its first rules (at least
-// MIN_RULES_PER_NEW_CITY = 5, in one batch), renaming a city rewrites `city`
+// MIN_RULES_PER_NEW_CITY = 1, in one batch), renaming a city rewrites `city`
 // on every rule, and deleting a city deletes all of its rules. `city` can't be
 // edited on a single existing rule.
 //

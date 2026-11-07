@@ -6,7 +6,7 @@ import {
 } from "../../models/maintenance/maintenance.model.js";
 import { getUnresolvedDamage, syncCarPartConditions } from "../carParts/carPartConditions.service.js";
 import { createAuditLog } from "../auditLogs/auditLogs.service.js";
-import { notifyOwners } from "../notification/notification.service.js";
+import { notifyStaff } from "../notification/notification.service.js";
 import { ROLES } from "../../utils/roles/role.util.js";
 
 // ─────────────────────────────────────────────
@@ -370,7 +370,8 @@ export const listMaintenanceForBooking = async (bookingID) => {
 // CREATE maintenance record
 // ─────────────────────────────────────────────
 // actor: { role } of whoever is creating it (the controller passes req.user.role).
-// A Supervisor creating a record notifies the Owner(s); nobody else triggers it.
+// Creating a record notifies all staff (Owners, Admins and Supervisors) — including
+// whoever created it. The notification never blocks or fails the create.
 export const createMaintenance = async (payload, editedBy = null, actor = {}) => {
   const { carID, bookingID = null, basis, services = [], overrideTotal, description = "", maintenanceDate = null, status, partsAddressed = [] } = payload;
 
@@ -433,10 +434,11 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
     userID: editedBy,
   });
 
-  // A Supervisor scheduled this — let the Owner(s) know. Never blocks or fails the create.
-  if (actor?.role === ROLES.SUPERVISOR) {
+  // Let all staff (Owner / Admin / Supervisor) know. Never blocks or fails the create.
+  {
     try {
-      let by = "A Supervisor";
+      const roleLabel = [ROLES.OWNER, ROLES.ADMIN, ROLES.SUPERVISOR].includes(actor?.role) ? actor.role : "Staff";
+      let by = `A ${roleLabel}`;
       if (editedBy) {
         const [detail, user] = await Promise.all([
           db.collection("userDetails").doc(editedBy).get(),
@@ -445,10 +447,10 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
         const d = detail.exists ? detail.data() : {};
         const u = user.exists ? user.data() : {};
         const name = [d.firstName, d.lastName].filter(Boolean).join(" ").trim() || u.username || u.email;
-        if (name) by = `${name} (Supervisor)`;
+        if (name) by = `${name} (${roleLabel})`;
       }
       const plate = carDoc.data().plateNumber || carID;
-      await notifyOwners({
+      await notifyStaff({
         type: "maintenance_created",
         refID: ref.id,
         refCollection: "maintenance",
@@ -457,7 +459,7 @@ export const createMaintenance = async (payload, editedBy = null, actor = {}) =>
         extra: { carID },
       });
     } catch (err) {
-      console.error("[MAINTENANCE] Owner notification failed:", err.message);
+      console.error("[MAINTENANCE] Staff notification failed:", err.message);
     }
   }
 

@@ -2,7 +2,7 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 import { DAY_NAMES } from "../../utils/date/holidayCalendar.js";
 
 const COLLECTION = "codingRules";
-export const MIN_RULES_PER_NEW_CITY = 5;
+export const MIN_RULES_PER_NEW_CITY = 1; // a city doesn't need a rule for every weekday
 
 const httpError = (statusCode, message) => {
   const err = new Error(message);
@@ -134,12 +134,12 @@ export const createRule = async ({ city, ...fields }) => {
 /**
  * Creates a brand-new city with its first set of rules in one atomic batch
  * (all rules land or none do — a half-created city would otherwise show up
- * with fewer than the required minimum).
+ * with no rules at all).
  */
 export const createCity = async ({ city, rules }) => {
   const name = cleanCity(city);
   if (!Array.isArray(rules) || rules.length < MIN_RULES_PER_NEW_CITY) {
-    throw httpError(400, `A new city needs at least ${MIN_RULES_PER_NEW_CITY} coding rules.`);
+    throw httpError(400, `A new city needs at least ${MIN_RULES_PER_NEW_CITY} coding rule${MIN_RULES_PER_NEW_CITY === 1 ? "" : "s"}.`);
   }
   const cleaned = rules.map((r, i) => {
     try {

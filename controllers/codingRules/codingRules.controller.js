@@ -40,7 +40,7 @@ export const addCodingRule = async (req, res) => {
 };
 
 // POST /api/coding-rules/city
-// Body: { city, rules: [{ dayName, startTime, endTime, bannedDigits }, ...] }  (min 5)
+// Body: { city, rules: [{ dayName, startTime, endTime, bannedDigits }, ...] }  (min 1)
 export const addCodingCity = async (req, res) => {
   try {
     const data = await createCity(req.body || {});

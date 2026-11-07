@@ -19,12 +19,12 @@ import { resolveRoleID } from "../../utils/roles/role.util.js";
 //   PAYMENTS   dated by when they were made (createdAt).
 //   RENTALS    dated by when the trip STARTS (startDateTime). Only Upcoming / Ongoing / Completed / Cancelled
 //              bookings count ("to pay" and anything unrecognised never do). (Rentals & Customers tab only.)
-//   REVENUE    (Revenue & Expense tab) counted ONLY for bookings that are FINALIZED, on the day they are finalized:
-//                completed  -> the day the booking is completed AND its security deposit is no longer held
-//                              (the later of the two: completedAt / depositSettledAt)
+//   REVENUE    (Revenue & Expense tab) counted ONLY for bookings that are OVER, on the day they ended:
+//                completed  -> the day the booking was completed (completedAt), even while its deposit is still held
+//                              (a held deposit is not revenue; the part you keep is added when the deposit is settled)
 //                cancelled  -> the cancellation day
 //                stolen     -> the day it was flagged stolen
-//              Upcoming, ongoing, to-pay and a completed booking whose deposit is still held are NOT counted yet.
+//              Upcoming, ongoing and to-pay bookings are NOT counted yet.
 //   EXPENSE    Completed maintenance, dated by its maintenanceDate; PayMongo fees follow their booking's finalization day.
 //   CUSTOMERS  users whose role is Customer, dated by their sign-up (createdAt).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,37 +166,20 @@ const loadPaymentsByBookingKeys = async (keys) => {
 };
 
 /**
- * Stamps `finalizedAt` on every booking in the map: the moment its money is final, or null while it is not.
- *   completed  the later of completedAt and the day its security deposit was settled (returned / used / forfeited / waived).
- *              A deposit still held, or a return still pending at PayMongo, means it is NOT final yet -> null.
+ * Stamps `finalizedAt` on every booking in the map: the day its revenue is recorded, or null while the booking is not over.
+ *   completed  the day it was completed (the trip ended). A security deposit that is still held does NOT delay it: a held
+ *              deposit is already left out of revenue, and the part you keep is added on the day the deposit is settled.
  *   cancelled  the cancellation day (cancelledAt, else the booking's last update, which is what the cancel sets).
  *   stolen     the day it was flagged (stolenAt, else the last update; a stolen booking can no longer be edited).
  *   anything else (to pay / upcoming / ongoing / unknown)  null: never revenue.
- * `payments` / `coveredKeys` are payments already loaded for some bookings; the rest are fetched here.
  */
-const finalizeBookings = async (bookingMap, payments, coveredKeys, pendingDepositKeys) => {
+const finalizeBookings = (bookingMap) => {
   const list = [...new Set(Object.values(bookingMap))];
-  const need = list.filter((b) => b.status === "completed" && !(b.keys || []).some((k) => coveredKeys.has(k)));
-  const extra = need.length ? await loadPaymentsByBookingKeys(need.flatMap((b) => b.keys || [])) : [];
-  const byBooking = new Map();
-  [...payments, ...extra].forEach((p) => { if (!p.bookingID) return; const a = byBooking.get(p.bookingID) || []; a.push(p); byBooking.set(p.bookingID, a); });
   list.forEach((b) => {
     if (b.status === "cancelled") { b.finalizedAt = b.cancelledAt || b.updatedAt || b.tripStart || null; return; }
     if (b.status === "stolen") { b.finalizedAt = b.stolenAt || b.updatedAt || null; return; }
     if (b.status !== "completed") { b.finalizedAt = null; return; }
-    let held = false, settledAt = null;
-    const seen = new Set();
-    (b.keys || []).flatMap((k) => byBooking.get(k) || []).forEach((p) => {
-      if (seen.has(p.id)) return;
-      seen.add(p.id);
-      const v = getDepositView(p);
-      if (!v || !(num(v.amount) > 0)) return;
-      if (v.status === "Held" || pendingDepositKeys.has(p.paymentID || p.originalId || p.id)) { held = true; return; }
-      const t = toDate(p.depositSettledAt);
-      if (t && (!settledAt || t > settledAt)) settledAt = t;
-    });
-    const completed = b.completedAt || b.updatedAt || b.tripStart || null;
-    b.finalizedAt = held || !completed ? null : (settledAt && settledAt > completed ? settledAt : completed);
+    b.finalizedAt = b.completedAt || b.updatedAt || b.tripStart || null;
   });
 };
 
@@ -989,16 +972,18 @@ export const generateMoneyReport = async (period, selection = {}) => {
     if (!f.userID) f.userID = b?.userID || null;
   });
 
-  // ── REVENUE BASIS: money counts as revenue on the day the BOOKING IS FINALIZED ──
+  // ── REVENUE BASIS: money counts as revenue on the day the BOOKING ENDED (completed / cancelled / stolen) ──
   // The Payments & Transactions tab stays by the day the money moved, because that is what matches PayMongo.
   // Revenue & Expense uses its own list, `revFlows`, built from the same entries with a different date. Only bookings that
-  // are over count (see finalizeBookings): completed (deposit settled), cancelled or stolen. Everything else (to pay, upcoming,
-  // ongoing, or completed with the deposit still held) is simply not read: there is no "expected" revenue or expense.
+  // are over count (see finalizeBookings): completed, cancelled or stolen. Everything else (to pay, upcoming,
+  // ongoing) is simply not read: there is no "expected" revenue or expense.
   //   - completed / stolen: all of a booking's money lands on its finalization day, or on the day it was paid if that is later
   //     (a penalty paid after the booking was finalized counts on the day it was paid)
   //   - cancelled: everything (what came in, what went back) counts on the cancellation day, so only what you keep
   //     (a forfeited deposit, a gateway fee kept) stays and a refunded amount never becomes revenue
-  // Example: paid Nov 3, deposit returned and booking completed Nov 5  ->  the revenue is recorded on Nov 5.
+  // Example: paid Nov 1, trip completed Nov 7  ->  the revenue is recorded on Nov 7, the same day as its maintenance.
+  //          The deposit is left out while held; when it is settled later (returned, used on a penalty, forfeited), the kept
+  //          part is added on that day.
   const recDateOf = (b, date) => {
     if (!b || !b.finalizedAt) return null;   // no booking / not finalized yet: not revenue
     if (b.status === "cancelled") return b.finalizedAt;
@@ -1030,7 +1015,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     ...[...allEntries.values()].map((e) => e.bookingID), ...relPayments.map((p) => p.bookingID),
     ...completedSnap.docs.map((d) => d.id), ...endedInPeriod.map((d) => d.id),
   ].filter(Boolean)));
-  await finalizeBookings(bookingMap, relPayments, new Set(relKeys), pendingDepositPaymentIDs);
+  finalizeBookings(bookingMap);
 
   const revFlows = [];
   allEntries.forEach((e) => {
@@ -1050,6 +1035,21 @@ export const generateMoneyReport = async (period, selection = {}) => {
     const date = recDateOf(b, settled);
     if (!date || date < start || date > end) return;
     revFlows.push({ kind, date, paymentID: e.paymentID || null, phase: e.phase || null, bookingID: e.bookingID || null, userID: e.userID || b?.userID || null, carID: b?.carID || null, amount });
+  });
+  // A cancelled booking's refund that is APPROVED but not paid out yet (scheduled for the next midnight, or waiting for the
+  // customer to collect it in store) is money we are committed to return: the deposit already left "Held" when it was approved,
+  // so without this the rental money would show as revenue until the refund is really sent. It is counted as returned on the
+  // cancellation day; what has already been paid out (success rows) is read above, so only the unpaid rest is added here.
+  // It is kept apart from Returned (kind "pending_refund") and shown in the "To return" column together with the held deposits.
+  approvedRefunds.forEach((r) => {
+    const b = bookingMap[r.bookingID] || null;
+    if (!b || b.status !== "cancelled" || !b.finalizedAt || b.finalizedAt < start || b.finalizedAt > end) return;
+    const reqID = r.refundRequestID || r.id;
+    const alreadyOut = [...allEntries.values()]
+      .filter((e) => e.direction === "out" && e.phase !== "deposit_return" && (e.refundReqID === reqID || e.refundRequestID === reqID))
+      .reduce((t, e) => t + num(e.amount), 0);
+    const rest = r.expectedAmount - alreadyOut;
+    if (rest > 0) revFlows.push({ kind: "pending_refund", date: b.finalizedAt, paymentID: r.paymentID || null, phase: "refund", bookingID: r.bookingID || null, userID: r.userID || b.userID || null, carID: b.carID || null, amount: rest });
   });
   const revPayByID = await loadPaymentsByIDs(revFlows.filter((f) => f.kind === "rental").map((f) => f.paymentID));
   revFlows.forEach((f) => { if (f.kind === "rental") f.deposit = splitRentalEntry(f, revPayByID[f.paymentID] || null).deposit; });
@@ -1187,6 +1187,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
       if (!b) return;
       if (f.kind === "rental") { b.rentals += f.amount; b.deposits += f.deposit || 0; }
       else if (f.kind === "penalty") b.penalties += f.amount;
+      else if (f.kind === "pending_refund") b.deposits += f.amount;   // approved but not paid out yet: "To return", with the held deposits
       else {
         // money that went back: kept apart so the report can show each one, and `returned` stays their total (Net is unchanged)
         if (f.kind === "refund") b.refunds += f.amount;
@@ -1409,7 +1410,8 @@ export const generateMoneyReport = async (period, selection = {}) => {
   const rRentals = rsum("rental"), rPenalties = rsum("penalty");
   const rRefunds = rsum("refund"), rDepositReturns = rsum("deposit_return"), rDiscountReturns = rsum("discount_return");
   const rReturned = rRefunds + rDepositReturns + rDiscountReturns;
-  const rDepositHeld = revFlows.reduce((t, f) => t + (f.kind === "rental" ? (f.deposit || 0) : 0), 0) - revSettled.reduce((t, x) => t + x.amount, 0);
+  // "To return": deposits still held + refunds approved but not paid out yet (money that will go back, not revenue)
+  const rDepositHeld = revFlows.reduce((t, f) => t + (f.kind === "rental" ? (f.deposit || 0) : f.kind === "pending_refund" ? f.amount : 0), 0) - revSettled.reduce((t, x) => t + x.amount, 0);
   const rRevenue = rRentals + rPenalties - rReturned - rDepositHeld;
   const revenueBasis = {
     cards: {
