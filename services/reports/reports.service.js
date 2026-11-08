@@ -1,5 +1,5 @@
 import { db } from "../../config/firebaseConnection/firebase.js";
-import { getEntriesForPaymentIDs } from "../paymentEntries/paymentEntries.service.js";
+import { getEntriesForPaymentIDs, getEntriesForPenaltyIDs } from "../paymentEntries/paymentEntries.service.js";
 import { hydratePayment } from "../paymentEntries/paymentEntries.mapper.js";
 import { computeAmounts, normalizePaymentStatus, derivePaymentStage } from "../payments/payments.service.js";
 import { getDepositView } from "../payments/paymentHelpers.js";
@@ -721,67 +721,157 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
   const sort = opts.sort === "unpaid" ? "unpaid" : "total";
   const pageSize = Math.min(Math.max(parseInt(opts.pageSize, 10) || 5, 1), 50);
   const search = String(opts.search || "").trim().toLowerCase();
+  const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+  const lowerS = (v) => String(v ?? "").trim().toLowerCase();
 
-  const [maintenance, scheduledMaintenance, penSnap] = await Promise.all([
-    loadMaintenanceExpenses(start, end),
-    loadScheduledMaintenance(start, end),
+  const [penSnap, confirmedSnap, entrySnap] = await Promise.all([
     db.collection("penalties").where("createdAt", ">=", start).where("createdAt", "<=", end).get(),
+    db.collection("penalties").where("status", "==", "Confirmed").get(),                       // every Confirmed penalty: "Unpaid now" looks at all periods
+    db.collection(ENTRY_COLLECTION).where("settledAt", ">=", start).where("settledAt", "<=", end).get(),   // same rows Money in is made of
   ]);
 
-  const penalties = penSnap.docs.map((d) => d.data()).filter((p) => p.status === "Confirmed");
+  const penalties = penSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((p) => p.status === "Confirmed");
   const paidOf = (p) => Math.min(num(p.paidAmount), num(p.amount));
+
+  // ── cards that tie to the other tabs ──
+  // Received in period = penalty money that moved in the period: exactly what "Penalties" under Money in adds up.
+  const receivedInPeriod = entrySnap.docs
+    .map((d) => d.data())
+    .filter((e) => lowerS(e.status) === "success" && e.direction === "in" && e.phase === "penalty")
+    .reduce((s, e) => s + num(e.amount), 0);
+  // Unpaid now = what is still owed on ANY Confirmed penalty, whichever month it was charged.
+  const unpaidAll = confirmedSnap.docs.map((d) => d.data())
+    .reduce((acc, p) => {
+      const owed = Math.max(0, num(p.amount) - Math.min(num(p.paidAmount), num(p.amount)));
+      if (owed > 0) { acc.amount += owed; if (p.userID) acc.users.add(p.userID); }
+      return acc;
+    }, { amount: 0, users: new Set() });
+
+  // ── how each penalty was settled: money received / held deposit / held discount credit ──
+  // A deposit offset moves no money and writes no entry row; a discount-credit offset writes an "internal" row. So:
+  //   received = penalty money that came in (success "in" rows), credit = internal credit rows, deposit = what is left of paidAmount.
+  const entriesByPenalty = await getEntriesForPenaltyIDs(penalties.map((p) => p.penaltyID || p.id));
+  const settle = (p) => {
+    const rows = entriesByPenalty.get(p.penaltyID || p.id) || [];
+    const paid = paidOf(p);
+    const inRows = rows.filter((e) => e.direction === "in" && e.phase === "penalty" && lowerS(e.status) === "success");
+    const received = Math.min(paid, round2(inRows.reduce((s, e) => s + num(e.amount), 0)));
+    const credit = Math.min(Math.max(0, paid - received), round2(rows
+      .filter((e) => e.direction === "internal" && e.phase === "discount_applied_penalty" && lowerS(e.status) === "success")
+      .reduce((s, e) => s + num(e.amount), 0)));
+    const deposit = Math.max(0, round2(paid - received - credit));
+    const last = inRows.map((e) => ({ e, d: toDate(e.settledAt) || toDate(e.createdAt) })).sort((a, b) => (b.d?.getTime() || 0) - (a.d?.getTime() || 0))[0] || null;
+    return { paid, received, credit, deposit, lastMethod: last ? methodLabel(last.e.method) : null, lastPaidAt: last?.d ? last.d.toISOString() : null, reference: last?.e.referenceNumber || null };
+  };
 
   const collectedByCar = {};
   const pairs = new Map();
   let penaltiesCollected = 0;
   let penaltiesPending = 0;
+  let penaltiesCharged = 0;
+  let coveredByDeposit = 0;
+  let coveredByCredit = 0;
+  let receivedOnThese = 0;
   const pendingUsers = new Set();
+  const settled = new Map();
 
   penalties.forEach((p) => {
     const amount = num(p.amount);
-    const paid = paidOf(p);
-    const pending = Math.max(0, amount - paid);
-    penaltiesCollected += paid;
+    const s = settle(p);
+    settled.set(p.penaltyID || p.id, s);
+    const pending = Math.max(0, amount - s.paid);
+    penaltiesCharged += amount;
+    penaltiesCollected += s.paid;
     penaltiesPending += pending;
+    coveredByDeposit += s.deposit;
+    coveredByCredit += s.credit;
+    receivedOnThese += s.received;
     if (pending > 0 && p.userID) pendingUsers.add(p.userID);
-    if (p.carID) collectedByCar[p.carID] = (collectedByCar[p.carID] || 0) + paid;
+    if (p.carID) collectedByCar[p.carID] = (collectedByCar[p.carID] || 0) + s.paid;
 
     const key = `${p.userID || "?"}|${p.carID || "?"}`;
     const row = pairs.get(key) || { userID: p.userID || null, carID: p.carID || null, count: 0, total: 0, paid: 0 };
-    row.count += 1; row.total += amount; row.paid += paid;
+    row.count += 1; row.total += amount; row.paid += s.paid;
     pairs.set(key, row);
   });
 
-  // ── cars: maintenance per car, split recovered / absorbed ──
+  // ── maintenance jobs (Completed in the period, plus Scheduled ones dated in it), each tied to its booking when it has one ──
+  const jobSnap = await db.collection("maintenance").where("status", "in", ["Completed", "completed", "Scheduled", "scheduled"]).get();
+  const jobDocs = jobSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    .map((m) => ({ ...m, _date: toDate(m.maintenanceDate) || toDate(m.createdAt) || toDate(m.updatedAt), _done: lowerS(m.status) === "completed" }))
+    .filter((m) => m._date && m._date >= start && m._date <= end);
+  const jobBookingIDs = uniq(jobDocs.map((m) => m.bookingID));
+  const [jobBookings, bookingPenSnaps] = await Promise.all([
+    loadBookingsByIDs(jobBookingIDs),
+    Promise.all(chunk(jobBookingIDs, 30).map((part) => db.collection("penalties").where("bookingID", "in", part).get())),
+  ]);
+  const penaltiesByBooking = new Map();   // every Confirmed penalty of the booking, whichever month it was charged
+  bookingPenSnaps.forEach((snap) => snap.docs.forEach((d) => {
+    const p = { id: d.id, ...d.data() };
+    if (p.status !== "Confirmed") return;
+    const list = penaltiesByBooking.get(p.bookingID) || [];
+    list.push(p);
+    penaltiesByBooking.set(p.bookingID, list);
+  }));
+  const bookingPenEntries = await getEntriesForPenaltyIDs([...penaltiesByBooking.values()].flat().map((p) => p.penaltyID || p.id));
+
+  // Penalty money on a booking pays its repairs oldest first, never more than the repairs cost; the rest is absorbed by the business.
+  const jobsSorted = [...jobDocs].sort((a, b) => a._date - b._date);
+  const leftOnBooking = new Map();
+  [...penaltiesByBooking.entries()].forEach(([bid, list]) => leftOnBooking.set(bid, list.reduce((s, p) => s + paidOf(p), 0)));
+  const jobRowsRaw = jobsSorted.map((m) => {
+    const amount = num(m.totalCost);
+    const bid = m.bookingID || null;
+    let covered = 0;
+    if (bid && m._done) {
+      const left = leftOnBooking.get(bid) || 0;
+      covered = round2(Math.min(amount, left));
+      leftOnBooking.set(bid, left - covered);
+    }
+    const linked = bid ? (penaltiesByBooking.get(bid) || []) : [];
+    return {
+      id: m.id, carID: m.carID || null, bookingID: bid, userID: bid ? (jobBookings[bid]?.userID || null) : null,
+      date: m._date.toISOString(), basis: m.basis || "", status: m._done ? "Completed" : "Scheduled",
+      services: (m.services || []).map((s) => s.serviceName).filter(Boolean).join(", "),
+      amount, covered, absorbed: m._done ? round2(amount - covered) : null,
+      penalties: linked.map((p) => {
+        const rows = bookingPenEntries.get(p.penaltyID || p.id) || [];
+        const inRows = rows.filter((e) => e.direction === "in" && e.phase === "penalty" && lowerS(e.status) === "success");
+        const paid = paidOf(p);
+        const received = Math.min(paid, round2(inRows.reduce((s, e) => s + num(e.amount), 0)));
+        const credit = Math.min(Math.max(0, paid - received), round2(rows.filter((e) => e.direction === "internal" && e.phase === "discount_applied_penalty" && lowerS(e.status) === "success").reduce((s, e) => s + num(e.amount), 0)));
+        return { penaltyID: p.penaltyID || p.id, amount: num(p.amount), paid, received, credit, deposit: Math.max(0, round2(paid - received - credit)), pending: Math.max(0, num(p.amount) - paid), createdAt: toDate(p.createdAt)?.toISOString() || null };
+      }),
+    };
+  });
+
+  // ── cars: maintenance per car, "recovered" = penalty money on the SAME BOOKING as each repair ──
   const maintByCar = new Map();
-  maintenance.forEach((m) => {
-    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0, jobs: 0, scheduled: 0, scheduledJobs: 0 };
-    cur.total += m.amount;
-    cur.jobs += 1;
-    maintByCar.set(m.carID, cur);
+  jobRowsRaw.forEach((j) => {
+    const cur = maintByCar.get(j.carID) || { carID: j.carID, total: 0, jobs: 0, recovered: 0, scheduled: 0, scheduledJobs: 0 };
+    if (j.status === "Completed") { cur.total += j.amount; cur.jobs += 1; cur.recovered += j.covered; }
+    else { cur.scheduled += j.amount; cur.scheduledJobs += 1; }
+    maintByCar.set(j.carID, cur);
   });
-  // Scheduled jobs (not done yet) ride along on the same car row, apart from the cost: they are what is expected, not what was spent
-  scheduledMaintenance.forEach((m) => {
-    const cur = maintByCar.get(m.carID) || { carID: m.carID, name: m.carName, total: 0, jobs: 0, scheduled: 0, scheduledJobs: 0 };
-    cur.scheduled += m.amount;
-    cur.scheduledJobs += 1;
-    maintByCar.set(m.carID, cur);
-  });
+
+  // ── names ──
+  const pairRows = [...pairs.values()];
+  const carIDsAll = uniq([...pairRows.map((r) => r.carID), ...jobRowsRaw.map((j) => j.carID), ...penalties.map((p) => p.carID), ...[...maintByCar.keys()]]);
+  const carNames = await resolveVehicleNames(carIDsAll);
+  const userIDs = uniq([...pairRows.map((r) => r.userID), ...penalties.map((p) => p.userID), ...jobRowsRaw.map((j) => j.userID)]);
+  const userNames = {};
+  await Promise.all(userIDs.map(async (id) => { userNames[id] = await resolveUserName(id).catch(() => "Unknown"); }));
+
   const cars = [...maintByCar.values()]
-    .map((c) => {
-      const recovered = Math.min(c.total, collectedByCar[c.carID] || 0);
-      return { carID: c.carID, name: c.name, jobs: c.jobs, total: c.total, recovered, absorbed: c.total - recovered, scheduled: c.scheduled, scheduledJobs: c.scheduledJobs };
-    })
+    .map((c) => ({ carID: c.carID, name: carNames[c.carID] || "Unknown Vehicle", jobs: c.jobs, total: c.total, recovered: round2(c.recovered), absorbed: round2(c.total - c.recovered), scheduled: c.scheduled, scheduledJobs: c.scheduledJobs }))
     .sort((a, b) => (b.total + b.scheduled) - (a.total + a.scheduled));
   const totalMaintenance = cars.reduce((s, c) => s + c.total, 0);
   const scheduledTotal = cars.reduce((s, c) => s + c.scheduled, 0);
+  const totalAbsorbed = cars.reduce((s, c) => s + c.absorbed, 0);
 
-  // ── customers: one row per customer + car ──
-  const pairRows = [...pairs.values()];
-  const carNames = await resolveVehicleNames(uniq(pairRows.map((r) => r.carID)));
-  const userIDs = uniq(pairRows.map((r) => r.userID));
-  const userNames = {};
-  await Promise.all(userIDs.map(async (id) => { userNames[id] = await resolveUserName(id).catch(() => "Unknown"); }));
+  const jobs = jobRowsRaw
+    .map((j) => ({ ...j, car: carNames[j.carID] || "Unknown Vehicle", customer: j.userID ? (userNames[j.userID] || "Unknown") : null }))
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
 
   let rows = pairRows.map((r) => ({
     userID: r.userID,
@@ -793,21 +883,35 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
     paid: r.paid,
     pending: Math.max(0, r.total - r.paid),
   }));
-  // One row per Confirmed penalty, with names. The Reports page groups these itself (by customer and by car),
-  // so the graph and the table can be sorted, opened and paged without another request.
+
+  // One row per Confirmed penalty: who, which booking, how much, and how it was settled. The page lists these directly.
   const penaltyRows = penalties.map((p) => {
     const amount = num(p.amount);
-    const paid = paidOf(p);
+    const s = settled.get(p.penaltyID || p.id);
+    const pending = Math.max(0, amount - s.paid);
     return {
+      penaltyID: p.penaltyID || p.id,
+      bookingID: p.bookingID || null,
+      maintenanceID: p.maintenanceID || null,
       userID: p.userID || null,
       carID: p.carID || null,
       customer: userNames[p.userID] || "Unknown",
       car: carNames[p.carID] || "Unknown Vehicle",
+      createdAt: toDate(p.createdAt)?.toISOString() || null,
+      reason: (Array.isArray(p.lineItems) && p.lineItems.length ? p.lineItems.map((li) => li.description).filter(Boolean).join(", ") : "") || p.statusReason || "",
+      lineItems: Array.isArray(p.lineItems) ? p.lineItems.map((li) => ({ description: li.description || "", amount: num(li.amount) })) : [],
       amount,
-      paid,
-      pending: Math.max(0, amount - paid),
+      paid: s.paid,
+      received: s.received,
+      coveredByDeposit: s.deposit,
+      coveredByCredit: s.credit,
+      pending,
+      paidStatus: pending <= 0 ? "Paid" : s.paid > 0 ? "Partly paid" : "Unpaid",
+      lastMethod: s.lastMethod,
+      lastPaidAt: s.lastPaidAt,
+      reference: s.reference,
     };
-  });
+  }).sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
 
   const maxTotal = rows.reduce((m, r) => Math.max(m, r.total), 0);   // fixed scale for the graph, same on every page
 
@@ -826,11 +930,20 @@ export const generateMaintenancePenaltiesReport = async (period, selection = {},
     cards: {
       totalMaintenance,
       scheduledMaintenance: scheduledTotal,
-      penaltiesCollected,
-      penaltiesPending,
+      maintenanceAbsorbed: totalAbsorbed,
+      penaltiesCharged,                      // Confirmed penalties charged in the period
+      penaltiesCollected,                    // paid so far on those (money received + deposit + credit), kept for older screens
+      penaltiesReceived: receivedInPeriod,   // penalty money received in the period: the same figure as Penalties under Money in
+      penaltiesReceivedOnCharged: receivedOnThese,
+      penaltiesCoveredByDeposit: coveredByDeposit,
+      penaltiesCoveredByCredit: coveredByCredit,
+      penaltiesPending,                      // still owed on the penalties charged in the period
+      penaltiesUnpaidAll: unpaidAll.amount,  // still owed on any Confirmed penalty, from any period
       pendingCustomers: pendingUsers.size,
+      pendingCustomersAll: unpaidAll.users.size,
     },
     cars,
+    jobs,
     penaltyRows,
     customers: {
       rows: rows.slice((page - 1) * pageSize, page * pageSize),
@@ -911,7 +1024,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     const date = toDate(e.settledAt);
     const amount = num(e.amount);
     if (!date || amount <= 0) return;
-    const base = { date, paymentID: e.paymentID || null, phase: e.phase || null, bookingID: e.bookingID || null, userID: e.userID || null, amount, method: e.method || null,
+    const base = { date, entryID: e.id || null, reference: e.referenceNumber || null, paymentID: e.paymentID || null, phase: e.phase || null, bookingID: e.bookingID || null, userID: e.userID || null, amount, method: e.method || null,
       source: e.source === "in_person" || (!e.source && lower(e.method) === "cash") ? "in_person" : "online" };
     if (e.direction === "in") {
       if (e.phase === "penalty") flows.push({ ...base, kind: "penalty" });
@@ -1265,7 +1378,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
   const blankParts = () => ({ rentals: 0, rental: 0, service: 0, gateway: 0, deposit: 0, penalties: 0, online: 0, inPerson: 0 });
   flows.filter((f) => f.kind === "rental" || f.kind === "penalty").forEach((f) => {
     const label = methodLabel(f.method) === "—" ? "Other" : methodLabel(f.method);
-    const m = methodMap.get(label) || { id: label, name: label, count: 0, ...blankParts(), total: 0, subs: new Map() };
+    const m = methodMap.get(label) || { id: label, name: label, count: 0, ...blankParts(), total: 0, subs: new Map(), transactions: [] };
     const sub = m.subs.get(f.source) || { id: `${label}:${f.source}`, name: f.source === "online" ? "Online (PayMongo)" : "In person", count: 0, ...blankParts(), total: 0 };
     const split = f.kind === "rental" ? splitRentalEntry(f, payByID[f.paymentID] || null) : null;
     [m, sub].forEach((t) => {
@@ -1275,9 +1388,15 @@ export const generateMoneyReport = async (period, selection = {}) => {
       else t.penalties += f.amount;
     });
     m.subs.set(f.source, sub);
+    // One row per payment received: the same entries the totals above are made of, so a View window always adds up to its row.
+    m.transactions.push({
+      id: f.entryID || `${label}:${m.transactions.length}`, bookingID: f.bookingID || null, customer: customerOf(f.userID), date: f.date.toISOString(), method: label,
+      type: f.kind === "penalty" ? "Penalty payment" : f.phase === "deposit" ? "Deposit paid" : "Balance paid",
+      channel: f.source === "online" ? "Online" : "In person", status: "Done", amount: f.amount, reference: f.reference || null,
+    });
     methodMap.set(label, m);
   });
-  const methodsReceived = [...methodMap.values()].map(({ subs, ...m }) => ({ ...m, children: [...subs.values()].sort((a, b) => b.total - a.total) }));
+  const methodsReceived = [...methodMap.values()].map(({ subs, transactions, ...m }) => ({ ...m, children: [...subs.values()].sort((a, b) => b.total - a.total), transactions: transactions.sort((a, b) => new Date(b.date) - new Date(a.date)) }));
 
   // ── money out, laid out like Money in: one row per method; its bar is split by the reason the money left (refund,
   //    deposit return, discount return) and the same money is also split by online / in person. Only money handed back to
@@ -1333,6 +1452,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     row.children.push({
       id: `${w.method}:pending:${i}`, name: `${w.bookingID || "—"} · ${customerOf(w.userID)}`, date: null, method: w.method, kindLabel: PEND_NAMES[w.kind],
       [PEND_KEYS[w.kind]]: w.amount, online: 0, inPerson: 0, total: 0, expected: w.amount, barTotal: w.amount, pending: true, note: w.note,
+      bookingID: w.bookingID || null, customer: customerOf(w.userID), status: "Pending", reference: null,
     });
   });
   flows.filter((f) => OUT_KEYS[f.kind]).sort((x, y) => y.date - x.date).forEach((f) => {
@@ -1344,6 +1464,7 @@ export const generateMoneyReport = async (period, selection = {}) => {
     row.children.push({
       id: `${label}:${f.kind}:${row.children.length}`, name: `${f.bookingID || "—"} · ${customerOf(f.userID)}`, date: f.date.toISOString(), method: label, kindLabel: OUT_NAMES[f.kind],
       [OUT_KEYS[f.kind]]: f.amount, online: f.source === "online" ? f.amount : 0, inPerson: f.source === "online" ? 0 : f.amount, total: f.amount, expected: 0,
+      bookingID: f.bookingID || null, customer: customerOf(f.userID), status: "Done", reference: f.reference || null,
     });
   });
   const outflows = [...outMap.values()].filter((r) => r.total > 0 || r.expected > 0).map((r) => ({ ...r, barTotal: r.total + r.expected })).sort((a, b) => b.barTotal - a.barTotal);
