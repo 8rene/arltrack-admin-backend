@@ -52,9 +52,10 @@ const DEFAULTS = {
 // Percentage fields: must be a number between 0 and 100.
 const PERCENT_FIELDS = ["serviceFeePercent", "gatewayFeePercent"];
 
+// extraFeeOutsideArea is NOT in this list on purpose: it is not editable. It is always worked out as
+// driversFeeOutsideArea - driversFeeBaseArea (see updateSystemSettings), so any value sent for it is ignored.
 const NUMERIC_FIELDS = [
   ...PERCENT_FIELDS,
-  "extraFeeOutsideArea",
   "driversFeeBaseArea",
   "driversFeeOutsideArea",
   "securityDepositAmount",
@@ -129,6 +130,20 @@ export const updateSystemSettings = async (payload, actor) => {
       throw new Error(`${field} must be a percentage between 0 and 100.`);
     }
     update[field] = num;
+  }
+
+  // ── Outside-area extra fee = difference of the two driver's fees ──
+  // Whenever either driver's fee is being saved, the outside rate must be strictly HIGHER than the base rate
+  // (so the extra fee can never be 0 or negative), and extraFeeOutsideArea is stored as that difference so every
+  // reader of this doc (customer backend, receipts) sees one consistent number.
+  // Skipped for saves that touch neither fee (e.g. the store-location save), so those can't be blocked.
+  if (update.driversFeeBaseArea !== undefined || update.driversFeeOutsideArea !== undefined) {
+    const base    = update.driversFeeBaseArea    !== undefined ? update.driversFeeBaseArea    : Number(current.driversFeeBaseArea);
+    const outside = update.driversFeeOutsideArea !== undefined ? update.driversFeeOutsideArea : Number(current.driversFeeOutsideArea);
+    if (!(outside > base)) {
+      throw new Error("Driver's Fee — Outside Area must be higher than Driver's Fee — Base Area (the extra fee for being outside the base area is the difference, and it cannot be 0).");
+    }
+    update.extraFeeOutsideArea = outside - base;
   }
 
   if (payload.baseAreaKeywords !== undefined) {
