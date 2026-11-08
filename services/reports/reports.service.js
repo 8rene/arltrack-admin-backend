@@ -1322,30 +1322,43 @@ export const generateMoneyReport = async (period, selection = {}) => {
     const carMap = new Map();
     const carRow = (carID) => {
       const id = carID || "unknown";
-      if (!carMap.has(id)) carMap.set(id, { id, carID: carID || null, revenue: 0, maintenance: 0, fees: 0, bookings: new Map(), jobs: [] });
+      if (!carMap.has(id)) carMap.set(id, { id, carID: carID || null, ...blankParts(), revenue: 0, maintenance: 0, fees: 0, bookings: new Map(), jobs: [] });
       return carMap.get(id);
+    };
+    // The parts a revenue figure is made of, the same split the time series uses: Revenue = Rentals + Penalties - Returned - Deposit held back.
+    // Without these the vehicle table and its "View" window had Revenue but empty Rentals / Penalties / Returned / Deposit held back columns.
+    function blankParts() { return { rentals: 0, penalties: 0, returned: 0, depositsHeld: 0 }; }
+    const addFlow = (t, f) => {
+      if (f.kind === "rental") { t.rentals += f.amount; t.depositsHeld += f.deposit || 0; }
+      else if (f.kind === "penalty") t.penalties += f.amount;
+      else if (f.kind === "pending_refund") t.depositsHeld += f.amount;   // approved, not paid out yet: "To return", with the held deposits
+      else t.returned += f.amount;
     };
     flowList.forEach((f) => {
       const row = carRow(f.carID);
       row.revenue += signed(f);
+      addFlow(row, f);
       const bid = f.bookingID || "unknown";
-      const cur = row.bookings.get(bid) || { bookingID: f.bookingID, userID: f.userID, net: 0, fees: 0 };
+      const cur = row.bookings.get(bid) || { bookingID: f.bookingID, userID: f.userID, ...blankParts(), net: 0, fees: 0 };
       cur.net += signed(f);
+      addFlow(cur, f);
       row.bookings.set(bid, cur);
     });
     settledList.forEach((x) => {   // a settled deposit comes back into the car's revenue (a returned one cancels what was left out)
       const row = carRow(x.carID);
       row.revenue += x.amount;
+      row.depositsHeld -= x.amount;
       const bid = x.bookingID || "unknown";
-      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, net: 0, fees: 0 };
+      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: x.userID, ...blankParts(), net: 0, fees: 0 };
       cur.net += x.amount;
+      cur.depositsHeld -= x.amount;
       row.bookings.set(bid, cur);
     });
     feeList.forEach((x) => {
       const row = carRow(x.carID);
       row.fees += x.fee;
       const bid = x.bookingID || "unknown";
-      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: null, net: 0, fees: 0 };
+      const cur = row.bookings.get(bid) || { bookingID: x.bookingID, userID: null, ...blankParts(), net: 0, fees: 0 };
       cur.fees += x.fee;
       row.bookings.set(bid, cur);
     });
@@ -1357,14 +1370,17 @@ export const generateMoneyReport = async (period, selection = {}) => {
     return [...carMap.values()].map((r) => {
       const children = [
         ...[...r.bookings.values()].sort((a, b) => b.net - a.net).map((b) => ({
-          id: `b:${b.bookingID}`, name: `${b.bookingID || "Booking"} · ${customerOf(b.userID)}`, revenue: b.net, maintenance: 0, fees: b.fees || 0, net: b.net - (b.fees || 0),
+          id: `b:${b.bookingID}`, name: `${b.bookingID || "Booking"} · ${customerOf(b.userID)}`,
+          rentals: b.rentals, penalties: b.penalties, returned: b.returned, depositsHeld: b.depositsHeld,
+          revenue: b.net, maintenance: 0, fees: b.fees || 0, net: b.net - (b.fees || 0),
         })),
         ...r.jobs.sort((a, b) => b.amount - a.amount).map((m) => ({
-          id: `m:${m.id}`, name: `Maintenance · ${m.services || m.basis || "Service"}`, revenue: 0, maintenance: m.amount, fees: 0, net: -m.amount,
+          id: `m:${m.id}`, name: `Maintenance · ${m.services || m.basis || "Service"}`, rentals: 0, penalties: 0, returned: 0, depositsHeld: 0, revenue: 0, maintenance: m.amount, fees: 0, net: -m.amount,
         })),
       ];
       return {
         id: r.id, name: r.carID ? (carNames[r.carID] || "Unknown Vehicle") : "Unknown Vehicle",
+        rentals: r.rentals, penalties: r.penalties, returned: r.returned, depositsHeld: r.depositsHeld,
         revenue: r.revenue, maintenance: r.maintenance, fees: r.fees, net: r.revenue - r.maintenance - r.fees, bookings: r.bookings.size, children,
       };
     });
