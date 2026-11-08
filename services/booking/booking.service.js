@@ -18,7 +18,7 @@ import { getDiscountFigures } from "../payments/discountLedger.js";
 import { hydratePaymentData } from "../../services/paymentEntries/paymentEntries.service.js";
 import { getHolidaysBetween } from "../gps/coding.service.js";
 import {
-  bookingKeyOf, attachCurrentDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
+  bookingKeyOf, attachCurrentDrivers, attachFinishedDrivers, resolveCurrentDriverID, getBookingsByKeys, completeActiveAssignment,
 } from "../../services/driverAssignments/driverAssignments.service.js";
 import {
   REQUEST_STATUS, getPendingRequest, getAllPendingRequests, getRequestsByBookingKeys, resolveRequest, recordDirectCancellation,
@@ -422,6 +422,7 @@ export const getAllBookings = async (statusFilter) => {
 
   // Current driver comes from driverAssignments now (see attachCurrentDrivers).
   await attachCurrentDrivers(rows);
+  await attachFinishedDrivers(rows);   // completed trips keep their driver (their assignment row is "completed", not "assigned")
 
   // Bookings that have a refund request in flight → shown as "For Refund".
   const openRefundSnap = await db.collection("refundRequests").where("status", "in", ["Pending", "Approved"]).get();

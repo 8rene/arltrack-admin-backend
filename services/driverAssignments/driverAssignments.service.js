@@ -174,6 +174,41 @@ export const attachCurrentDrivers = async (rows) => {
   return rows;
 };
 
+/**
+ * attachCurrentDrivers only knows "assigned" rows: when a trip is finished its row flips to "completed", so a COMPLETED
+ * booking came back with no driver ("No driver yet" in the admin Bookings steps) even though the trip still sits in that
+ * driver's History. For rows still without a driver whose booking is completed, this puts back the driver of the
+ * booking's completed row. Only completed bookings are touched, so assigning / dispatch rules (which want the CURRENT
+ * driver) are unaffected. Mutates and returns the same array.
+ */
+export const attachFinishedDrivers = async (rows) => {
+  const todo = rows.filter((b) => !b.driverID && String(b.status || "").toLowerCase() === "completed");
+  if (!todo.length) return rows;
+  const keys = [...new Set(todo.map((b) => bookingKeyOf(b.id, b)))];
+  const map = new Map();
+  const snaps = await Promise.all(
+    chunk(keys).map((c) =>
+      db.collection(COL)
+        .where("bookingID", "in", c)
+        .where("status", "==", ASSIGNMENT_STATUS.COMPLETED)
+        .get()
+    )
+  );
+  snaps.forEach((snap) => snap.forEach((d) => {
+    const row = shape(d);
+    const prev = map.get(row.bookingID);
+    if (!prev || millis(row.assignedAt) >= millis(prev.assignedAt)) map.set(row.bookingID, row);
+  }));
+  todo.forEach((b) => {
+    const a = map.get(bookingKeyOf(b.id, b));
+    if (!a) return;
+    b.driverID         = a.driverID;
+    b.driverAssignedAt = a.assignedAt || null;
+    b.driverAssignedBy = a.assignedBy || null;
+  });
+  return rows;
+};
+
 /** Current driver's uid for one booking, from its current assignment, or null. */
 export const resolveCurrentDriverID = async (bookingData, docID) => {
   const a = await getActiveAssignment(bookingKeyOf(docID, bookingData || {}));
