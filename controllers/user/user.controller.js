@@ -663,7 +663,9 @@ export const updateUserStatus = async (req, res) => {
       if (!isFlagged) {
         await resolveNotification("account_flagged", uid).catch((err) => console.error("[USER] Failed to resolve flag notice:", err.message));
       }
-      createNotification({
+      // Awaited on purpose: this backend runs as a Vercel serverless function, which can be frozen the moment the response
+      // is sent. A notification started without await may never be written, so the customer was never told.
+      await createNotification({
         type: isFlagged ? "account_flagged" : "account_unflagged",
         refID: uid,
         refCollection: "user",
@@ -677,7 +679,7 @@ export const updateUserStatus = async (req, res) => {
     const name = userDoc.data().username || userDoc.data().email || uid;
     const unlocking = wasLocked && status !== undefined && String(status).toLowerCase() !== "locked";
     const refNote = unlocking ? await referrerNote(userDoc.id) : "";
-    createAuditLog({
+    await createAuditLog({
       action: "update",
       description: `Updated account for ${name}${status !== undefined ? ` (status: ${status})` : ""}${flagChanged ? (isFlagged ? " — FLAGGED (customer notified)" : " — flag removed") : ""}${refNote}.`,
       userID: req.user?.uid || null,
