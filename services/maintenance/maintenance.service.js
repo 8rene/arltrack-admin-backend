@@ -361,9 +361,31 @@ export const listMaintenanceForBooking = async (bookingID) => {
 
   const toMillis = (ts) => ts?.toMillis?.() ?? ts?._seconds * 1000 ?? 0;
 
-  return snap.docs
+  const records = snap.docs
     .map((d) => ({ id: d.id, ...d.data() }))
     .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+
+  // partsAddressed[] only stores carPartID (see PartAddressed in maintenance.model.js), so the name and serial
+  // number are looked up from carParts here, the same way the Maintenance page does. Without this, any screen that
+  // lists a booking's maintenance (the penalty's "View maintenance" panel) had no part names to show.
+  const partIDs = [...new Set(records.flatMap((r) => (r.partsAddressed || []).map((p) => p?.carPartID)).filter(Boolean))];
+  const partMap = {};
+  for (let i = 0; i < partIDs.length; i += 100) {
+    const refs = partIDs.slice(i, i + 100).map((id) => db.collection("carParts").doc(String(id)));
+    (await db.getAll(...refs)).forEach((d) => { if (d.exists) partMap[d.id] = d.data(); });
+  }
+
+  return records.map((r) => ({
+    ...r,
+    partsAddressed: (r.partsAddressed || []).map((p) => {
+      const cat = partMap[p?.carPartID];
+      return {
+        ...p,
+        carPartName: cat?.carPartName || p?.carPartName || "Removed part",   // older entries may still carry their own name
+        serialNumber: cat?.serialNumber || null,
+      };
+    }),
+  }));
 };
 
 // ─────────────────────────────────────────────
