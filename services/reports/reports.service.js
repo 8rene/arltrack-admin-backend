@@ -1095,8 +1095,9 @@ export const generateMoneyReport = async (period, selection = {}) => {
   //   - cancelled: everything (what came in, what went back) counts on the cancellation day, so only what you keep
   //     (a forfeited deposit, a gateway fee kept) stays and a refunded amount never becomes revenue
   // Example: paid Nov 1, trip completed Nov 7  ->  the revenue is recorded on Nov 7, the same day as its maintenance.
-  //          The deposit is left out while held; when it is settled later (returned, used on a penalty, forfeited), the kept
-  //          part is added on that day.
+  //          The deposit is left out while held; when it is settled later (returned, used on a penalty, forfeited), the settlement
+  //          is recorded on the booking's end day too (not on the day it was settled), so a deposit held and then returned
+  //          stays inside the same period as the rental it came with.
   const recDateOf = (b, date) => {
     if (!b || !b.finalizedAt) return null;   // no booking / not finalized yet: not revenue
     if (b.status === "cancelled") return b.finalizedAt;
@@ -1179,7 +1180,9 @@ export const generateMoneyReport = async (period, selection = {}) => {
     const key = p.paymentID || p.originalId || p.id;
     if (pendingDepositPaymentIDs.has(key)) return;   // still pending at PayMongo = treated as held
     const b = bookingMap[p.bookingID] || null;
-    const date = recDateOf(b, settledAt);
+    // A deposit settlement (returned, used, forfeited) belongs to the booking it came from, so it is dated on the booking's end day,
+    // the same day its rental money is recorded: the held deposit and its return then sit in the same period.
+    const date = b?.finalizedAt || null;   // not finalized yet: not revenue
     if (!date || date < start || date > end) return;
     const base = { date, paymentID: key, bookingID: p.bookingID || null, userID: p.userID || b?.userID || null, carID: b?.carID || null };
     if (num(v.amount) > 0) revSettled.push({ ...base, amount: num(v.amount) });
