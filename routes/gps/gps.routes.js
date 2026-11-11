@@ -26,7 +26,8 @@ export const registerGpsRoutes = (app) => {
 
   // GPS device management — Owner, Admin, Supervisor
   app.get("/api/gps/devices",             verifyToken, requireRole(allowed), getAllGpsDevices);
-  app.post("/api/gps/devices",            verifyToken, requireRole(allowed), addGpsDevice);
+  // Adding a device is Admin-only (the GPS Setup page hides the button for Owner/Supervisor; this enforces it).
+  app.post("/api/gps/devices",            verifyToken, requireRole([roles.ADMIN]), addGpsDevice);
   app.put("/api/gps/devices/:id/assign",  verifyToken, requireRole(allowed), assignCarToDevice);
   app.put("/api/gps/devices/:id/unassign",verifyToken, requireRole(allowed), unassignDeviceFromCar);
   app.patch("/api/gps/devices/:id",       verifyToken, requireRole(allowed), updateGpsDevice);
