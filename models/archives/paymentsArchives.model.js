@@ -29,7 +29,6 @@ export const PaymentsArchive = {
   amount: 0,
   rentalFee: 0,
   serviceFee: 0,
-  extraFee: 0,
   driversFee: 0,
   gatewayFee: 0,
   securityDeposit: 0,

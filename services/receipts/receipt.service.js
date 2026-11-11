@@ -362,7 +362,6 @@ export const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSe
           rental: num(payment.rentalFee),
           service: num(payment.serviceFee),
           gateway: num(payment.gatewayFee),
-          extra: num(payment.extraFee),
           driver: num(payment.driversFee),
           days: Math.max(1, num(booking?.totalDays) || 1),
         },

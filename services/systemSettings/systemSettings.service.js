@@ -9,16 +9,15 @@ const timestamp = () => admin.firestore.FieldValue.serverTimestamp();
 // panel) returns the same numbers the system charges.
 //
 // serviceFeePercent / gatewayFeePercent are PERCENTAGES (0-100), not pesos:
-//   service fee = serviceFeePercent % of the RENTAL FEE only (no extra fee,
-//                 driver's fee or security deposit)
+//   service fee = serviceFeePercent % of the RENTAL FEE only (no driver's fee
+//                 or security deposit)
 //   gateway fee = gatewayFeePercent % of everything else on the booking
-//                 (rental + extra + driver's fee + service fee + security deposit)
+//                 (rental + driver's fee + service fee + security deposit)
 // They replace the old flat serviceFee / gatewayFee pesos. Bookings already
 // made keep the peso amounts they were charged (stored on each payment).
 const DEFAULTS = {
   serviceFeePercent: 5,
   gatewayFeePercent: 5,
-  extraFeeOutsideArea: 500,
   driversFeeBaseArea: 1000,
   driversFeeOutsideArea: 1500,
   baseAreaKeywords: ["manila", "bulacan"],
@@ -52,8 +51,8 @@ const DEFAULTS = {
 // Percentage fields: must be a number between 0 and 100.
 const PERCENT_FIELDS = ["serviceFeePercent", "gatewayFeePercent"];
 
-// extraFeeOutsideArea is NOT in this list on purpose: it is not editable. It is always worked out as
-// driversFeeOutsideArea - driversFeeBaseArea (see updateSystemSettings), so any value sent for it is ignored.
+// extraFeeOutsideArea is NOT in this list on purpose: there is no "extra fee" setting any more, so any value sent
+// for it is ignored, and it is dropped from every new settings snapshot (see updateSystemSettings).
 const NUMERIC_FIELDS = [
   ...PERCENT_FIELDS,
   "driversFeeBaseArea",
@@ -132,18 +131,15 @@ export const updateSystemSettings = async (payload, actor) => {
     update[field] = num;
   }
 
-  // ── Outside-area extra fee = difference of the two driver's fees ──
-  // Whenever either driver's fee is being saved, the outside rate must be strictly HIGHER than the base rate
-  // (so the extra fee can never be 0 or negative), and extraFeeOutsideArea is stored as that difference so every
-  // reader of this doc (customer backend, receipts) sees one consistent number.
+  // ── Driver's fee: outside the base area must cost MORE than inside ──
+  // The admin types the two driver's fees; there is no separate "extra fee" setting any more.
   // Skipped for saves that touch neither fee (e.g. the store-location save), so those can't be blocked.
   if (update.driversFeeBaseArea !== undefined || update.driversFeeOutsideArea !== undefined) {
     const base    = update.driversFeeBaseArea    !== undefined ? update.driversFeeBaseArea    : Number(current.driversFeeBaseArea);
     const outside = update.driversFeeOutsideArea !== undefined ? update.driversFeeOutsideArea : Number(current.driversFeeOutsideArea);
     if (!(outside > base)) {
-      throw new Error("Driver's Fee — Outside Area must be higher than Driver's Fee — Base Area (the extra fee for being outside the base area is the difference, and it cannot be 0).");
+      throw new Error("Driver's Fee — Outside Area must be higher than Driver's Fee — Base Area.");
     }
-    update.extraFeeOutsideArea = outside - base;
   }
 
   if (payload.baseAreaKeywords !== undefined) {
@@ -194,8 +190,8 @@ export const updateSystemSettings = async (payload, actor) => {
 
   // serviceFee / gatewayFee (flat pesos) are legacy — superseded by the
   // percent fields above. Drop them so new snapshots don't carry two sources
-  // of truth for the same fee.
-  const { systemSettingsID, createdAt, serviceFee: _legacyServiceFee, gatewayFee: _legacyGatewayFee, ...rest } = current;
+  // of truth for the same fee. extraFeeOutsideArea is dropped for the same reason: it no longer exists as a setting.
+  const { systemSettingsID, createdAt, serviceFee: _legacyServiceFee, gatewayFee: _legacyGatewayFee, extraFeeOutsideArea: _legacyExtraFee, ...rest } = current;
 
   const ref = db.collection(COLLECTION).doc();
   await ref.set({

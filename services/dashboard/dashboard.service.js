@@ -57,8 +57,7 @@ export const getScheduledRefunds = async () => {
 const parsePaymentTotal = (data) => {
   const rental  = parseFloat(data.rentalFee  ?? 0) || 0;
   const service = parseFloat(data.serviceFee ?? 0) || 0;
-  const extra   = parseFloat(data.extraFee   ?? 0) || 0;
-  return rental + service + extra;
+  return rental + service;
 };
 
 const toTimestamp = (date) => admin.firestore.Timestamp.fromDate(date);

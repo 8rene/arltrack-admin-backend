@@ -193,7 +193,6 @@ export const renderStatementEmail = (s, { audience = "staff" } = {}) => {
               ${pair("Rental fee", peso(f.rental))}
               ${f.service > 0 ? pair("Service fee", peso(f.service)) : ""}
               ${f.gateway > 0 ? pair("Gateway fee", peso(f.gateway)) : ""}
-              ${f.extra > 0 ? pair("Extra fee (outside base area)", peso(f.extra)) : ""}
               ${f.driver > 0 ? pair(`Driver's fee (${peso(f.driver / f.days)} × ${f.days} day${f.days > 1 ? "s" : ""})`, peso(f.driver)) : ""}
               ${s.charges.securityDeposit > 0 ? pair("Security deposit (refundable)", peso(s.charges.securityDeposit)) : ""}
               ${rule}

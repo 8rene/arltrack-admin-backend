@@ -531,7 +531,6 @@ export const getBookingArchiveDetails = async (bookingArchivesId) => {
       amount: p.amount ?? 0,
       rentalFee: p.rentalFee ?? 0,
       serviceFee: p.serviceFee ?? 0,
-      extraFee: p.extraFee ?? 0,
       driversFee: p.driversFee ?? 0,
       gatewayFee: p.gatewayFee ?? 0,
       securityDeposit: Number(p.securityDeposit) || 0,

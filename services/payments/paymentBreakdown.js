@@ -316,7 +316,7 @@ const computeRefundPlan = (payment, opts = {}) => {
 //   → payment.depositFee      (legacy flat deposit on older payments)
 // It is capped at what the customer actually paid, so a refund is never negative.
 //
-// Everything else the customer paid (rental, extra/driver's fee, service fee,
+// Everything else the customer paid (rental, driver's fee, service fee,
 // gateway fee…) is refunded.
 //
 // waiveForfeit: staff override (goodwill, duplicate charge, business-caused

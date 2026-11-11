@@ -32,15 +32,14 @@
 
 export const PricingSettings = {
   // Percentage fees (0-100). NOT flat pesos any more.
-  serviceFeePercent: 5,  // % of the RENTAL FEE only (no extra/driver's fee, no security deposit)
-  gatewayFeePercent: 5,  // % of the rest of the booking: rental + extra + driver's + service fee + security deposit
+  serviceFeePercent: 5,  // % of the RENTAL FEE only (no driver's fee, no security deposit)
+  gatewayFeePercent: 5,  // % of the rest of the booking: rental + driver's + service fee + security deposit
 
   // Out-of-area / chauffeur fees
-  extraFeeOutsideArea: 500,     // added when destination is outside the base area
   driversFeeBaseArea: 1000,     // chauffeur fee, destination inside base area
   driversFeeOutsideArea: 1500,  // chauffeur fee, destination outside base area
 
-  // What counts as "base area" (no extra fee). Destination string is
+  // What counts as "base area" (the lower driver's fee applies). Destination string is
   // lower-cased and checked with .includes() against each keyword.
   baseAreaKeywords: ["manila", "bulacan"],
 

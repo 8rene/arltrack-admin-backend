@@ -11,7 +11,6 @@ export const Payment = {
   amount: 0,          // grand total of the booking
   rentalFee: 0,
   serviceFee: 0,
-  extraFee: 0,
   driversFee: 0,        // chauffeur fee (0 when self-drive)
   gatewayFee: 0,        // payment-gateway fee charged to the customer (peso amount)
   securityDeposit: 0,   // refundable deposit, already inside `amount`
@@ -20,7 +19,7 @@ export const Payment = {
   // never alters an existing booking. 0 on bookings made before percent fees.
   serviceFeeRate: 0,    // % of the RENTAL FEE only
   gatewayFeeRate: 0,    // % of gatewayFeeBase
-  gatewayFeeBase: 0,    // rental + extra + driver's + service fee + security deposit
+  gatewayFeeBase: 0,    // rental + driver's + service fee + security deposit
 
   // What the customer chose at booking time.
   methodOfPayment: "",  // "Full" | "Partial"

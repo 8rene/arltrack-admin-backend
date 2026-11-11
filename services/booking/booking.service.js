@@ -44,7 +44,7 @@ export const resolveVehicleName = async (carID) => {
 };
 
 // bookingID → { paymentMethod, totalFee, rentalFee, serviceFee,
-// extraFee, amountPaid, balance, payType, paymentStatus } from payments
+// amountPaid, balance, payType, paymentStatus } from payments
 // collection. totalFee comes from payments.amount; the fee breakdown comes
 // straight off the same doc. amountPaid/balance/payType are derived via the
 // shared computeAmounts() (same logic payments.service.js uses for
@@ -55,7 +55,7 @@ export const resolveVehicleName = async (carID) => {
 // cancelled *booking* still forces "Cancelled" (applied by the caller,
 // which has b.status handy — see getAllBookings below).
 const EMPTY_PAYMENT_INFO = {
-  paymentMethod: "—", totalFee: 0, rentalFee: 0, serviceFee: 0, extraFee: 0,
+  paymentMethod: "—", totalFee: 0, rentalFee: 0, serviceFee: 0,
   driversFee: 0, gatewayFee: 0, securityDeposit: 0, deposit: null,
   amountPaid: 0, balance: 0, payType: "—", paymentStatus: "—", paymentStage: "—", discountAmount: 0,
   refundDue: 0, refundIssued: false,
@@ -119,7 +119,6 @@ export const resolvePaymentInfo = async (bookingID) => {
       totalFee:      data.amount        ?? 0,
       rentalFee:     data.rentalFee     ?? 0,
       serviceFee:    data.serviceFee    ?? 0,
-      extraFee:      data.extraFee      ?? 0,
       driversFee:    data.driversFee    ?? 0,
       gatewayFee:    data.gatewayFee    ?? 0,
       // Refundable deposit charged as part of `amount` (0 on older bookings).
@@ -488,7 +487,6 @@ export const getAllBookings = async (statusFilter) => {
       totalFee:         payInfo.totalFee,        // from payments.amount
       rentalFee:        payInfo.rentalFee,
       serviceFee:       payInfo.serviceFee,
-      extraFee:         payInfo.extraFee,
       driversFee:       payInfo.driversFee,
       gatewayFee:       payInfo.gatewayFee,
       deposit:          payInfo.deposit,
