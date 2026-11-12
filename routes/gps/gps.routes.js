@@ -31,7 +31,8 @@ export const registerGpsRoutes = (app) => {
   app.put("/api/gps/devices/:id/assign",  verifyToken, requireRole(allowed), assignCarToDevice);
   app.put("/api/gps/devices/:id/unassign",verifyToken, requireRole(allowed), unassignDeviceFromCar);
   app.patch("/api/gps/devices/:id",       verifyToken, requireRole(allowed), updateGpsDevice);
-  app.delete("/api/gps/devices/:id",      verifyToken, requireRole(allowed), deleteGpsDevice);
+  // Deleting a device is Admin-only too (the GPS Setup page hides the button for Owner/Supervisor; this enforces it).
+  app.delete("/api/gps/devices/:id",      verifyToken, requireRole([roles.ADMIN]), deleteGpsDevice);
 
   // Car Tracking — Live / Traceback / History / geofence editing.
   // These were already being called by the frontend (CarTracking.jsx,
