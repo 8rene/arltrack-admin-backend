@@ -1,4 +1,4 @@
-import { listPayments, getPayment, patchPaymentStatus, collectBalance, notifyBalance, discountPayment, editDiscountPayment, refundIssued, retryDiscountRefundPayment } from "../../controllers/payments/payments.controller.js";
+import { listPayments, getPayment, patchPaymentStatus, collectBalance, notifyBalance, cancelBalance, discountPayment, editDiscountPayment, refundIssued, retryDiscountRefundPayment } from "../../controllers/payments/payments.controller.js";
 import { verifyToken } from "../../middlewares/auth/auth.middleware.js";
 import { requireRole, roles } from "../../middlewares/role/role.middleware.js";
 
@@ -19,6 +19,10 @@ export const registerPaymentsRoutes = (app) => {
 
   // The remaining balance is paid online; this nudges the customer to do it (6-hour cooldown).
   app.post("/api/payments/booking/:bookingID/notify-balance", verifyToken, requireRole(allowed), notifyBalance);
+
+  // The customer started the online balance checkout and left it pending: expire the PayMongo checkout and mark the
+  // balance cancelled, so the in-store payment below can be recorded. Same roles as the in-store payment.
+  app.post("/api/payments/booking/:bookingID/cancel-balance", verifyToken, requireRole(allowed), cancelBalance);
 
   // The EXCEPTION: the customer chose to pay the remaining balance in store. Supervisor / Admin /
   // Owner only (`allowed`), with the payment mode and a reference number on record.

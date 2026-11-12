@@ -6,6 +6,7 @@ import {
   applyDiscount,
   editDiscount,
   notifyBalanceDue,
+  cancelPendingBalance,
   markRefundIssued,
   retryDiscountRefund,
 } from "../../services/payments/payments.service.js";
@@ -150,5 +151,17 @@ export const notifyBalance = async (req, res) => {
       message: error.message,
       ...(error.retryAfterSeconds != null ? { retryAfterSeconds: error.retryAfterSeconds, lastNotifiedAt: error.lastNotifiedAt } : {}),
     });
+  }
+};
+
+// Cancels a balance payment that is still pending on PayMongo (expires the checkout), so an in-store payment can be recorded.
+export const cancelBalance = async (req, res) => {
+  try {
+    const { bookingID } = req.params;
+    const data = await cancelPendingBalance(bookingID, actorUid(req) || null);
+    return res.status(200).json({ success: true, data, message: "Online payment cancelled." });
+  } catch (error) {
+    console.warn("[PAYMENTS] cancel-balance rejected:", error.message);
+    return res.status(error.status || 400).json({ success: false, message: error.message });
   }
 };

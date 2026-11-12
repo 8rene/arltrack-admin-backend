@@ -407,6 +407,9 @@ const buildPaymentRow = (payment, booking, customerName, vehicleName, openRefund
     methodOfPayment: payment.methodOfPayment || "—",
     paymentMethod: payment.paymentMethod || "—",
     paymongoPaymentID: payment.paymongoPaymentID || null,
+    // Every PayMongo id this payment is known by (deposit pay_..., balance pay_..., the open checkout cs_...), so the
+    // Payments page can search by the reference staff see in the PayMongo dashboard.
+    paymongoRefs: [...new Set([paymongoIDs.deposit, paymongoIDs.balance, payment.paymongoPaymentID, payment.paymongoSessionID].filter(Boolean))],
     status,
     paymentStage,
     // What the customer actually paid, even after a refund. amountPaid is 0 once refunded (the money is no longer
@@ -1533,4 +1536,147 @@ export const getPaymentDetailsByBookingID = async (bookingID) => {
   const openRefund = await findOpenRefundRequest(payment.paymentID || payment.id);
   const discountRefund = await getDiscountRefundState(payment, payment.id);
   return withStaffNames(buildPaymentRow(payment, bookingData, customerName, vehicleName, openRefund, discountRefund));
+};
+
+// ─────────────────────────────────────────────
+// CANCEL a balance payment that is still pending on PayMongo.
+//
+// The customer opened the Maya / GCash / QR Ph checkout for the remaining balance and walked away, so the balance
+// stays "pending" and staff can't record an in-store payment (see collectRemainingBalance). This asks PayMongo to
+// EXPIRE that checkout session so it can no longer be paid, then marks the balance "cancelled". Staff can then
+// record the in-store payment (or remind the customer to pay online again).
+//
+// Safety: money is never taken twice.
+//   • PayMongo says the checkout was already paid  -> nothing is changed; staff are told to wait for it to clear.
+//   • PayMongo can't be reached / refuses          -> nothing is changed.
+//   • A balance with no checkout session on record -> refused (there is nothing to expire, so we can't be sure
+//                                                      the customer can't still pay it).
+// ─────────────────────────────────────────────
+const PAYMONGO_V1 = "https://api.paymongo.com/v1";
+const paymongoAuthHeaders = () => ({
+  "Content-Type": "application/json",
+  "Authorization": `Basic ${Buffer.from((process.env.PAYMONGO_SECRET_KEY || "") + ":").toString("base64")}`,
+});
+const paymongoFail = (message, status = 400) => { const e = new Error(message); e.status = status; return e; };
+
+// Reads a checkout session. { status, paid } -- paid is true when any payment on it succeeded.
+const readCheckoutSession = async (sessionID) => {
+  let res;
+  try {
+    res = await fetch(`${PAYMONGO_V1}/checkout_sessions/${encodeURIComponent(sessionID)}`, { headers: paymongoAuthHeaders() });
+  } catch (err) {
+    console.error("[PAYMENTS] PayMongo checkout lookup failed:", err.message);
+    throw paymongoFail("Could not reach PayMongo. Please try again.", 502);
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw paymongoFail(body?.errors?.[0]?.detail || "PayMongo could not find that checkout.", 400);
+  const attrs = body?.data?.attributes || {};
+  const payments = Array.isArray(attrs.payments) ? attrs.payments : [];
+  const paidPayments = payments.filter((p) => {
+    const st = String(p?.attributes?.status || "").toLowerCase();
+    return st === "paid" || st === "succeeded";
+  });
+  const paid = paidPayments.length > 0
+    || String(attrs.payment_intent?.attributes?.status || "").toLowerCase() === "succeeded";
+  // What PayMongo actually received on this checkout (centavos -> pesos), and the pay_... ids, so staff can tell WHICH
+  // payment this is (the deposit's or the balance's).
+  const paidAmount = paidPayments.reduce((n, p) => n + (Number(p?.attributes?.amount) || 0), 0) / 100;
+  return { status: String(attrs.status || "").toLowerCase(), paid, paidAmount, paymentIDs: paidPayments.map((p) => p.id).filter(Boolean) };
+};
+
+export const cancelPendingBalance = async (bookingID, cancelledBy) => {
+  if (!bookingID) throw new Error("bookingID is required.");
+  if (!process.env.PAYMONGO_SECRET_KEY) throw paymongoFail("PAYMONGO_SECRET_KEY is not set on the admin backend.", 500);
+
+  const snap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  if (snap.empty) throw new Error("No payment record found for this booking.");
+  const doc  = snap.docs[0];
+  const data = await hydratePaymentData(doc.data(), doc.id);
+  const paymentID = data.paymentID || doc.id;
+
+  if (String(data.balanceStatus || "").toLowerCase() !== "pending") {
+    throw new Error("There is no pending online balance payment to cancel on this booking.");
+  }
+
+  // The checkout session of the BALANCE only. The payment-level paymongoSessionID is NOT used: it is derived from the
+  // latest row that has a session, which is the DEPOSIT's checkout when the balance row has none -- and that one is
+  // genuinely paid, so cancelling would wrongly report "already paid". Where the balance's own session can be stored:
+  //   1. the balance row (the webhook's lookup key)
+  //   2. the payment document's paymongoTransactions[] entry for phase "balance"
+  //   3. the payment document's paymongoSessionID, but only while the open checkout is the balance one (currentPhase)
+  const raw = doc.data();
+  const [balRow, depRow] = await Promise.all([
+    db.collection(ENTRY_COLLECTION).doc(`${paymentID}_balance`).get(),
+    db.collection(ENTRY_COLLECTION).doc(`${paymentID}_deposit`).get(),
+  ]);
+  const depositSession = (depRow.exists && depRow.data().sessionID) || null;
+  const fromTx = (Array.isArray(raw.paymongoTransactions) ? raw.paymongoTransactions : [])
+    .find((t) => t && t.phase === "balance" && t.sessionID)?.sessionID || null;
+  const fromDoc = String(raw.currentPhase || "").toLowerCase() === "balance" ? (raw.paymongoSessionID || null) : null;
+  const sessionID = [balRow.exists ? balRow.data().sessionID : null, fromTx, fromDoc]
+    .find((id) => id && id !== depositSession) || null;
+
+  // A balance marked "pending" with NO checkout of its own behind it (the customer app set the status but never saved a
+  // checkout for the balance) has nothing to expire, so there is nothing to protect: it is simply rejected. Staff are
+  // told, so they can glance at PayMongo for a payment of that amount before taking the money in store.
+  let noCheckout = !sessionID;
+
+  // Ask PayMongo to expire it. If it refuses, find out why: already paid (leave it alone) or already expired (fine).
+  let res = { ok: true };
+  if (sessionID) try {
+    res = await fetch(`${PAYMONGO_V1}/checkout_sessions/${encodeURIComponent(sessionID)}/expire`, {
+      method: "POST", headers: paymongoAuthHeaders(),
+    });
+  } catch (err) {
+    console.error("[PAYMENTS] PayMongo expire request failed:", err.message);
+    throw paymongoFail("Could not reach PayMongo. Nothing was changed — please try again.", 502);
+  }
+  if (sessionID && !res.ok) {
+    const detail = (await res.json().catch(() => ({})))?.errors?.[0]?.detail || "";
+    const session = await readCheckoutSession(sessionID);   // throws (and changes nothing) if PayMongo can't say
+    console.warn(`[PAYMENTS] cancel-balance ${bookingID}: expire refused for ${sessionID} (${detail || "no detail"}); session status "${session.status}", paid ${session.paid}, paid amount ${session.paidAmount}, payments ${session.paymentIDs.join(",") || "none"}.`);
+    if (session.paid) {
+      const expected = Number((balRow.exists && balRow.data().amount) || raw.balanceAmount) || 0;
+      const refs = session.paymentIDs.length ? ` (${session.paymentIDs.join(", ")})` : "";
+      // The paid checkout is for a different amount than the balance: it is the deposit's checkout (or some other
+      // payment) saved against the balance by mistake. The balance itself was NOT paid through it.
+      if (expected > 0 && session.paidAmount > 0 && Math.abs(session.paidAmount - expected) > 0.01) {
+        noCheckout = true;   // that checkout is somebody else's payment, not the balance: same as having none
+      } else {
+        throw new Error(`The customer has already paid this balance on PayMongo${refs}. It will show as paid once PayMongo confirms — nothing was cancelled.`);
+      }
+    }
+    if (!noCheckout && session.status !== "expired") {
+      throw new Error(detail ? `PayMongo would not cancel the checkout: ${detail}` : "PayMongo would not cancel the checkout. Nothing was changed.");
+    }
+  }
+
+  // The checkout can no longer be paid: close the balance. The row is re-derived from balanceStatus, so it becomes
+  // "cancelled" (the session id stays on it as the record). Entries first would leave the payment saying "pending",
+  // so the document is written first and the row follows; a failed row write is reported and can be retried.
+  await doc.ref.update({
+    balanceStatus: "cancelled",
+    checkoutUrl: "",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  await recordInEntries(doc.ref, doc.id, { balanceStatus: "cancelled" });
+
+  const booking = await findBookingByBookingID(bookingID);
+  const customerUserID = resolveCustomerUserID(data.userID, booking);
+  await notifyCustomer(
+    customerUserID, bookingID, "balance_cancelled", "Online balance payment cancelled",
+    `Your pending online payment for booking ${bookingID} was cancelled by our staff. If you haven't paid yet, you can pay the remaining balance in store or online again.`,
+  );
+
+  auditSafe({
+    action: "update",
+    description: noCheckout
+      ? `Pending online balance payment rejected for booking ${bookingID}: no PayMongo checkout was on record for the balance, so there was nothing to expire.`
+      : `Pending online balance payment cancelled (PayMongo checkout expired) for booking ${bookingID}.`,
+    userID: cancelledBy || null,
+    bookingID,
+    paymentID,
+  });
+
+  return { bookingID, paymentID, balanceStatus: "cancelled", noCheckout };
 };
