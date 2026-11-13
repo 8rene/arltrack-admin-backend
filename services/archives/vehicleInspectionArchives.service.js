@@ -69,8 +69,10 @@ export const writeInspectionArchive = async (rows = [], { bookingID, archivedBy 
   const records = rows.map((r) => ({ collection: r.name, id: r.doc.id, data: r.doc.data() }));
   // Own ID per archive (auto ID). If this booking already has an archive, overwrite that one so a retry or a second
   // delete never creates a duplicate: still ONE archive document per booking.
+  // A legacy archive (document ID = bookingID) is never reused: the new document gets its own auto ID and the legacy one is removed.
   const [existing] = await findInspectionArchiveSnaps([bookingID]);
-  const ref = existing ? existing.ref : db.collection(ARCHIVE).doc();
+  const legacy = existing && existing.id === bookingID ? existing : null;
+  const ref = existing && !legacy ? existing.ref : db.collection(ARCHIVE).doc();
   await ref.set({
     vehicleInspectionArchivesId: ref.id,
     bookingID,
@@ -80,6 +82,7 @@ export const writeInspectionArchive = async (rows = [], { bookingID, archivedBy 
     archivedAt: stamp(),
     archivedBy,
   });
+  if (legacy) await legacy.ref.delete();
   return rows.length;
 };
 
