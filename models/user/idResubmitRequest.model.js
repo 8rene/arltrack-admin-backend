@@ -1,9 +1,11 @@
 // idResubmitRequests/{requestID} -- a customer sending a new driver's license or ID document for staff review.
-// Shape only: created by submitIdResubmitRequest in controllers/user/user.controller.js (auto-generated doc ID, not a field);
+// Shape only: created by createIdResubmitRequest in services/profileRequests/profileRequests.service.js (auto-generated doc ID, also
+// stored as the idResubmitRequestID field; requests created before that field existed don't have it, read the document ID for those);
 // reviewed by the admin backend (services/profileRequests).
 // When the account is deleted, deleteUser() rejects the user's PENDING requests (reviewNote "Account deleted."). They are deleted,
 // together with the photo files they point at (newLicenseUrl / newDocumentUrl), when the archived user is permanently deleted.
 export const IdResubmitRequest = {
+  idResubmitRequestID: "", // this document's own ID (same value as the document ID)
   userID: "",
   role: "Customer",
   documentKind: "",    // "license" | "document"

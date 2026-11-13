@@ -730,7 +730,7 @@ export const driverRemindBalance = async (bookingDocID, driverID) => {
     previous = snap.exists ? snap.data() : null;
     const left = previous ? balanceSecondsLeft(tsToMs(previous.lastRemindedAt), nowTs.toMillis()) : 0;
     if (left > 0) throw driverErr(429, "The customer was already reminded recently.", { retryAfterSeconds: left });
-    tx.set(ref, { bookingKey: bID, bookingDocID, driverID, lastRemindedAt: nowTs, count: (previous?.count || 0) + 1 });
+    tx.set(ref, { balanceReminderID: bID, bookingKey: bID, bookingDocID, driverID, lastRemindedAt: nowTs, count: (previous?.count || 0) + 1 });
   });
 
   try {

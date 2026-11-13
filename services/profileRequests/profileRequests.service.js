@@ -390,7 +390,10 @@ export const createEditRequest = async (userID, role, rawChanges) => {
   assertAllowedChanges(changes);
   assertValidContactFields(changes);
 
-  const ref = await db.collection("editRequests").add({
+  // Create the ref first so the generated ID is both the document ID and the editRequestID field.
+  const ref = db.collection("editRequests").doc();
+  await ref.set({
+    editRequestID: ref.id,
     userID,
     role,
     status: "pending",
@@ -477,7 +480,10 @@ export const createIdResubmitRequest = async (userID, role, documentKind, curren
         newSelfieUrl,
       };
 
-  const ref = await db.collection("idResubmitRequests").add({
+  // Create the ref first so the generated ID is both the document ID and the idResubmitRequestID field.
+  const ref = db.collection("idResubmitRequests").doc();
+  await ref.set({
+    idResubmitRequestID: ref.id,
     userID,
     role,
     documentKind,

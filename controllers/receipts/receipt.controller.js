@@ -42,7 +42,9 @@ export const emailReceipt = async (req, res) => {
     // One shared limit (staff AND the customer's own button): claimed in a transaction BEFORE sending so two quick
     // requests cannot both pass; given back if the send fails.
     const key = emailKeyFor.receipt(receipt.receiptNo);
-    const slot = await emailLimiter.claim(key, actorUid(req));
+    const slot = await emailLimiter.claim(key, actorUid(req), {
+      type: receipt.kind, bookingID: receipt.booking?.bookingID, receiptNo: receipt.receiptNo,
+    });
     if (!slot.ok) {
       return res.status(429).json({ success: false, retryAfterSeconds: slot.wait,
         message: `This receipt was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.` });
@@ -109,7 +111,9 @@ export const emailStatement = async (req, res) => {
     }
 
     const key = emailKeyFor.statement(statement.booking.bookingID);
-    const slot = await emailLimiter.claim(key, actorUid(req));
+    const slot = await emailLimiter.claim(key, actorUid(req), {
+      type: "statement", bookingID: statement.booking.bookingID,
+    });
     if (!slot.ok) {
       return res.status(429).json({ success: false, retryAfterSeconds: slot.wait,
         message: `This statement was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.` });

@@ -516,25 +516,37 @@ export const emailKeyFor = {
   statement: (bookingID) => safeKey(`statement_${bookingID}`),
 };
 
+// What every receiptEmails document holds. The document ID stays the key (the limit needs a known ID to claim inside a
+// transaction), but the record also says what it is, like the other collections. `meta` comes from the receipt / statement
+// being emailed: { type: receipt kind or "statement", bookingID, receiptNo (receipts only) }.
+const emailRecordFor = (key, by, atMs, meta = {}) => ({
+  receiptEmailID: key,                                                                 // = the document ID
+  type: meta.type || (String(key).startsWith("statement_") ? "statement" : null),      // "payment" | "penalty" | "refund" | "deposit_return" | "statement"
+  bookingID: meta.bookingID || null,
+  receiptNo: meta.receiptNo || null,                                                   // null for a statement
+  lastSentAt: new Date(atMs),
+  lastSentBy: by,
+});
+
 export const makeEmailLimiter = (db, { now = () => Date.now(), cooldownMs = EMAIL_COOLDOWN_MS } = {}) => {
   const ref = (key) => db.collection(EMAIL_LIMIT_COLLECTION).doc(key);
   const waitFrom = (rec) => Math.max(0, Math.ceil((toMs(rec?.lastSentAt) + cooldownMs - now()) / 1000));
 
   // -> { ok: true, previous } | { ok: false, wait }   (wait = seconds left)
-  const claim = (key, by = null) => db.runTransaction(async (tx) => {
+  const claim = (key, by = null, meta = {}) => db.runTransaction(async (tx) => {
     const snap = await tx.get(ref(key));
     const prev = snap.exists ? snap.data() : null;
     const wait = waitFrom(prev);
     if (wait > 0) return { ok: false, wait };
-    tx.set(ref(key), { lastSentAt: new Date(now()), lastSentBy: by });
+    tx.set(ref(key), emailRecordFor(key, by, now(), meta));
     return { ok: true, previous: prev };
   });
   const release = async (key, previous) => {
     try { previous ? await ref(key).set(previous) : await ref(key).delete(); } catch { /* best effort */ }
   };
   // for an email that was just sent outside the claim flow (the automatic one after a payment settles)
-  const record = async (key, by = null) => {
-    try { await ref(key).set({ lastSentAt: new Date(now()), lastSentBy: by }); } catch { /* best effort */ }
+  const record = async (key, by = null, meta = {}) => {
+    try { await ref(key).set(emailRecordFor(key, by, now(), meta)); } catch { /* best effort */ }
   };
   const cooldownLeft = async (key) => {
     try { const s = await ref(key).get(); return s.exists ? waitFrom(s.data()) : 0; } catch { return 0; }

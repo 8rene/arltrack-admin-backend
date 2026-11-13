@@ -1,10 +1,12 @@
 // ─────────────────────────────────────────────
 // inventoryBeforeTrip collection schema
 //
-// The document ID is the Firestore doc ID only: it is NOT stored as a field on the document. Records are always looked up
-// by bookingID or carID, never by their own ID.
+// The document ID is Firestore's auto ID and it is also stored as a field (inventoryBeforeTripID / inventoryAfterTripID,
+// same value). Records created before that field existed don't have it; read the document ID for those. Records are
+// still looked up by bookingID or carID.
 // ─────────────────────────────────────────────
 export const InventoryBeforeTrip = {
+  inventoryBeforeTripID: "",     // this document's own ID (same value as the document ID)
   bookingID: "",                 // links to bookings collection
   carID: "",
   inventoryOverallStatus: "",    // "good" | "has damage"
@@ -17,9 +19,10 @@ export const InventoryBeforeTrip = {
 // ─────────────────────────────────────────────
 // inventoryAfterTrip collection schema
 //
-// Same as above: the document ID is the Firestore doc ID only, not a stored field.
+// Same as above: the document ID is also stored, as inventoryAfterTripID.
 // ─────────────────────────────────────────────
 export const InventoryAfterTrip = {
+  inventoryAfterTripID: "",      // this document's own ID (same value as the document ID)
   bookingID: "",                 // links to bookings collection — same booking as Before Trip
   carID: "",
   inventoryOverallStatus: "",    // "good" | "has damage"

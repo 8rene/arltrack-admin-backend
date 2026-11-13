@@ -2,7 +2,7 @@
 //   inventoryBeforeTrip, inventoryAfterTrip (part condition) and
 //   vehicleDocumentationBeforeTrip, vehicleDocumentationAfterTrip (photos).
 //
-// One archive document per booking: { vehicleInspectionArchivesId (= bookingID), bookingID, carID, records: [...] }
+// One archive document per booking: { vehicleInspectionArchivesId (= the document's own ID), bookingID, carID, records: [...] }
 // where every record is { collection, id, data } -- the exact live document (id and every field, including the dynamic
 // part-photo fields) so a restore puts it back byte for byte. The photo URLs inside keep pointing at Firebase Storage;
 // the files are never moved, so a restored inspection shows its photos again. The files are deleted only by a permanent
@@ -46,13 +46,33 @@ export const collectInspectionForBooking = async ({ bookingKeys }) => {
 };
 export const inspectionLiveRefs = (rows = []) => rows.map((r) => r.doc.ref);
 
+// The archive doc(s) of a booking. The document ID is its own auto ID, so a booking is found by the bookingID FIELD.
+// Archives written before this change used the bookingID as the document ID, so that direct lookup is kept as well.
+export const findInspectionArchiveSnaps = async (bookingKeys = []) => {
+  const keys = uniq(bookingKeys);
+  const found = new Map();
+  for (const part of chunk(keys, 30)) {
+    (await db.collection(ARCHIVE).where("bookingID", "in", part).get()).docs.forEach((d) => found.set(d.id, d));
+  }
+  for (const key of keys) {
+    if (found.has(key)) continue;
+    const snap = await db.collection(ARCHIVE).doc(key).get();
+    if (snap.exists) found.set(snap.id, snap);
+  }
+  return [...found.values()];
+};
+
 // ── DELETE side: one archive doc per booking, written before anything live is deleted
 export const writeInspectionArchive = async (rows = [], { bookingID, archivedBy = "admin" } = {}) => {
   if (!rows.length) return 0;
   const first = rows.map((r) => r.doc.data()).find((d) => d.carID);
   const records = rows.map((r) => ({ collection: r.name, id: r.doc.id, data: r.doc.data() }));
-  await db.collection(ARCHIVE).doc(bookingID).set({
-    vehicleInspectionArchivesId: bookingID,
+  // Own ID per archive (auto ID). If this booking already has an archive, overwrite that one so a retry or a second
+  // delete never creates a duplicate: still ONE archive document per booking.
+  const [existing] = await findInspectionArchiveSnaps([bookingID]);
+  const ref = existing ? existing.ref : db.collection(ARCHIVE).doc();
+  await ref.set({
+    vehicleInspectionArchivesId: ref.id,
     bookingID,
     carID: first?.carID || null,
     records,
@@ -80,10 +100,7 @@ const putBack = async (snap) => {
 /** Restoring a booking brings its inspection records back. */
 export const restoreInspectionArchiveForBooking = async ({ bookingKeys }) => {
   let restored = 0;
-  for (const key of uniq(bookingKeys)) {
-    const snap = await db.collection(ARCHIVE).doc(String(key)).get();
-    if (snap.exists) restored += await putBack(snap);
-  }
+  for (const snap of await findInspectionArchiveSnaps(bookingKeys)) restored += await putBack(snap);
   return restored;
 };
 
@@ -95,14 +112,7 @@ export const restoreInspectionArchive = async (archiveID) => {
 };
 
 // ── PERMANENT DELETE
-export const getInspectionArchiveSnapsForBooking = async ({ bookingKeys }) => {
-  const snaps = [];
-  for (const key of uniq(bookingKeys)) {
-    const snap = await db.collection(ARCHIVE).doc(String(key)).get();
-    if (snap.exists) snaps.push(snap);
-  }
-  return snaps;
-};
+export const getInspectionArchiveSnapsForBooking = async ({ bookingKeys }) => findInspectionArchiveSnaps(bookingKeys);
 export const getInspectionArchiveRefsForBooking = async ({ bookingKeys }) => (await getInspectionArchiveSnapsForBooking({ bookingKeys })).map((s) => s.ref);
 
 // every Storage URL inside archive docs and/or live inspection docs: these files go with a permanent delete
@@ -134,8 +144,8 @@ export const shapeInspectionRecords = (records = []) => {
   return out;
 };
 export const getArchivedInspectionForBooking = async (bookingID) => {
-  const snap = await db.collection(ARCHIVE).doc(String(bookingID)).get();
-  return snap.exists ? shapeInspectionRecords(snap.data().records) : null;
+  const snaps = await findInspectionArchiveSnaps([bookingID]);
+  return snaps.length ? shapeInspectionRecords(snaps.flatMap((s) => s.data().records || [])) : null;
 };
 
 // ── LIST (newest archived first; sorted here so no Firestore index is needed)

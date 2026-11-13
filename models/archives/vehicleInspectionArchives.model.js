@@ -9,13 +9,14 @@
 // nested whole inside `records`, so none of their columns appear at the top level. A booking with no inspection records gets
 // no archive document.
 //
-// The archive document id IS the bookingID. The photo URLs inside `records` keep pointing at Firebase Storage (the files
+// The archive document has its OWN id (a Firestore auto ID), separate from the bookingID; a booking's archive is found by the
+// bookingID field. Archives written before this change used the bookingID as the document id; they are still found and work the same. The photo URLs inside `records` keep pointing at Firebase Storage (the files
 // are never moved; only a permanent delete removes them). Restore puts every record back under its own collection and id
 // (bookkeeping stripped, see services/archives/archiveMeta.js), deletes this document, then refreshes the car's live part
 // condition. The restored records get no restoredAt.
 export const VehicleInspectionArchive = {
   // ---- bookkeeping: written by the archive, NEVER restored ----
-  vehicleInspectionArchivesId: "",  // = the bookingID = the Firestore doc ID of this archive document
+  vehicleInspectionArchivesId: "",  // = the Firestore doc ID of this archive document (its own auto ID; old archives: the bookingID)
   // originalId is NOT stored any more: this archive document's ID IS the live document's ID (restore writes it back under that ID).
   // The archive list APIs still return it as originalId (= the document ID) so the pages keep working.
   archiveDate: null,       // set when archived (same moment as archivedAt)

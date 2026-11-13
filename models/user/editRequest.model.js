@@ -1,6 +1,7 @@
 // editRequests/{requestID}   -- a user's request to change their own profile fields; staff approve or reject it.
-// The doc ID is Firestore's auto ID (add()), and it is NOT stored as a field. The request is the refID of its
-// "edit_request" notification.
+// The doc ID is Firestore's auto ID (doc().set()), and it is also stored as the editRequestID field (same value), so the
+// ID can be read from the data itself. Requests created before editRequestID existed don't have the field; read the
+// document ID for those. The request is the refID of its "edit_request" notification.
 // Written by createEditRequest(), approveProfileRequest(), rejectRequest() and cancelEditRequest() in
 // services/profileRequests/profileRequests.service.js. The sibling collection for license / ID photo changes is
 // idResubmitRequests (models/user/idResubmitRequest.model.js).
@@ -10,6 +11,7 @@
 // When the account is deleted, deleteUser() rejects the user's PENDING requests (closePendingRequestsForUser, reviewNote "Account deleted.");
 // the requests are deleted when the archived user is permanently deleted (deleteUserArchive in userArchives.service.js).
 export const EditRequest = {
+  editRequestID: "",   // this document's own ID (same value as the document ID)
   userID: "",          // the user whose profile changes (always taken from the verified token, never the request body)
   requestedBy: "",     // uid of whoever submitted it; same as userID. Only this person can cancel it
   role: "",            // the requester's role when they submitted it

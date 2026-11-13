@@ -8,6 +8,11 @@ const HISTORY_COLLECTIONS = {
   before: "inventoryBeforeTrip",
   after:  "inventoryAfterTrip",
 };
+// The field that stores each record's own document ID.
+const INVENTORY_ID_FIELD = {
+  inventoryBeforeTrip: "inventoryBeforeTripID",
+  inventoryAfterTrip:  "inventoryAfterTripID",
+};
 
 /**
  * Admin-only direct edit of a single part's status on a before/after-trip
@@ -65,6 +70,7 @@ export const adminUpdateHistoryPartStatus = async ({ tripPhase, bookingID, carID
 
   if (isNewRecord) {
     await ref.set({
+      [INVENTORY_ID_FIELD[collectionName]]: ref.id,
       bookingID, carID, damageParts, inventoryOverallStatus,
       recordedAt: now,
     });
@@ -159,7 +165,9 @@ export const saveBeforeTrip = async ({ bookingID, carID, parts }) => {
   if (!existingSnap.empty) {
     await existingSnap.docs[0].ref.update({ inventoryOverallStatus, damageParts, recordedAt: timestamp });
   } else {
-    await db.collection("inventoryBeforeTrip").add({
+    const newRef = db.collection("inventoryBeforeTrip").doc();
+    await newRef.set({
+      inventoryBeforeTripID: newRef.id,
       bookingID,
       carID,
       inventoryOverallStatus,
@@ -222,7 +230,9 @@ export const saveAfterTrip = async ({ bookingID, carID, parts, userID }) => {
   if (!existingSnap.empty) {
     await existingSnap.docs[0].ref.update({ inventoryOverallStatus, damageParts, recordedAt: timestamp });
   } else {
-    await db.collection("inventoryAfterTrip").add({
+    const newRef = db.collection("inventoryAfterTrip").doc();
+    await newRef.set({
+      inventoryAfterTripID: newRef.id,
       bookingID,
       carID,
       inventoryOverallStatus,

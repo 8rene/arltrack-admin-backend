@@ -392,7 +392,9 @@ export const saveInventoryStatus = async ({ bookingID, carID, tripType, overallS
       recordedAt: timestamp,
     });
   } else {
-    const newRef = await db.collection(collectionName).add({
+    const newRef = db.collection(collectionName).doc();
+    await newRef.set({
+      [collectionName === INVENTORY_COLLECTION.before ? "inventoryBeforeTripID" : "inventoryAfterTripID"]: newRef.id,
       bookingID,
       carID,
       inventoryOverallStatus: overallStatus,
