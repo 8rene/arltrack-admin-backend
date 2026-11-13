@@ -1,0 +1,50 @@
+
+overview - mark
+    devices, and software
+
+bg of study yvert
+existing process jem
+sop and obj rubio
+features & rl rs, sean
+DELIMITATION mark
+SOFTWARE BRIEF  - yvert
+HARDWARE BRIEF (DEVICE)  - rubio
+
+PROPOSED process & List scenarios - jem
+Before scenario, explain difference ng web and app => si mark explain ng mobile device 
+
+1. NORMAL PROCESS PARTIAL PAYMENT WITH CHAUFFEUR
+    SIGNUP REGISTRATION   - sean = type: yvert
+    ACCOUNT VERIFICATION  - rubio = type yvert
+    BROWSE AND BOOK -  sean        = type yvert
+    PAYMENT & TRANSACTION   sean        = type yvert
+    ASSIGN DRIVER                yvert       = type jem
+    INSPECITON VEHICLE          mark        = type jem
+    PCUP/ MONITOR /  DROPOFF        rubio   = type jem`
+    AFTER INSPECITON     mark               = type rubio
+    MAINNENTNECE         yvert              = type rubio
+    PENALTY              jem                = type rubio
+    RETURN DEPOSIT      rubio               = type sean
+
+
+REPORTS LAST PART NORMAL PROCESS      rubio /  jem  = type sean 
+
+
+IBANG SCENARIO       = mobile
+PARTIAL             
+FULL 
+WITH DRIVER
+WITHOUT DRIVER
+
+CANCELLATION
+    LESS THAN 48 HORUS
+    MORE THAN 48 HORUS
+    UNDER GRACE PERIOD
+    MANUAL CANCELLATION NI STAFF
+    
+
+cancelation manual booking
+
+edit account
+
+

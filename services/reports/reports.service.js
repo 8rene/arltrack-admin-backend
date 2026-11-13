@@ -122,6 +122,7 @@ const loadBookingsInRange = async (start, end) => {
         carID: b.carID || null,
         modeOfDriving: b.modeOfDriving || "",
         serviceTypeID: b.serviceTypeID || null,
+        serviceType: typeof b.serviceType === "string" ? b.serviceType.trim() : "",   // free text; only meaningful when serviceTypeID is null ("Others")
         status: normalizeBookingStatus(b.status),
         location: b.location || "—",
         totalDays: b.totalDays || 0,
@@ -636,7 +637,9 @@ export const generateReport = async (period, selection = {}) => {
       customerName: b.userID ? (customerNameByID[b.userID] || "Unknown") : "Unknown",
       modeOfDriving: b.modeOfDriving || "",
       serviceTypeID: b.serviceTypeID,
-      serviceTypeName: (b.serviceTypeID && rowServiceTypeNames[b.serviceTypeID]) || "Unspecified",
+      // "Others" = the customer typed their own text (no serviceTypeID). Only a booking with neither is truly "Unspecified".
+      serviceTypeName: (b.serviceTypeID && rowServiceTypeNames[b.serviceTypeID]) || (b.serviceType ? "Others" : "Unspecified"),
+      serviceTypeOther: !b.serviceTypeID ? (b.serviceType || "") : "",   // what they typed, shown in the Summary pop-up (cut there if long)
       status: b.status,
       displayStatus: displayStatusOf(b, reportNow),
       location: b.location,

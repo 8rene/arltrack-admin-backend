@@ -513,7 +513,9 @@ export const getAllBookings = async (statusFilter) => {
       driverID:         b.driverID || null,
       driverName:       b.driverID ? (driverMap[b.driverID]?.customerName || "—") : null,
       driverPhone:      b.driverID ? (driverMap[b.driverID]?.phone || "—") : null,
-      serviceTypeName:  serviceTypeMap[b.serviceTypeID] || "—",
+      // "Others": no serviceTypeID, the customer typed their own text into bookings.serviceType
+      serviceTypeName:  serviceTypeMap[b.serviceTypeID] || (typeof b.serviceType === "string" && b.serviceType.trim() ? "Others" : "—"),
+      serviceTypeOther: !b.serviceTypeID && typeof b.serviceType === "string" ? b.serviceType.trim() : "",
       // T&C the customer agreed to. termsVersionID + termsAcceptedAt are already on `b`.
       // termsViewID is what /terms?version=<id> opens: the termsVersions doc ID.
       // termsVersionNumber is the readable 1.00 / 1.01.
