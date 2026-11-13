@@ -12,19 +12,19 @@ import { db } from "../../config/firebaseConnection/firebase.js";
 //
 //   Two sources, the more recent event wins:
 //     - the car's latest inspection: a part it lists as Damaged / Stolen / Missing is flagged
-//     - Completed maintenance jobs on that car that cover the part and are not older than that
-//       inspection (same booking as the inspection, or dated on or after its day — or any
-//       Completed job when the car has no inspection at all). If several do, the MOST RECENT one
-//       decides: its "After" condition "Good" fixes the part; "Damaged" leaves it flagged — or
+//     - Completed maintenance jobs on that car that cover the part and were saved (completed) AFTER
+//       that inspection was recorded — or any Completed job when the car has no inspection at all.
+//       The trip / booking date and the job's scheduled date do not matter: whichever happened LAST
+//       wins. If several jobs do, the MOST RECENTLY saved one decides: its "After" condition "Good" fixes the part; "Damaged" leaves it flagged — or
 //       flags it, when the job itself found the part damaged and no inspection had.
 //   A part the inspection flagged as Stolen / Missing keeps that status while a job leaves it
 //   Damaged; a part only the job found is "Damaged". Every other part is "Good".
 //
 // "Latest inspection" per car = its newest after-trip record, else its newest
 // before-trip record. This is the same rule as the frontend's
-// src/utils/damagedParts.js — keep the two in step. Days are compared in
-// Philippine time (UTC+8): an inspection is stamped with the real moment while a
-// job's date is just a day.
+// src/utils/damagedParts.js — keep the two in step. An inspection is stamped with the
+// real moment it was saved; a job's "done" moment is when it was last saved (updatedAt),
+// falling back to its date for old records that have none.
 //
 // The inspection records themselves are history and are never edited by this.
 //
@@ -81,13 +81,11 @@ export const getUnresolvedDamage = async (carID) => {
     for (const job of jobs) {
       const entry = (job.partsAddressed || []).find((e) => e?.carPartID === carPartID);
       if (!entry) continue;
-      const jobMs = toJSDate(job.maintenanceDate)?.getTime() ?? 0;
-      const sameBooking = rec && job.bookingID && rec.data.bookingID && job.bookingID === rec.data.bookingID;
-      if (rec && !sameBooking && !(jobMs > 0 && phDay(jobMs) >= phDay(rec.ms))) continue;
-      const updatedMs = toJSDate(job.updatedAt)?.getTime() ?? 0;
-      if (!latest || jobMs > latest.jobMs || (jobMs === latest.jobMs && updatedMs >= latest.updatedMs)) {
-        latest = { entry, jobMs, updatedMs };
-      }
+      // When the job was done = when it was last saved (a job's own date has no time of day). Whichever happened
+      // last wins: a job saved BEFORE the inspection was recorded can't have fixed what the inspection found.
+      const doneMs = toJSDate(job.updatedAt)?.getTime() || toJSDate(job.maintenanceDate)?.getTime() || 0;
+      if (rec && doneMs < rec.ms) continue;
+      if (!latest || doneMs >= latest.doneMs) latest = { entry, doneMs };
     }
     return latest;
   };
