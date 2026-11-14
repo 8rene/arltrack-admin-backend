@@ -1,4 +1,4 @@
-import { buildReceipt, buildStatement, emailLimiter, emailKeyFor } from "../../services/receipts/receipt.service.js";
+import { buildReceipt, buildStatement, emailLimiter } from "../../services/receipts/receipt.service.js";
 import { sendReceiptEmail, sendStatementEmail } from "../../services/receipts/receiptEmail.service.js";
 import { auditSafe } from "../../services/auditLogs/auditLogs.service.js";
 
@@ -41,9 +41,8 @@ export const emailReceipt = async (req, res) => {
 
     // One shared limit (staff AND the customer's own button): claimed in a transaction BEFORE sending so two quick
     // requests cannot both pass; given back if the send fails.
-    const key = emailKeyFor.receipt(receipt.receiptNo);
-    const slot = await emailLimiter.claim(key, actorUid(req), {
-      type: receipt.kind, bookingID: receipt.booking?.bookingID, receiptNo: receipt.receiptNo,
+    const slot = await emailLimiter.claim(receipt.receiptNo, actorUid(req), {
+      type: receipt.kind, bookingID: receipt.booking?.bookingID, paymentEntryID: receipt.entryID,
     });
     if (!slot.ok) {
       return res.status(429).json({ success: false, retryAfterSeconds: slot.wait,
@@ -55,7 +54,7 @@ export const emailReceipt = async (req, res) => {
     try { sent = await sendReceiptEmail({ receipt, toEmail: receipt._email }); }
     catch (err) { sent = { success: false, error: err.message }; }
     if (!sent.success) {
-      await emailLimiter.release(key, slot.previous);
+      await emailLimiter.release(slot.id, slot.previous);
       console.error("[RECEIPT] email failed:", sent.error);
       return res.status(502).json({ success: false, message: "Couldn't send the email. Please try again in a bit." });
     }
@@ -110,8 +109,8 @@ export const emailStatement = async (req, res) => {
       return res.status(422).json({ success: false, message: "This customer has no email address on their account." });
     }
 
-    const key = emailKeyFor.statement(statement.booking.bookingID);
-    const slot = await emailLimiter.claim(key, actorUid(req), {
+    // a statement is found by its printed number too (BS-..., stored in receiptNo)
+    const slot = await emailLimiter.claim(statement.statementNo, actorUid(req), {
       type: "statement", bookingID: statement.booking.bookingID,
     });
     if (!slot.ok) {
@@ -124,7 +123,7 @@ export const emailStatement = async (req, res) => {
     try { sent = await sendStatementEmail({ statement, toEmail: statement._email }); }
     catch (err) { sent = { success: false, error: err.message }; }
     if (!sent.success) {
-      await emailLimiter.release(key, slot.previous);
+      await emailLimiter.release(slot.id, slot.previous);
       console.error("[STATEMENT] email failed:", sent.error);
       return res.status(502).json({ success: false, message: "Couldn't send the email. Please try again in a bit." });
     }
